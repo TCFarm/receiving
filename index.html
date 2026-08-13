@@ -100,7 +100,17 @@
   </div>
 
   <div id="app" style="display:none">
-    <div class="scanbox" id="scanbox">
+    <div class="scanbox" id="scanbox" style="border-color:var(--line)">
+      <label class="big" for="po">Delivery / PO number — set once, applies to every case</label>
+      <input id="po" style="width:100%;font-family:var(--mono);font-size:18px;padding:11px;
+             border:1px solid var(--line);border-radius:4px;background:var(--ground);color:var(--ink)"
+             placeholder="e.g. Kehe-8944078   (scan or type; leave blank if unknown)"
+             aria-label="Delivery or PO number">
+      <div class="hint">Take it off the KEHE paperwork. Without it these scans cannot be matched
+        to the receipt in Finale.</div>
+    </div>
+
+    <div class="scanbox" id="scanbox2">
       <label class="big" for="scan">Scan case label</label>
       <input id="scan" autocomplete="off" autocapitalize="off" spellcheck="false"
              placeholder="ready" aria-label="Scan case label">
@@ -361,7 +371,7 @@ function handle(raw){
   if(!prod) return prompt_("stop","Unknown UPC",
     `<span class="num">${upc}</span> is not in the catalog. Set the product up first, or check you scanned the right label.`);
 
-  pending={upc,prod,lot:ais["10"]||"",best:ais["17"]||ais["15"]||null,
+  pending={upc,prod,gtin:gtin||"",lot:ais["10"]||"",best:ais["17"]||ais["15"]||null,
            source:(ais["17"]||ais["15"])?"gs1":"manual"};
   if(prod.cls==="Frozen" && flags[prod.sku]===undefined) return askFlag();
   if(!pending.best) return askDate();
@@ -405,8 +415,11 @@ function commit(){
      doubles its assumed shelf life and the item dates out. Shortest wins. */
   const cls=p.prod.cls||"Refrigerated";
   const unknownCls=!p.prod.cls;
+  /* Units per case come from the KEHE case pack (57% of the catalog). Unknown
+     packs stay null and show as a tappable “?” — the ledger needs units per
+     best-by date, and a wrong guess is worse than a blank we can fill later. */
   const row={ ...p, cls, unknownCls, soft: cls==="Frozen" && flags[p.prod.sku]===false,
-              units:null, saved:"queued", id:null, n:rows.length+1 };
+              units: (p.prod.pack ?? null), saved:"queued", id:null, n:rows.length+1 };
   rows.unshift(row); queue++;
   clearPrompt(); render(); flash(row);
   save(row);
@@ -418,8 +431,8 @@ async function save(row){
      value is SILENTLY DISCARDED — the row saves looking fine and the column
      is empty, which is the worst possible failure here. */
   const v={ upc:row.upc, sku:row.prod.sku, gtin14:row.gtin||"", best_by:row.best,
-            lot:row.lot||"", units:row.units||0, source:row.source,
-            operator:account, po_ref:"", device };
+            lot:row.lot||"", units:row.units ?? 0, source:row.source,
+            operator:account, po_ref:(($("po")||{}).value||"").trim(), device };
   const fields={ Title: `${row.prod.sku} ${row.best}` };
   for(const k of REQUIRED) fields[FIELD[k]] = v[k];
   for(let attempt=0; attempt<4; attempt++){
@@ -438,6 +451,15 @@ async function save(row){
   }
 }
 
+async function patchUnits(row){
+  /* A row already in SharePoint gets its units corrected in place, so a
+     late fix is not lost. */
+  try{
+    await graph(`/sites/${siteId}/lists/${listId}/items/${row.id}/fields`,
+      {method:"PATCH", body: JSON.stringify({[FIELD.units]: row.units})});
+  }catch(e){ row.err="units not updated: "+e.message; render(); }
+}
+
 /* ---------- UI ---------- */
 function flash(r){
   $("lastArea").innerHTML=`<div class="last"><div class="nm">✓ ${esc(r.prod.name)}</div>
@@ -454,6 +476,15 @@ function prompt_(kind,title,body,actions){
 function clearPrompt(){ $("promptArea").innerHTML=""; $("scan").value=""; $("scan").focus(); }
 
 document.addEventListener("click",e=>{
+  const u=e.target.closest(".unitcell");
+  if(u){
+    const row=rows.find(r=>String(r.n)===u.dataset.n); if(!row) return;
+    const val=window.prompt(`Units in this case of ${row.prod.name}?`, row.units ?? "");
+    if(val===null) return;
+    const n=parseInt(val,10);
+    if(!isNaN(n) && n>0){ row.units=n; render(); if(row.id) patchUnits(row); }
+    return;
+  }
   const f=e.target.closest("[data-flag]");
   if(f && pending){ flags[pending.prod.sku]= f.dataset.flag==="yes";
     if(!pending.best) return askDate(); return commit(); }
@@ -474,7 +505,9 @@ function render(){
         ${r.soft?'<span class="tag t-man">soft date</span>':""}
         ${r.unknownCls?'<span class="tag t-q">no storage class — assumed 14d</span>':""}</td>
       <td class="num">${r.best}<div style="font-size:11px;color:var(--ink-3)">order by ${addDays(r.best,-6)}</div></td>
-      <td class="num">${r.units??"—"}</td>
+      <td class="num"><span class="unitcell" data-n="${r.n}"
+          style="cursor:pointer;border-bottom:1px dashed var(--ink-3)"
+          title="tap to correct">${r.units ?? "?"}</span></td>
       <td><span class="tag ${r.source==="gs1"?"t-gs1":"t-man"}">${r.source==="gs1"?"GS1":"keyed"}</span></td>
       <td><span class="tag ${cls}">${r.saved}</span>${r.err&&r.saved==="FAILED"?`<div style="font-size:11px;color:var(--stop)">${esc(r.err)}</div>`:""}</td>
     </tr>`;}).join("");
