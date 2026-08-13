@@ -1,0 +1,506 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>TC Farm — Receiving</title>
+<style>
+  :root{
+    --ink:#101c18; --ink-2:#3c4f48; --ink-3:#6d8079;
+    --ground:#f4f7f5; --card:#fff; --line:#dbe4df; --line-2:#eef3f0;
+    --go:#0b6e4f; --go-soft:#e2f1ea;
+    --wait:#a8620a; --wait-soft:#fdf0dc;
+    --stop:#9e2b20; --stop-soft:#fae4e1;
+    --mono: ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    --sans: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{--ink:#e4ece8;--ink-2:#a6b6b0;--ink-3:#7a8b85;--ground:#0b1310;--card:#131e1a;
+      --line:#26332e;--line-2:#1a2521;--go:#48bf94;--go-soft:#0f2f24;
+      --wait:#e0a24a;--wait-soft:#312413;--stop:#e0705f;--stop-soft:#331916;}
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{background:var(--ground);color:var(--ink);font-family:var(--sans);font-size:17px;line-height:1.5}
+  .wrap{max-width:900px;margin:0 auto;padding:16px 14px 60px}
+  .num{font-family:var(--mono);font-variant-numeric:tabular-nums}
+
+  .bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+       border-bottom:2px solid var(--ink);padding-bottom:10px;margin-bottom:14px}
+  .bar h1{font-size:19px;margin:0;font-weight:700;flex:1}
+  .who{font-size:12.5px;color:var(--ink-3)}
+  .dot{width:9px;height:9px;border-radius:50%;display:inline-block;background:var(--stop)}
+  .dot.ok{background:var(--go)}
+
+  button{font-family:var(--sans);font-size:15px;padding:10px 16px;border:1px solid var(--line);
+         background:var(--card);color:var(--ink);border-radius:4px;cursor:pointer;min-height:44px}
+  button.primary{background:var(--go);color:#fff;border-color:var(--go);font-weight:700}
+  button.danger{color:var(--stop);border-color:var(--stop)}
+  button:disabled{opacity:.45;cursor:not-allowed}
+
+  .scanbox{background:var(--card);border:2px solid var(--go);border-radius:5px;padding:14px 16px;margin-bottom:14px}
+  .scanbox.off{border-color:var(--line);opacity:.6}
+  label.big{display:block;font-size:11px;letter-spacing:.1em;text-transform:uppercase;
+            color:var(--ink-3);font-weight:700;margin-bottom:7px}
+  #scan{width:100%;font-family:var(--mono);font-size:23px;padding:14px;border:1px solid var(--line);
+        border-radius:4px;background:var(--ground);color:var(--ink);min-height:56px}
+  .hint{font-size:12.5px;color:var(--ink-3);margin-top:7px}
+
+  .prompt{border-left:5px solid var(--wait);background:var(--wait-soft);padding:15px 17px;
+          border-radius:0 4px 4px 0;margin-bottom:14px}
+  .prompt.stop{border-left-color:var(--stop);background:var(--stop-soft)}
+  .prompt h2{font-size:18px;margin:0 0 6px;font-weight:700}
+  .prompt p{margin:0 0 11px;font-size:14.5px;color:var(--ink-2)}
+  .dateRow{display:flex;gap:11px;flex-wrap:wrap;align-items:center}
+  .dateRow input{font-family:var(--mono);font-size:22px;padding:11px 13px;border:1px solid var(--line);
+                 border-radius:4px;background:var(--card);color:var(--ink);min-height:52px}
+  .dateRow input[type=text]{width:170px}
+  .dateRow input[type=date]{min-width:200px}
+  .or{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);font-weight:700}
+
+  .last{background:var(--go-soft);border:1px solid var(--go);border-radius:5px;padding:13px 16px;margin-bottom:14px}
+  .last .nm{font-weight:700;font-size:17px}
+  .last .meta{font-family:var(--mono);font-size:12.5px;color:var(--ink-2);margin-top:4px}
+
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(105px,1fr));gap:1px;
+         background:var(--line);border:1px solid var(--line);border-radius:4px;margin-bottom:14px}
+  .stat{background:var(--card);padding:11px 13px}
+  .stat .l{font-size:10px;letter-spacing:.07em;text-transform:uppercase;color:var(--ink-3);font-weight:700}
+  .stat .v{font-family:var(--mono);font-size:21px;font-weight:700;margin-top:2px}
+  .stat.bad .v{color:var(--stop)}
+
+  .tw{overflow-x:auto;border:1px solid var(--line);border-radius:4px;background:var(--card)}
+  table{border-collapse:collapse;width:100%;min-width:600px;font-size:13.5px}
+  th{text-align:left;font-size:10px;letter-spacing:.07em;text-transform:uppercase;color:var(--ink-3);
+     font-weight:700;padding:9px;border-bottom:1px solid var(--line);white-space:nowrap}
+  td{padding:9px;border-bottom:1px solid var(--line-2);vertical-align:top}
+  .tag{display:inline-block;font-size:10px;letter-spacing:.04em;text-transform:uppercase;
+       font-weight:700;padding:2px 6px;border-radius:2px;white-space:nowrap}
+  .t-gs1{background:var(--go-soft);color:var(--go)}
+  .t-man{background:var(--wait-soft);color:var(--wait)}
+  .t-q{background:var(--stop-soft);color:var(--stop)}
+  .empty{padding:26px;text-align:center;color:var(--ink-3)}
+  .foot{font-size:12px;color:var(--ink-3);margin-top:18px}
+  .gate{background:var(--card);border:1px solid var(--line);border-radius:5px;padding:26px;text-align:center}
+  .gate p{color:var(--ink-2);font-size:15px;max-width:52ch;margin:0 auto 18px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="bar">
+    <span class="dot" id="dot"></span>
+    <h1>Receiving — best by</h1>
+    <span class="who" id="who"></span>
+    <button id="signout" style="display:none;font-size:13px;padding:6px 11px;min-height:0">Sign out</button>
+  </div>
+
+  <div id="gate" class="gate">
+    <p id="gateMsg">Sign in with your TC Farm account to start scanning.</p>
+    <button class="primary" id="signin">Sign in with Microsoft</button>
+  </div>
+
+  <div id="app" style="display:none">
+    <div class="scanbox" id="scanbox">
+      <label class="big" for="scan">Scan case label</label>
+      <input id="scan" autocomplete="off" autocapitalize="off" spellcheck="false"
+             placeholder="ready" aria-label="Scan case label">
+      <div class="hint">Scan the MANUFACTURER label — not the yellow KEHE pick label.</div>
+    </div>
+
+    <div id="promptArea"></div>
+    <div id="lastArea"></div>
+    <div class="stats" id="stats"></div>
+
+    <div class="tw">
+      <table>
+        <thead><tr><th>Product</th><th>Best by</th><th>Units</th><th>Src</th><th>Saved</th></tr></thead>
+        <tbody id="tb"></tbody>
+      </table>
+    </div>
+    <div id="empty" class="empty">Nothing scanned yet.</div>
+    <p class="foot" id="foot"></p>
+  </div>
+</div>
+
+<script>
+"use strict";
+/* ============================================================================
+   TC Farm receiving — best-by capture.
+   Auth: OAuth2 authorization-code + PKCE, hand-rolled. No MSAL, no CDN, no
+   build step, no client secret. One file that works on GitHub Pages and on
+   localhost alike.
+   Storage: Microsoft Graph → the "BB Receipts" SharePoint list.
+   ========================================================================= */
+
+const CFG = {
+  clientId: "4a5939ef-bb89-4629-8a95-007509bb11a5",
+  tenantId: "c0f23c54-f515-4e2e-8aef-d3afb1ae34d0",
+  hostname: "tcfarm0.sharepoint.com",
+  sitePath: "/sites/tc.farm",
+  listName: "BB Receipts",
+  scopes: ["https://graph.microsoft.com/Sites.ReadWrite.All", "offline_access", "openid", "profile"]
+};
+const AUTH = `https://login.microsoftonline.com/${CFG.tenantId}/oauth2/v2.0`;
+const GRAPH = "https://graph.microsoft.com/v1.0";
+
+/* Columns the list must have. Startup FAILS LOUDLY naming any that are
+   missing — better than discovering it after a delivery's worth of scans
+   silently dropped fields. */
+const REQUIRED = ["upc","sku","gtin14","best_by","lot","units","source","operator","po_ref","device"];
+
+/* ---------- tiny helpers ---------- */
+const $ = id => document.getElementById(id);
+const esc = s => String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const b64url = buf => btoa(String.fromCharCode(...new Uint8Array(buf)))
+  .replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
+async function sha256(s){ return crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)); }
+function rand(n){ const a=new Uint8Array(n); crypto.getRandomValues(a); return b64url(a.buffer); }
+
+/* ---------- GS1 parsing (ported from gs1_case_label.py) ---------- */
+const FIXED={"00":18,"01":14,"02":14,"11":6,"12":6,"13":6,"15":6,"16":6,"17":6,"20":2};
+const VAR={"10":20,"21":20,"30":8,"37":8};
+const GS=String.fromCharCode(29);
+
+function checkDigit(body){
+  let t=0;
+  for(let i=0;i<body.length;i++){ t += (+body[body.length-1-i]) * (i%2===0?3:1); }
+  return String((10-(t%10))%10);
+}
+/* GTIN-14 → the CONSUMER barcode our catalog is keyed on.
+   Returns a 12-digit UPC-A, or a 13-digit EAN-13 for imported goods.
+   ⚠️ EAN-13 is not an edge case here: 5 live products use it (the NA wine
+   range and imported produce). An earlier version returned null for them,
+   which read as "not a real product" and blocked the scan entirely.
+   ⛔ For UPC-A the check digit is RECOMPUTED over the 11-digit body — the
+   GTIN's own check digit belongs to the 14-digit form and reusing it
+   yields a plausible number that matches nothing. */
+function gtin14ToConsumer(g){
+  const d=(g||"").replace(/\D/g,"");
+  if(d.length!==14) return null;
+  const body=d.slice(1);                 // drop the packaging indicator → GTIN-13
+  if(body[0]==="0"){                     // a UPC-A lives inside as 0 + 11 + check
+    const b=body.slice(1,-1);
+    return b+checkDigit(b);
+  }
+  return body;                           // genuine EAN-13, already complete
+}
+const eom=(y,m)=>new Date(y,m,0).getDate();
+const iso=(y,m,d)=>`${y}-${String(m).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
+function parseGs1Date(v){
+  const s=String(v||"").trim(); if(!s) return null;
+  const m=s.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{2,4})$/);
+  if(m){ let mm=+m[1],dd=+m[2],yy=+m[3]; if(yy<100) yy+=2000;
+    if(mm<1||mm>12) return null; return iso(yy,mm,dd||eom(yy,mm)); }
+  const d=s.replace(/\D/g,""); if(d.length!==6) return null;
+  let yy=2000+ +d.slice(0,2), mm=+d.slice(2,4), dd=+d.slice(4,6);
+  if(mm<1||mm>12) return null;
+  if(yy-new Date().getFullYear()>50) yy-=100;
+  return iso(yy,mm,dd||eom(yy,mm));      // DD=00 means end of month
+}
+function normalize(a){
+  const o={...a};
+  for(const ai of ["17","15","11","12","13","16"]) if(o[ai]){ const p=parseGs1Date(o[ai]); if(p) o[ai]=p; }
+  return o;
+}
+function parseElementString(scan){
+  let s=(scan||"").trim(); if(!s) return {};
+  s=s.replace(/\]C1/g,"");
+  if(s.includes("(")){
+    const out={}; let m; const re=/\((\d{2,4})\)\s*([^(]*)/g;
+    while((m=re.exec(s))) out[m[1]]=m[2].trim();
+    return normalize(out);
+  }
+  const out={}; let i=0;
+  while(i<s.length){
+    if(s[i]===GS){ i++; continue; }
+    let ai=null;
+    for(const w of [2,3,4]){ const c=s.slice(i,i+w); if(FIXED[c]||VAR[c]){ ai=c; break; } }
+    if(!ai) break;
+    i+=ai.length;
+    if(FIXED[ai]){ out[ai]=s.slice(i,i+FIXED[ai]); i+=FIXED[ai]; }
+    else { let e=s.indexOf(GS,i); if(e<0) e=s.length; out[ai]=s.slice(i,e); i=e; }
+  }
+  return normalize(out);
+}
+
+/* ---------- auth: authorization code + PKCE ---------- */
+const store = sessionStorage;
+let token=null, tokenExp=0, refreshTok=null, account="";
+
+async function beginLogin(){
+  const verifier = rand(64);
+  const challenge = b64url(await sha256(verifier));
+  const state = rand(16);
+  store.setItem("pkce_v", verifier);
+  store.setItem("pkce_s", state);
+  const p = new URLSearchParams({
+    client_id: CFG.clientId, response_type: "code",
+    redirect_uri: location.origin + location.pathname,
+    response_mode: "query", scope: CFG.scopes.join(" "),
+    code_challenge: challenge, code_challenge_method: "S256", state
+  });
+  location.assign(`${AUTH}/authorize?${p}`);
+}
+
+async function completeLogin(){
+  const q = new URLSearchParams(location.search);
+  const code = q.get("code");
+  if(q.get("error")) throw new Error(`${q.get("error")}: ${q.get("error_description")||""}`);
+  if(!code) return false;
+  if(q.get("state") !== store.getItem("pkce_s")) throw new Error("state mismatch — restart sign-in");
+  const verifier = store.getItem("pkce_v");
+  const body = new URLSearchParams({
+    client_id: CFG.clientId, grant_type: "authorization_code", code,
+    redirect_uri: location.origin + location.pathname, code_verifier: verifier
+  });
+  const r = await fetch(`${AUTH}/token`, {
+    method:"POST", headers:{"Content-Type":"application/x-www-form-urlencoded"}, body});
+  const j = await r.json();
+  if(!r.ok) throw new Error(j.error_description || j.error || "token exchange failed");
+  setToken(j);
+  history.replaceState({}, "", location.pathname);   // strip ?code= from the URL
+  return true;
+}
+
+function setToken(j){
+  token = j.access_token;
+  tokenExp = Date.now() + (j.expires_in||3600)*1000 - 60000;   // refresh a minute early
+  if(j.refresh_token) refreshTok = j.refresh_token;
+  try{ account = JSON.parse(atob(j.id_token.split(".")[1])).preferred_username || ""; }catch(_){}
+  store.setItem("tok", JSON.stringify({t:token,e:tokenExp,r:refreshTok,a:account}));
+}
+function loadToken(){
+  try{ const s=JSON.parse(store.getItem("tok")||"null"); if(!s) return false;
+    token=s.t; tokenExp=s.e; refreshTok=s.r; account=s.a||""; return Date.now()<tokenExp; }catch(_){ return false; }
+}
+async function getToken(){
+  if(token && Date.now() < tokenExp) return token;
+  if(refreshTok){
+    const body=new URLSearchParams({client_id:CFG.clientId,grant_type:"refresh_token",
+      refresh_token:refreshTok,scope:CFG.scopes.join(" ")});
+    const r=await fetch(`${AUTH}/token`,{method:"POST",
+      headers:{"Content-Type":"application/x-www-form-urlencoded"},body});
+    const j=await r.json();
+    if(r.ok){ setToken(j); return token; }
+  }
+  throw new Error("session expired — sign in again");
+}
+
+async function graph(path, opts={}){
+  const t = await getToken();
+  const r = await fetch(GRAPH+path, {...opts,
+    headers:{...(opts.headers||{}), Authorization:"Bearer "+t, "Content-Type":"application/json"}});
+  const txt = await r.text();
+  let j=null; try{ j = txt ? JSON.parse(txt) : null; }catch(_){}
+  if(!r.ok) throw new Error((j&&j.error&&j.error.message) || `Graph ${r.status}`);
+  return j;
+}
+
+/* ---------- startup: resolve site + list, VALIDATE columns ---------- */
+let siteId=null, listId=null, CATALOG={};
+
+async function bootstrap(){
+  const site = await graph(`/sites/${CFG.hostname}:${CFG.sitePath}`);
+  siteId = site.id;
+  const lists = await graph(`/sites/${siteId}/lists?$filter=displayName eq '${CFG.listName}'`);
+  if(!lists.value || !lists.value.length)
+    throw new Error(`List "${CFG.listName}" not found on ${CFG.sitePath}. Create it, then reload.`);
+  listId = lists.value[0].id;
+
+  const cols = await graph(`/sites/${siteId}/lists/${listId}/columns?$select=name,displayName`);
+  const have = new Set((cols.value||[]).map(c=>c.name));
+  const missing = REQUIRED.filter(c=>!have.has(c));
+  if(missing.length)
+    throw new Error(`The list is missing these columns: ${missing.join(", ")}. `+
+      `SharePoint internal names are case-sensitive and are fixed when a column is created — `+
+      `if you renamed one after creating it, the internal name did NOT change. `+
+      `Columns found: ${[...have].filter(n=>!n.startsWith("_")).join(", ")}`);
+
+  try{ CATALOG = await (await fetch("catalog.json",{cache:"no-cache"})).json(); }
+  catch(_){ CATALOG = {}; }
+}
+
+/* ---------- the scan flow ---------- */
+const GUARANTEE={Refrigerated:14,Dry:30,Frozen:30};
+const rows=[]; const flags={}; let pending=null; let queue=0;
+const device = (()=>{ let d=localStorage.getItem("dev"); if(!d){ d="t"+rand(3); localStorage.setItem("dev",d);} return d; })();
+
+function handle(raw){
+  const v=(raw||"").trim(); if(!v) return;
+  const ais=parseElementString(v);
+  let gtin=ais["01"]||ais["02"]||null, upc=null, gtinOk=false;
+  if(gtin){
+    const d=gtin.replace(/\D/g,"");
+    gtinOk = d.length===14 && checkDigit(d.slice(0,-1))===d.slice(-1);
+    if(gtinOk) upc=gtin14ToConsumer(gtin);
+  } else {
+    const d=v.replace(/\D/g,"");
+    if(d.length===12 || d.length===13) upc=d;          // UPC-A or EAN-13, scanned bare
+    else if(d.length===14){ gtin=d; gtinOk=checkDigit(d.slice(0,-1))===d.slice(-1);
+      if(gtinOk) upc=gtin14ToConsumer(d); }
+  }
+  if(gtin && !gtinOk) return prompt_("stop","Bad read — rescan",
+    `GTIN <span class="num">${esc(gtin)}</span> fails its own check digit. Nothing was recorded.`);
+  if(!upc) return prompt_("stop","Unrecognised code",
+    `No GTIN or UPC in <span class="num">${esc(v.slice(0,44))}</span>. If this is the yellow KEHE pick label, scan the manufacturer label instead — its date is not the best-by.`);
+
+  const prod = CATALOG[upc];
+  if(!prod) return prompt_("stop","Unknown UPC",
+    `<span class="num">${upc}</span> is not in the catalog. Set the product up first, or check you scanned the right label.`);
+
+  pending={upc,prod,lot:ais["10"]||"",best:ais["17"]||ais["15"]||null,
+           source:(ais["17"]||ais["15"])?"gs1":"manual"};
+  if(prod.cls==="Frozen" && flags[prod.sku]===undefined) return askFlag();
+  if(!pending.best) return askDate();
+  commit();
+}
+
+function askFlag(){
+  prompt_("", "Is the best-by date printed on the PACKAGE?",
+    `<strong>${esc(pending.prod.name)}</strong> — open a case and look at the retail package, not the
+     shipping case. Asked once per item.<br><br>Case only = we sell it down but never pull it.
+     On the package = a hard deadline, like dairy.`,
+    `<button class="primary" data-flag="yes">Yes — on the package</button>
+     <button data-flag="no">No — case only</button>`);
+}
+function askDate(){
+  prompt_("", "No date on the label — enter it",
+    `<strong>${esc(pending.prod.name)}</strong> — tap for a calendar, or type six digits MMDDYY.`,
+    `<div class="dateRow">
+       <input id="pick" type="date" aria-label="Pick best by date">
+       <span class="or">or</span>
+       <input id="typed" type="text" class="num" inputmode="numeric" maxlength="6"
+              placeholder="MMDDYY" aria-label="Type best by as MMDDYY">
+       <button class="primary" id="dok">Save</button>
+     </div>`);
+  setTimeout(()=>{
+    const el=$("typed"), pick=$("pick");
+    if(el){ el.focus();
+      el.addEventListener("keydown",e=>{ if(e.key==="Enter") $("dok").click(); });
+      el.addEventListener("input",()=>{ if(pick) pick.value=""; }); }
+    if(pick) pick.addEventListener("change",()=>{ if(el) el.value=""; $("dok").click(); });
+  },30);
+}
+
+function commit(){
+  const p=pending; pending=null;
+  /* Storage class comes from __Storage_Location, falling back to the SKU
+     prefix — R=Refrigerated, D=Dry, F=Frozen (Jack, 2026-08-11). That
+     resolves every product in the current catalog, so this default should
+     never fire. If it ever does: ⛔ do NOT default to Dry. Dry carries the
+     LONGEST guarantee (30d), and applying it to something refrigerated
+     doubles its assumed shelf life and the item dates out. Shortest wins. */
+  const cls=p.prod.cls||"Refrigerated";
+  const unknownCls=!p.prod.cls;
+  const row={ ...p, cls, unknownCls, soft: cls==="Frozen" && flags[p.prod.sku]===false,
+              units:null, saved:"queued", id:null, n:rows.length+1 };
+  rows.unshift(row); queue++;
+  clearPrompt(); render(); flash(row);
+  save(row);
+}
+
+async function save(row){
+  const fields={
+    Title: `${row.prod.sku} ${row.best}`,
+    upc: row.upc, sku: row.prod.sku, gtin14: row.gtin||"",
+    best_by: row.best, lot: row.lot||"", units: row.units||0,
+    source: row.source, operator: account, po_ref: "", device
+  };
+  for(let attempt=0; attempt<4; attempt++){
+    try{
+      const created = await graph(`/sites/${siteId}/lists/${listId}/items`,
+        {method:"POST", body: JSON.stringify({fields})});
+      /* ⛔ Only a returned id counts as saved. A 2xx with no id is NOT success. */
+      if(!created || !created.id) throw new Error("no item id returned");
+      row.saved="saved"; row.id=created.id; queue--;
+      render(); return;
+    }catch(e){
+      row.err = e.message;
+      if(attempt===3){ row.saved="FAILED"; queue--; render(); return; }
+      await new Promise(r=>setTimeout(r, 600*Math.pow(2,attempt)));
+    }
+  }
+}
+
+/* ---------- UI ---------- */
+function flash(r){
+  $("lastArea").innerHTML=`<div class="last"><div class="nm">✓ ${esc(r.prod.name)}</div>
+    <div class="meta">${r.upc} · best by ${r.best} · order by ${addDays(r.best,-6)}${r.lot?" · lot "+esc(r.lot):""}</div></div>`;
+}
+function addDays(s,n){ const [y,m,d]=s.split("-").map(Number);
+  const dt=new Date(y,m-1,d+n); return iso(dt.getFullYear(),dt.getMonth()+1,dt.getDate()); }
+
+function prompt_(kind,title,body,actions){
+  $("promptArea").innerHTML=`<div class="prompt ${kind}"><h2>${title}</h2><p>${body}</p>${actions||""}</div>`;
+  $("scan").blur();
+  if(!actions) setTimeout(clearPrompt, 2800);
+}
+function clearPrompt(){ $("promptArea").innerHTML=""; $("scan").value=""; $("scan").focus(); }
+
+document.addEventListener("click",e=>{
+  const f=e.target.closest("[data-flag]");
+  if(f && pending){ flags[pending.prod.sku]= f.dataset.flag==="yes";
+    if(!pending.best) return askDate(); return commit(); }
+  if(e.target.id==="dok" && pending){
+    const picked=($("pick")||{}).value||"", typed=($("typed")||{}).value||"";
+    let d = picked || (typed ? parseGs1Date(typed.length===6? typed.slice(4,6)+typed.slice(0,4) : typed) : null);
+    if(!d){ const el=$("typed"); if(el) el.style.borderColor="var(--stop)"; return; }
+    pending.best=d; pending.source="manual"; commit();
+  }
+});
+
+function render(){
+  $("empty").hidden = rows.length>0;
+  $("tb").innerHTML = rows.map(r=>{
+    const cls = r.saved==="saved"?"t-gs1":(r.saved==="FAILED"?"t-q":"t-man");
+    return `<tr>
+      <td>${esc(r.prod.name)}<div class="num" style="font-size:11px;color:var(--ink-3)">${esc(r.prod.sku)} · ${r.upc}</div>
+        ${r.soft?'<span class="tag t-man">soft date</span>':""}
+        ${r.unknownCls?'<span class="tag t-q">no storage class — assumed 14d</span>':""}</td>
+      <td class="num">${r.best}<div style="font-size:11px;color:var(--ink-3)">order by ${addDays(r.best,-6)}</div></td>
+      <td class="num">${r.units??"—"}</td>
+      <td><span class="tag ${r.source==="gs1"?"t-gs1":"t-man"}">${r.source==="gs1"?"GS1":"keyed"}</span></td>
+      <td><span class="tag ${cls}">${r.saved}</span>${r.err&&r.saved==="FAILED"?`<div style="font-size:11px;color:var(--stop)">${esc(r.err)}</div>`:""}</td>
+    </tr>`;}).join("");
+  const failed = rows.filter(r=>r.saved==="FAILED").length;
+  const gs1 = rows.filter(r=>r.source==="gs1").length;
+  $("stats").innerHTML=[
+    ["Cases", rows.length, false],
+    ["Saved", rows.filter(r=>r.saved==="saved").length, false],
+    ["Unsaved", failed+queue, (failed+queue)>0],
+    ["No typing", rows.length? Math.round(gs1/rows.length*100)+"%":"—", false]
+  ].map(([l,v,bad])=>`<div class="stat${bad?" bad":""}"><div class="l">${l}</div><div class="v">${v}</div></div>`).join("");
+}
+
+/* ---------- boot ---------- */
+async function start(){
+  try{
+    const returned = await completeLogin();
+    if(!returned && !loadToken()){ $("gate").style.display=""; return; }
+    await bootstrap();
+    $("gate").style.display="none"; $("app").style.display="";
+    $("dot").className="dot ok"; $("who").textContent=account;
+    $("signout").style.display="";
+    $("scan").focus();
+    $("foot").textContent =
+      `Writing to “${CFG.listName}” on ${CFG.sitePath}. A row counts as saved only when SharePoint `+
+      `returns its id — anything still showing “queued” or “FAILED” did not save. Device ${device}.`;
+    render();
+  }catch(e){
+    $("gate").style.display="";
+    $("gateMsg").innerHTML=`<strong style="color:var(--stop)">${esc(e.message)}</strong>`;
+  }
+}
+$("signin").addEventListener("click", ()=>beginLogin().catch(e=>{
+  $("gateMsg").innerHTML=`<strong style="color:var(--stop)">${esc(e.message)}</strong>`;}));
+$("signout").addEventListener("click", ()=>{ store.clear(); location.reload(); });
+$("scan").addEventListener("keydown",e=>{
+  if(e.key==="Enter"){ e.preventDefault(); const v=$("scan").value; $("scan").value=""; handle(v); }});
+document.addEventListener("click",()=>{ if(!$("promptArea").innerHTML && $("app").style.display!=="none") $("scan").focus(); });
+window.addEventListener("beforeunload",e=>{
+  if(rows.some(r=>r.saved!=="saved")){ e.preventDefault(); e.returnValue=""; }});
+
+start();
+</script>
+</body>
+</html>
