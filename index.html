@@ -145,8 +145,16 @@ const GRAPH = "https://graph.microsoft.com/v1.0";
 
 /* Columns the list must have. Startup FAILS LOUDLY naming any that are
    missing — better than discovering it after a delivery's worth of scans
-   silently dropped fields. */
+   silently dropped fields.
+
+   ⚠️ MATCHED CASE-INSENSITIVELY, then written using the list's OWN internal
+   name. SharePoint fixes a column's internal name at creation from whatever
+   was typed, so acronyms naturally come out as "UPC"/"SKU" while the rest
+   come out lowercase — that is exactly what happened here on 2026-08-11.
+   Demanding one exact spelling would mean deleting and recreating live
+   columns for a purely cosmetic mismatch. FIELD holds the real names. */
 const REQUIRED = ["upc","sku","gtin14","best_by","lot","units","source","operator","po_ref","device"];
+let FIELD = {};   // expected-lowercase → the list's actual internal name
 
 /* ---------- tiny helpers ---------- */
 const $ = id => document.getElementById(id);
@@ -308,13 +316,18 @@ async function bootstrap(){
   listId = lists.value[0].id;
 
   const cols = await graph(`/sites/${siteId}/lists/${listId}/columns?$select=name,displayName`);
-  const have = new Set((cols.value||[]).map(c=>c.name));
-  const missing = REQUIRED.filter(c=>!have.has(c));
+  const byLower = new Map((cols.value||[]).map(c=>[c.name.toLowerCase(), c.name]));
+  FIELD = {};
+  const missing = [];
+  for(const want of REQUIRED){
+    const actual = byLower.get(want);          // case-insensitive match
+    if(actual) FIELD[want] = actual; else missing.push(want);
+  }
   if(missing.length)
     throw new Error(`The list is missing these columns: ${missing.join(", ")}. `+
-      `SharePoint internal names are case-sensitive and are fixed when a column is created — `+
-      `if you renamed one after creating it, the internal name did NOT change. `+
-      `Columns found: ${[...have].filter(n=>!n.startsWith("_")).join(", ")}`);
+      `Matching ignores capitalisation, so these are genuinely absent rather than `+
+      `differently cased. Columns found: `+
+      `${[...byLower.values()].filter(n=>!n.startsWith("_")).join(", ")}`);
 
   try{ CATALOG = await (await fetch("catalog.json",{cache:"no-cache"})).json(); }
   catch(_){ CATALOG = {}; }
@@ -400,12 +413,15 @@ function commit(){
 }
 
 async function save(row){
-  const fields={
-    Title: `${row.prod.sku} ${row.best}`,
-    upc: row.upc, sku: row.prod.sku, gtin14: row.gtin||"",
-    best_by: row.best, lot: row.lot||"", units: row.units||0,
-    source: row.source, operator: account, po_ref: "", device
-  };
+  /* Keyed through FIELD so the payload uses the list's own internal names
+     (e.g. "UPC" not "upc"). A mismatched key is accepted by Graph and the
+     value is SILENTLY DISCARDED — the row saves looking fine and the column
+     is empty, which is the worst possible failure here. */
+  const v={ upc:row.upc, sku:row.prod.sku, gtin14:row.gtin||"", best_by:row.best,
+            lot:row.lot||"", units:row.units||0, source:row.source,
+            operator:account, po_ref:"", device };
+  const fields={ Title: `${row.prod.sku} ${row.best}` };
+  for(const k of REQUIRED) fields[FIELD[k]] = v[k];
   for(let attempt=0; attempt<4; attempt++){
     try{
       const created = await graph(`/sites/${siteId}/lists/${listId}/items`,
