@@ -101,13 +101,13 @@
 
   <div id="app" style="display:none">
     <div class="scanbox" id="scanbox" style="border-color:var(--line)">
-      <label class="big" for="po">Delivery / PO number — set once, applies to every case</label>
+      <label class="big" for="po" id="poLabel">Delivery / PO number — optional</label>
       <input id="po" style="width:100%;font-family:var(--mono);font-size:18px;padding:11px;
              border:1px solid var(--line);border-radius:4px;background:var(--ground);color:var(--ink)"
-             placeholder="e.g. Kehe-8944078   (scan or type; leave blank if unknown)"
+             placeholder="leave blank — not needed"
              aria-label="Delivery or PO number">
-      <div class="hint">Take it off the KEHE paperwork. Without it these scans cannot be matched
-        to the receipt in Finale.</div>
+      <div class="hint" id="poHint">Skip this. Scans are matched to the KEHE receipt in Finale by
+        date and SKU — there is only one delivery a week, so the PO adds nothing.</div>
     </div>
 
     <div class="scanbox" id="scanbox2">
@@ -152,6 +152,20 @@ const CFG = {
 };
 const AUTH = `https://login.microsoftonline.com/${CFG.tenantId}/oauth2/v2.0`;
 const GRAPH = "https://graph.microsoft.com/v1.0";
+
+/* PO capture is OFF until this date (Jack, 2026-08-13). Receivers do not have
+   the paperwork in hand during the first tests, and asking for something they
+   cannot supply teaches them the page nags — the fastest way to lose a habit
+   before it forms.
+
+   ⭐ It is never BLOCKING, before or after. Reconciliation does not need it:
+   there is exactly ONE KEHE delivery a week, so the week's scans join to the
+   week's receipt in Finale on (sku, received date) with no PO number at all.
+   The field only ever saves a lookup. See docs/RECEIVING_DATE_CAPTURE.md §
+   "Reconciling scans to the receipt". */
+const PO_PROMPT_FROM = "2026-08-17";
+const poWanted = () => new Date().toISOString().slice(0,10) >= PO_PROMPT_FROM;
+const poVal = () => (($("po")||{}).value||"").trim();
 
 /* Columns the list must have. Startup FAILS LOUDLY naming any that are
    missing — better than discovering it after a delivery's worth of scans
@@ -345,7 +359,7 @@ async function bootstrap(){
 
 /* ---------- the scan flow ---------- */
 const GUARANTEE={Refrigerated:14,Dry:30,Frozen:30};
-const rows=[]; const flags={}; let pending=null; let queue=0;
+const rows=[]; const rejects=[]; const flags={}; let pending=null; let queue=0;
 const device = (()=>{ let d=localStorage.getItem("dev"); if(!d){ d="t"+rand(3); localStorage.setItem("dev",d);} return d; })();
 
 function handle(raw){
@@ -362,17 +376,29 @@ function handle(raw){
     else if(d.length===14){ gtin=d; gtinOk=checkDigit(d.slice(0,-1))===d.slice(-1);
       if(gtinOk) upc=gtin14ToConsumer(d); }
   }
-  if(gtin && !gtinOk) return prompt_("stop","Bad read — rescan",
-    `GTIN <span class="num">${esc(gtin)}</span> fails its own check digit. Nothing was recorded.`);
-  if(!upc) return prompt_("stop","Unrecognised code",
-    `No GTIN or UPC in <span class="num">${esc(v.slice(0,44))}</span>. If this is the yellow KEHE pick label, scan the manufacturer label instead — its date is not the best-by.`);
+  if(gtin && !gtinOk){ reject("BAD_CHECKDIGIT", v, "");
+    return prompt_("stop","Bad read — rescan",
+      `GTIN <span class="num">${esc(gtin)}</span> fails its own check digit. Nothing was recorded.`); }
+  if(!upc){ reject("UNREADABLE", v, "");
+    return prompt_("stop","Unrecognised code",
+      `No GTIN or UPC in <span class="num">${esc(v.slice(0,44))}</span>. If this is the yellow KEHE pick label, scan the manufacturer label instead — its date is not the best-by.`); }
 
   const prod = CATALOG[upc];
-  if(!prod) return prompt_("stop","Unknown UPC",
-    `<span class="num">${upc}</span> is not in the catalog. Set the product up first, or check you scanned the right label.`);
+  if(!prod){ reject("UNKNOWN_UPC", v, upc);
+    return prompt_("stop","Unknown UPC",
+      `<span class="num">${upc}</span> is not in the catalog. Set the case aside and carry on — we have recorded the code, so nobody needs to write it down.`); }
 
-  pending={upc,prod,gtin:gtin||"",lot:ais["10"]||"",best:ais["17"]||ais["15"]||null,
-           source:(ais["17"]||ais["15"])?"gs1":"manual"};
+  /* source answers "how often did the label do the work for us?" without
+     anyone tallying it (Jack, 2026-08-13):
+       gs1              → date came encoded in the barcode, zero typing
+       keyed_gs1nodate  → GS1-128 label, but it carried no (17)/(15) date
+       keyed_bare       → plain UPC barcode, no element string at all
+     The last two are different problems: the first is a supplier not encoding
+     dates, the second is a label format we cannot get dates from at all. */
+  const dated = ais["17"]||ais["15"];
+  const wasGs1 = !!(ais["01"]||ais["02"]);
+  pending={upc,prod,gtin:gtin||"",lot:ais["10"]||"",best:dated||null,
+           source: dated ? "gs1" : (wasGs1 ? "keyed_gs1nodate" : "keyed_bare")};
   if(prod.cls==="Frozen" && flags[prod.sku]===undefined) return askFlag();
   if(!pending.best) return askDate();
   commit();
@@ -432,7 +458,7 @@ async function save(row){
      is empty, which is the worst possible failure here. */
   const v={ upc:row.upc, sku:row.prod.sku, gtin14:row.gtin||"", best_by:row.best,
             lot:row.lot||"", units:row.units ?? 0, source:row.source,
-            operator:account, po_ref:(($("po")||{}).value||"").trim(), device };
+            operator:account, po_ref:poVal(), device };
   const fields={ Title: `${row.prod.sku} ${row.best}` };
   for(const k of REQUIRED) fields[FIELD[k]] = v[k];
   for(let attempt=0; attempt<4; attempt++){
@@ -448,6 +474,38 @@ async function save(row){
       if(attempt===3){ row.saved="FAILED"; queue--; render(); return; }
       await new Promise(r=>setTimeout(r, 600*Math.pow(2,attempt)));
     }
+  }
+}
+
+async function reject(kind, raw, upc){
+  /* Every scan the page REFUSED is written down (Jack, 2026-08-13). Nobody
+     is going to keep a tally on paper, so if the page does not record its own
+     failures we simply never learn the rate — and the reject rate is the
+     single number that says whether this workflow is viable.
+
+     Stored as an ordinary list row with a sentinel sku ("!UNKNOWN_UPC") so
+     the nightly drain excludes them from the ledger with  sku LIKE '!%'.
+     ⛔ These rows are NOT receipts. Anything counting units or dates must
+     filter them out or it will count rejects as inventory.
+
+     best_by is deliberately OMITTED rather than blanked: the column's type is
+     not ours to assume, and a real-looking date on a reject row is worse than
+     an absent one. If the list rejects the row for that reason we retry once
+     with an empty string, then give up quietly — telemetry must never
+     interrupt receiving. The on-screen counter is kept regardless, so even a
+     total write failure still leaves the number visible for a screenshot. */
+  rejects.push({kind, raw:String(raw||"").slice(0,60)});
+  render();
+  const base={ Title:"! "+kind };
+  base[FIELD.sku]="!"+kind;  base[FIELD.upc]=upc||"";
+  base[FIELD.gtin14]=String(raw||"").slice(0,60);
+  base[FIELD.lot]="";        base[FIELD.units]=0;
+  base[FIELD.source]="reject";
+  base[FIELD.operator]=account; base[FIELD.po_ref]=poVal(); base[FIELD.device]=device;
+  for(const variant of [base, {...base, [FIELD.best_by]:""}]){
+    try{ await graph(`/sites/${siteId}/lists/${listId}/items`,
+           {method:"POST", body:JSON.stringify({fields:variant})}); return; }
+    catch(_){}
   }
 }
 
@@ -492,7 +550,11 @@ document.addEventListener("click",e=>{
     const picked=($("pick")||{}).value||"", typed=($("typed")||{}).value||"";
     let d = picked || (typed ? parseGs1Date(typed.length===6? typed.slice(4,6)+typed.slice(0,4) : typed) : null);
     if(!d){ const el=$("typed"); if(el) el.style.borderColor="var(--stop)"; return; }
-    pending.best=d; pending.source="manual"; commit();
+    /* ⛔ Do NOT overwrite source here. It already records WHY typing was
+       needed (keyed_gs1nodate vs keyed_bare); flattening both to "manual"
+       throws away the only signal that separates a supplier who does not
+       encode dates from a label format that cannot carry one. */
+    pending.best=d; commit();
   }
 });
 
@@ -517,6 +579,9 @@ function render(){
     ["Cases", rows.length, false],
     ["Saved", rows.filter(r=>r.saved==="saved").length, false],
     ["Unsaved", failed+queue, (failed+queue)>0],
+    /* Not red: rejects are expected (yellow pick labels get scanned by
+       mistake) and colouring them as errors trains people to hide them. */
+    ["Not read", rejects.length, false],
     ["No typing", rows.length? Math.round(gs1/rows.length*100)+"%":"—", false]
   ].map(([l,v,bad])=>`<div class="stat${bad?" bad":""}"><div class="l">${l}</div><div class="v">${v}</div></div>`).join("");
 }
@@ -531,6 +596,13 @@ async function start(){
     $("dot").className="dot ok"; $("who").textContent=account;
     $("signout").style.display="";
     $("scan").focus();
+    if(poWanted()){
+      $("poLabel").textContent = "Delivery / PO number — set once, applies to every case";
+      $("po").placeholder = "e.g. Kehe-8944078   (scan or type; blank is fine)";
+      $("poHint").textContent =
+        "Off the KEHE paperwork if you have it to hand. Still optional — scans reconcile to the "+
+        "receipt in Finale without it; the number just saves a lookup.";
+    }
     $("foot").textContent =
       `Writing to “${CFG.listName}” on ${CFG.sitePath}. A row counts as saved only when SharePoint `+
       `returns its id — anything still showing “queued” or “FAILED” did not save. Device ${device}.`;
