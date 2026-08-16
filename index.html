@@ -476,6 +476,23 @@ async function bootstrap(){
 /* ---------- the scan flow ---------- */
 const GUARANTEE={Refrigerated:14,Dry:30,Frozen:30};
 const rows=[]; const rejects=[]; const flags={}; let pending=null; let queue=0;
+/* ⭐ CASE PACK LEARNED DURING THE SESSION (Jack, 2026-08-16).
+   Only 57% of the catalog has a KEHE case pack, and the first staff test proved
+   the old `?` placeholder is simply never tapped — 1 of 5 rows saved units=0.
+   So an unknown pack is now ASKED FOR, once, and remembered:
+
+     packs[sku] > 0   the answer, applied to every later case of that SKU
+     packs[sku] === 0 asked and declined — ⛔ do NOT ask again this session
+
+   ⛔ "Once per SKU, not once per case" is the whole point: a delivery is cases
+   2, 3 and 4 of the same item, and re-prompting each time is how a new habit
+   gets abandoned in week one. A tap-correction on a saved row ALSO teaches this
+   map, so a fix to case 1 carries to the rest of the pallet.
+   ⚠️ Deliberately SESSION-SCOPED (in memory, like `flags`) rather than
+   persisted: a mistyped pack that survived to tomorrow would silently multiply
+   every future count of that SKU. Re-asking once per delivery is the cheap side
+   of that trade. */
+const packs={};
 const device = (()=>{ let d=localStorage.getItem("dev"); if(!d){ d="t"+rand(3); localStorage.setItem("dev",d);} return d; })();
 
 function handle(raw){
@@ -518,13 +535,52 @@ function handle(raw){
   const how = dated ? "gs1" : (wasGs1 ? "keyed_gs1nodate" : "keyed_bare");
   pending={upc,prod,gtin:gtin||"",lot:ais["10"]||"",best:dated||null,
            source: (isAudit()? "audit_" : "") + how};
-  /* The frozen date-on-package question is a RECEIVING question — it is asked
-     once per SKU on first receipt and it changes how we treat the deadline.
-     Asking it during a shelf sweep would block a counter who is holding a case
-     they did not open, so audit mode skips straight to the date. */
+  next();
+}
+
+/* ⭐ ONE chain, so every branch ends up in the same place. Each step either
+   asks a question and returns, or falls through to the next. The click handlers
+   set their answer and call `next()` again rather than each deciding what comes
+   after — an earlier version duplicated that ordering in three places, which is
+   how a step gets skipped on one path only. */
+function next(){
+  const prod = pending.prod;
+  /* The frozen date-on-package question is a RECEIVING question — asked once per
+     SKU on first receipt, and it changes how we treat the deadline. Asking it
+     during a shelf sweep would block a counter holding a case they did not open,
+     so audit mode skips it. */
   if(!isAudit() && prod.cls==="Frozen" && flags[prod.sku]===undefined) return askFlag();
+  if(packNeeded()) return askPack();
   if(!pending.best) return askDate();
   commit();
+}
+/* The pack in force for the pending item: what we were told this session beats
+   the catalog, because someone counted it and the catalog is only 57% covered. */
+function packFor(sku, fallback){
+  return (packs[sku] !== undefined) ? packs[sku] : (fallback ?? null);
+}
+function packNeeded(){
+  if(isAudit() && COUNT==="units") return false;   // counting loose units, pack is irrelevant
+  const p = packFor(pending.prod.sku, pending.prod.pack);
+  return p === null || p === undefined;            // ⛔ 0 means "asked and declined" — never re-ask
+}
+function askPack(){
+  prompt_("", "How many units in this case?",
+    `<strong>${esc(pending.prod.name)}</strong> — we have no case pack on file for this
+     item, and the ledger counts UNITS at each date.<br><br>
+     Count one case and enter it. <strong>You will only be asked once</strong> — every
+     other case of this item today uses the same number.`,
+    `<div class="dateRow">
+       <input id="pk" type="text" class="num" inputmode="numeric" maxlength="4"
+              placeholder="e.g. 12" aria-label="Units per case">
+       <button class="primary" id="pkok">Save</button>
+       <button id="pkskip">Don't know — skip</button>
+     </div>`);
+  setTimeout(()=>{
+    const el=$("pk");
+    if(el){ el.focus();
+      el.addEventListener("keydown",e=>{ if(e.key==="Enter") $("pkok").click(); }); }
+  },30);
 }
 
 function askFlag(){
@@ -573,7 +629,8 @@ function commit(){
      ⚠️ An unknown pack stays null and renders as a tappable "?" rather than
      guessing — a wrong quantity creates phantom units at a real date, which is
      worse than a blank somebody fills in. */
-  const dflt = isAudit() && COUNT==="units" ? 1 : (p.prod.pack ?? null);
+  const _pk = packFor(p.prod.sku, p.prod.pack);
+  const dflt = isAudit() && COUNT==="units" ? 1 : (_pk > 0 ? _pk : null);
   const row={ ...p, cls, unknownCls, soft: cls==="Frozen" && flags[p.prod.sku]===false,
               units: dflt, audit: isAudit(), saved:"queued", id:null, n:rows.length+1 };
   rows.unshift(row); queue++;
@@ -728,12 +785,28 @@ document.addEventListener("click",e=>{
     const val=window.prompt(`Units in this case of ${row.prod.name}?`, row.units ?? "");
     if(val===null) return;
     const n=parseInt(val,10);
-    if(!isNaN(n) && n>0){ row.units=n; render(); if(row.id) patchUnits(row); }
+    if(!isNaN(n) && n>0){
+      row.units=n;
+      /* ⭐ A tap-correction TEACHES the session (Jack, 2026-08-16): fixing case 1
+         must carry to cases 2, 3 and 4 rather than being re-typed each time. */
+      packs[row.prod.sku]=n;
+      render(); if(row.id) patchUnits(row);
+    }
     return;
   }
+  if(e.target.id==="pkok" && pending){
+    const n=parseInt(($("pk")||{}).value||"",10);
+    if(isNaN(n) || n<=0){ const el=$("pk"); if(el) el.style.borderColor="var(--stop)"; return; }
+    packs[pending.prod.sku]=n; return next();
+  }
+  if(e.target.id==="pkskip" && pending){
+    /* ⛔ 0 = asked and declined. Recorded so the question is not repeated for
+       every remaining case — an unanswered prompt that keeps reappearing is
+       worse than no prompt. The row still saves and still shows a tappable "?". */
+    packs[pending.prod.sku]=0; return next();
+  }
   const f=e.target.closest("[data-flag]");
-  if(f && pending){ flags[pending.prod.sku]= f.dataset.flag==="yes";
-    if(!pending.best) return askDate(); return commit(); }
+  if(f && pending){ flags[pending.prod.sku]= f.dataset.flag==="yes"; return next(); }
   if(e.target.id==="dok" && pending){
     const picked=($("pick")||{}).value||"", typed=($("typed")||{}).value||"";
     let d = picked || (typed ? parseGs1Date(typed.length===6? typed.slice(4,6)+typed.slice(0,4) : typed) : null);
@@ -742,7 +815,7 @@ document.addEventListener("click",e=>{
        needed (keyed_gs1nodate vs keyed_bare); flattening both to "manual"
        throws away the only signal that separates a supplier who does not
        encode dates from a label format that cannot carry one. */
-    pending.best=d; commit();
+    pending.best=d; next();
   }
 });
 
