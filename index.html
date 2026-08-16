@@ -83,13 +83,39 @@
   .foot{font-size:12px;color:var(--ink-3);margin-top:18px}
   .gate{background:var(--card);border:1px solid var(--line);border-radius:5px;padding:26px;text-align:center}
   .gate p{color:var(--ink-2);font-size:15px;max-width:52ch;margin:0 auto 18px}
+
+  /* ── AUDIT MODE ───────────────────────────────────────────────────────────
+     ⛔ The two modes MUST be impossible to confuse at a glance. An audit scan
+     recorded as a receipt would poison shelf life with a date the goods never
+     arrived on, and the person scanning is looking at a shelf, not a screen.
+     So audit mode repaints the whole page amber and carries a standing banner —
+     not a small toggle state someone can miss. */
+  body.audit{--go:#a8620a;--go-soft:#fdf0dc}
+  @media (prefers-color-scheme:dark){ body.audit{--go:#e0a24a;--go-soft:#312413} }
+  .modes{display:flex;gap:0;border:1px solid var(--line);border-radius:4px;overflow:hidden}
+  .modes button{border:0;border-radius:0;min-height:38px;padding:8px 15px;font-size:13.5px;
+                font-weight:700;background:var(--card);color:var(--ink-3)}
+  .modes button.on{background:var(--go);color:#fff}
+  .banner{border-left:5px solid var(--go);background:var(--go-soft);padding:11px 15px;
+          border-radius:0 4px 4px 0;margin-bottom:14px;font-size:13.5px;color:var(--ink-2)}
+  .banner strong{color:var(--ink)}
+  .seg{display:inline-flex;border:1px solid var(--line);border-radius:4px;overflow:hidden;margin-left:auto}
+  .seg button{border:0;border-radius:0;min-height:38px;padding:7px 13px;font-size:13px;
+              background:var(--card);color:var(--ink-3);font-weight:700}
+  .seg button.on{background:var(--ink);color:var(--ground)}
+  .qty{font-family:var(--mono);font-size:15px;font-weight:700}
+  .grp td{border-bottom:1px solid var(--line)}
 </style>
 </head>
 <body>
 <div class="wrap">
   <div class="bar">
     <span class="dot" id="dot"></span>
-    <h1>Receiving — best by</h1>
+    <h1 id="title">Receiving — best by</h1>
+    <div class="modes" id="modes" style="display:none">
+      <button id="mReceive" class="on">Receiving</button>
+      <button id="mAudit">Audit shelf</button>
+    </div>
     <span class="who" id="who"></span>
     <button id="signout" style="display:none;font-size:13px;padding:6px 11px;min-height:0">Sign out</button>
   </div>
@@ -100,6 +126,8 @@
   </div>
 
   <div id="app" style="display:none">
+    <div id="bannerArea"></div>
+
     <div class="scanbox" id="scanbox" style="border-color:var(--line)">
       <label class="big" for="po" id="poLabel">Delivery / PO number — optional</label>
       <input id="po" style="width:100%;font-family:var(--mono);font-size:18px;padding:11px;
@@ -111,15 +139,33 @@
     </div>
 
     <div class="scanbox" id="scanbox2">
-      <label class="big" for="scan">Scan case label</label>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:7px">
+        <label class="big" for="scan" id="scanLabel" style="margin:0">Scan case label</label>
+        <div class="seg" id="countSeg" style="display:none">
+          <button id="cCases" class="on">Counting cases</button>
+          <button id="cUnits">Counting units</button>
+        </div>
+      </div>
       <input id="scan" autocomplete="off" autocapitalize="off" spellcheck="false"
              placeholder="ready" aria-label="Scan case label">
-      <div class="hint">Scan the MANUFACTURER label — not the yellow KEHE pick label.</div>
+      <div class="hint" id="scanHint">Scan the MANUFACTURER label — not the yellow KEHE pick label.</div>
     </div>
 
     <div id="promptArea"></div>
     <div id="lastArea"></div>
     <div class="stats" id="stats"></div>
+
+    <!-- AUDIT: the answer we actually want is units at each best-by date, so the
+         count is shown ROLLED UP by (product, best by). A flat scan log makes the
+         counter re-add in their head, which is where miscounts come from. -->
+    <div id="rollArea" style="display:none">
+      <div class="tw" style="margin-bottom:14px">
+        <table>
+          <thead><tr><th>Product</th><th>Best by</th><th>Total units</th><th>Scans</th></tr></thead>
+          <tbody id="roll"></tbody>
+        </table>
+      </div>
+    </div>
 
     <div class="tw">
       <table>
@@ -166,6 +212,44 @@ const GRAPH = "https://graph.microsoft.com/v1.0";
 const PO_PROMPT_FROM = "2026-08-17";
 const poWanted = () => new Date().toISOString().slice(0,10) >= PO_PROMPT_FROM;
 const poVal = () => (($("po")||{}).value||"").trim();
+
+/* ============================================================================
+   ⭐ AUDIT MODE (2026-08-16) — capture best-by dates for stock ALREADY on the
+   floor, not just stock arriving at the dock.
+
+   WHY: 95 of 96 lines on the 2026-08-16 order ran on a CLASS-GUESSED shelf life,
+   which is the single largest error source in every deep-buy date. Receiving
+   only ever learns about goods from the moment they arrive, so the existing
+   backstock stays invisible for a full turn of each SKU. A one-off floor sweep
+   fills that in immediately.
+
+   ⛔ THE ONE RULE THAT MATTERS: AN AUDIT SCAN IS NOT A RECEIPT.
+   `_shared/shelf_life.py` learns "days of life a SKU arrives with" by measuring
+   best_by MINUS the receipt date. An audit row's timestamp is the day somebody
+   walked the cooler — it says nothing about when the goods arrived. Counting it
+   as a receipt would make every audited SKU look like it arrived with far less
+   life than it did, and shelf life drives every deep-buy date. That error would
+   be invisible and would push the whole model conservative.
+
+   HOW IT IS KEPT SEPARATE, with no SharePoint schema change:
+     * `source` is prefixed `audit_` (audit_gs1 / audit_keyed_gs1nodate /
+       audit_keyed_bare). The existing convention already uses `source` to record
+       HOW a row arrived, so this extends it rather than fighting it.
+     * `receiving_drain.py` splits `source LIKE 'audit_%'` into its own
+       `audit.csv` and NEVER lets it reach `receipts.csv`.
+   ⛔ Both halves are required. The prefix alone is just a string until the drain
+   honours it — do not deploy this page without the matching drain.
+
+   ⚠️ `po_ref` carries the shelf/area label in audit mode, prefixed `AUDIT:`.
+   That field is explicitly "captured but never depended on" for receiving, so
+   reusing it costs nothing and avoids asking anyone to add a column mid-sweep.
+   If a `location` column is ever added, move it and drop the prefix. */
+let MODE = localStorage.getItem("mode") === "audit" ? "audit" : "receive";
+const isAudit = () => MODE === "audit";
+/* Cases vs units: on a shelf you count loose units; in a back stack you count
+   cases. Guessing wrong silently multiplies the count by the case pack, so it
+   is an explicit switch rather than an inference. */
+let COUNT = localStorage.getItem("count") === "units" ? "units" : "cases";
 
 /* Columns the list must have. Startup FAILS LOUDLY naming any that are
    missing — better than discovering it after a delivery's worth of scans
@@ -397,9 +481,16 @@ function handle(raw){
      dates, the second is a label format we cannot get dates from at all. */
   const dated = ais["17"]||ais["15"];
   const wasGs1 = !!(ais["01"]||ais["02"]);
+  /* ⛔ The audit_ prefix is applied HERE, at the single point where source is
+     decided, so no later branch can produce an unprefixed audit row. */
+  const how = dated ? "gs1" : (wasGs1 ? "keyed_gs1nodate" : "keyed_bare");
   pending={upc,prod,gtin:gtin||"",lot:ais["10"]||"",best:dated||null,
-           source: dated ? "gs1" : (wasGs1 ? "keyed_gs1nodate" : "keyed_bare")};
-  if(prod.cls==="Frozen" && flags[prod.sku]===undefined) return askFlag();
+           source: (isAudit()? "audit_" : "") + how};
+  /* The frozen date-on-package question is a RECEIVING question — it is asked
+     once per SKU on first receipt and it changes how we treat the deadline.
+     Asking it during a shelf sweep would block a counter who is holding a case
+     they did not open, so audit mode skips straight to the date. */
+  if(!isAudit() && prod.cls==="Frozen" && flags[prod.sku]===undefined) return askFlag();
   if(!pending.best) return askDate();
   commit();
 }
@@ -444,8 +535,15 @@ function commit(){
   /* Units per case come from the KEHE case pack (57% of the catalog). Unknown
      packs stay null and show as a tappable “?” — the ledger needs units per
      best-by date, and a wrong guess is worse than a blank we can fill later. */
+  /* Units default:
+       receiving  → the case pack (one scan = one case, per the design ruling)
+       audit      → the case pack when counting CASES, otherwise 1 loose unit.
+     ⚠️ An unknown pack stays null and renders as a tappable "?" rather than
+     guessing — a wrong quantity creates phantom units at a real date, which is
+     worse than a blank somebody fills in. */
+  const dflt = isAudit() && COUNT==="units" ? 1 : (p.prod.pack ?? null);
   const row={ ...p, cls, unknownCls, soft: cls==="Frozen" && flags[p.prod.sku]===false,
-              units: (p.prod.pack ?? null), saved:"queued", id:null, n:rows.length+1 };
+              units: dflt, audit: isAudit(), saved:"queued", id:null, n:rows.length+1 };
   rows.unshift(row); queue++;
   clearPrompt(); render(); flash(row);
   save(row);
@@ -456,10 +554,14 @@ async function save(row){
      (e.g. "UPC" not "upc"). A mismatched key is accepted by Graph and the
      value is SILENTLY DISCARDED — the row saves looking fine and the column
      is empty, which is the worst possible failure here. */
+  /* ⛔ `row.audit` is captured at commit time, NOT read from the live MODE.
+     A row can still be retrying in the queue when someone flips the toggle, and
+     re-reading MODE here would relabel an in-flight row as the other kind. */
+  const ref = row.audit ? ("AUDIT:" + (poVal() || "unspecified")) : poVal();
   const v={ upc:row.upc, sku:row.prod.sku, gtin14:row.gtin||"", best_by:row.best,
             lot:row.lot||"", units:row.units ?? 0, source:row.source,
-            operator:account, po_ref:poVal(), device };
-  const fields={ Title: `${row.prod.sku} ${row.best}` };
+            operator:account, po_ref:ref, device };
+  const fields={ Title: `${row.audit?"AUDIT ":""}${row.prod.sku} ${row.best}` };
   for(const k of REQUIRED) fields[FIELD[k]] = v[k];
   for(let attempt=0; attempt<4; attempt++){
     try{
@@ -518,6 +620,60 @@ async function patchUnits(row){
   }catch(e){ row.err="units not updated: "+e.message; render(); }
 }
 
+/* ---------- mode ---------- */
+function setMode(m){
+  /* ⛔ Refuse to switch while anything is still unsaved. The two modes write
+     different kinds of row, and a queued receipt finishing after a switch to
+     audit is exactly the mix-up this whole design exists to prevent. */
+  const unsaved = rows.filter(r=>r.saved!=="saved").length;
+  if(unsaved){
+    return prompt_("stop","Finish saving first",
+      `${unsaved} scan${unsaved>1?"s are":" is"} still saving. Switching now could file `+
+      `${unsaved>1?"them":"it"} as the wrong kind of scan. Wait for “saved”, then switch.`);
+  }
+  MODE = m; localStorage.setItem("mode", m);
+  document.body.classList.toggle("audit", isAudit());
+  $("mReceive").className = isAudit()? "" : "on";
+  $("mAudit").className   = isAudit()? "on" : "";
+  $("title").textContent  = isAudit()? "Audit shelf — best by" : "Receiving — best by";
+  $("countSeg").style.display = isAudit()? "" : "none";
+  $("rollArea").style.display = isAudit()? "" : "none";
+  $("scanLabel").textContent  = isAudit()? "Scan item on the shelf" : "Scan case label";
+  $("scanHint").textContent = isAudit()
+    ? "Scan whatever carries the date — the case label if it is still on, otherwise the retail package."
+    : "Scan the MANUFACTURER label — not the yellow KEHE pick label.";
+  if(isAudit()){
+    $("poLabel").textContent = "Where are you counting? — set once, applies to every scan";
+    $("po").placeholder = "e.g. Cooler 2, Dry rack A, Freezer back";
+    $("poHint").textContent =
+      "Worth filling in: it is how somebody finds this stock again, and how a partial "+
+      "sweep is told apart from a finished one.";
+  }else{
+    $("poLabel").textContent = poWanted()
+      ? "Delivery / PO number — set once, applies to every case"
+      : "Delivery / PO number — optional";
+    $("po").placeholder = poWanted()
+      ? "e.g. Kehe-8944078   (scan or type; blank is fine)" : "leave blank — not needed";
+    $("poHint").textContent = poWanted()
+      ? "Off the KEHE paperwork if you have it to hand. Still optional — scans reconcile to the "+
+        "receipt in Finale without it; the number just saves a lookup."
+      : "Skip this. Scans are matched to the KEHE receipt in Finale by date and SKU — there is "+
+        "only one delivery a week, so the PO adds nothing.";
+  }
+  $("bannerArea").innerHTML = isAudit()
+    ? `<div class="banner"><strong>Audit mode — counting stock already on the floor.</strong>
+       These scans are recorded separately from deliveries and will not be mistaken for
+       today&rsquo;s receipt. Scan every case or unit of an item you can see; the running
+       totals below are what we are after.</div>`
+    : "";
+  clearPrompt(); render();
+}
+function setCount(c){
+  COUNT = c; localStorage.setItem("count", c);
+  $("cCases").className = c==="cases"? "on":"";
+  $("cUnits").className = c==="units"? "on":"";
+}
+
 /* ---------- UI ---------- */
 function flash(r){
   $("lastArea").innerHTML=`<div class="last"><div class="nm">✓ ${esc(r.prod.name)}</div>
@@ -573,17 +729,45 @@ function render(){
       <td><span class="tag ${r.source==="gs1"?"t-gs1":"t-man"}">${r.source==="gs1"?"GS1":"keyed"}</span></td>
       <td><span class="tag ${cls}">${r.saved}</span>${r.err&&r.saved==="FAILED"?`<div style="font-size:11px;color:var(--stop)">${esc(r.err)}</div>`:""}</td>
     </tr>`;}).join("");
+  /* AUDIT roll-up: units per (sku, best by). This is the actual deliverable of
+     a sweep — "how many units do we hold at each date" — and showing it live
+     lets the counter catch a missed stack while still standing in front of it. */
+  if(isAudit()){
+    const g=new Map();
+    for(const r of rows){
+      const k=r.prod.sku+"|"+r.best;
+      const e=g.get(k)||{name:r.prod.name,sku:r.prod.sku,best:r.best,u:0,n:0,unk:false};
+      /* ⛔ An unknown pack contributes to the SCAN count but not the unit total,
+         and the total is marked "+?" — never silently treated as zero units. */
+      if(r.units==null) e.unk=true; else e.u+=r.units;
+      e.n++; g.set(k,e);
+    }
+    $("roll").innerHTML=[...g.values()]
+      .sort((a,b)=> a.best<b.best?-1: a.best>b.best?1: a.name.localeCompare(b.name))
+      .map(e=>`<tr class="grp">
+        <td>${esc(e.name)}<div class="num" style="font-size:11px;color:var(--ink-3)">${esc(e.sku)}</div></td>
+        <td class="num">${e.best}<div style="font-size:11px;color:var(--ink-3)">order by ${addDays(e.best,-6)}</div></td>
+        <td class="num qty">${e.u}${e.unk?' <span class="tag t-q">+?</span>':""}</td>
+        <td class="num">${e.n}</td></tr>`).join("");
+  }
   const failed = rows.filter(r=>r.saved==="FAILED").length;
-  const gs1 = rows.filter(r=>r.source==="gs1").length;
-  $("stats").innerHTML=[
-    ["Cases", rows.length, false],
-    ["Saved", rows.filter(r=>r.saved==="saved").length, false],
-    ["Unsaved", failed+queue, (failed+queue)>0],
-    /* Not red: rejects are expected (yellow pick labels get scanned by
-       mistake) and colouring them as errors trains people to hide them. */
-    ["Not read", rejects.length, false],
-    ["No typing", rows.length? Math.round(gs1/rows.length*100)+"%":"—", false]
-  ].map(([l,v,bad])=>`<div class="stat${bad?" bad":""}"><div class="l">${l}</div><div class="v">${v}</div></div>`).join("");
+  const gs1 = rows.filter(r=>r.source.endsWith("gs1")).length;
+  const units = rows.reduce((a,r)=>a+(r.units||0),0);
+  const dates = new Set(rows.map(r=>r.prod.sku+"|"+r.best)).size;
+  $("stats").innerHTML=(isAudit()
+    ? [["Scans", rows.length, false],
+       ["Units", units, false],
+       ["Item-dates", dates, false],
+       ["Unsaved", failed+queue, (failed+queue)>0],
+       ["Not read", rejects.length, false]]
+    : [["Cases", rows.length, false],
+       ["Saved", rows.filter(r=>r.saved==="saved").length, false],
+       ["Unsaved", failed+queue, (failed+queue)>0],
+       /* Not red: rejects are expected (yellow pick labels get scanned by
+          mistake) and colouring them as errors trains people to hide them. */
+       ["Not read", rejects.length, false],
+       ["No typing", rows.length? Math.round(gs1/rows.length*100)+"%":"—", false]]
+  ).map(([l,v,bad])=>`<div class="stat${bad?" bad":""}"><div class="l">${l}</div><div class="v">${v}</div></div>`).join("");
 }
 
 /* ---------- boot ---------- */
@@ -596,16 +780,13 @@ async function start(){
     $("dot").className="dot ok"; $("who").textContent=account;
     $("signout").style.display="";
     $("scan").focus();
-    if(poWanted()){
-      $("poLabel").textContent = "Delivery / PO number — set once, applies to every case";
-      $("po").placeholder = "e.g. Kehe-8944078   (scan or type; blank is fine)";
-      $("poHint").textContent =
-        "Off the KEHE paperwork if you have it to hand. Still optional — scans reconcile to the "+
-        "receipt in Finale without it; the number just saves a lookup.";
-    }
+    $("modes").style.display = "";
+    setCount(COUNT);
+    setMode(MODE);          // paints the banner, labels, PO hint and roll-up
     $("foot").textContent =
       `Writing to “${CFG.listName}” on ${CFG.sitePath}. A row counts as saved only when SharePoint `+
-      `returns its id — anything still showing “queued” or “FAILED” did not save. Device ${device}.`;
+      `returns its id — anything still showing “queued” or “FAILED” did not save. `+
+      `Audit scans are marked so they never count as a delivery. Device ${device}.`;
     render();
   }catch(e){
     $("gate").style.display="";
@@ -615,6 +796,10 @@ async function start(){
 $("signin").addEventListener("click", ()=>beginLogin().catch(e=>{
   $("gateMsg").innerHTML=`<strong style="color:var(--stop)">${esc(e.message)}</strong>`;}));
 $("signout").addEventListener("click", ()=>{ store.clear(); location.reload(); });
+$("mReceive").addEventListener("click", ()=>setMode("receive"));
+$("mAudit").addEventListener("click",   ()=>setMode("audit"));
+$("cCases").addEventListener("click",   ()=>setCount("cases"));
+$("cUnits").addEventListener("click",   ()=>setCount("units"));
 $("scan").addEventListener("keydown",e=>{
   if(e.key==="Enter"){ e.preventDefault(); const v=$("scan").value; $("scan").value=""; handle(v); }});
 document.addEventListener("click",()=>{ if(!$("promptArea").innerHTML && $("app").style.display!=="none") $("scan").focus(); });
