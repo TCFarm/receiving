@@ -318,8 +318,40 @@ function normalize(a){
   for(const ai of ["17","15","11","12","13","16"]) if(o[ai]){ const p=parseGs1Date(o[ai]); if(p) o[ai]=p; }
   return o;
 }
+/* ⛔⛔ A BARE PRODUCT BARCODE IS NOT AN ELEMENT STRING — DO NOT PARSE IT AS ONE.
+   Found 2026-08-16 in Matt's 2026-08-14 test scans: all three `keyed_bare` rows
+   saved a LOT equal to their own GTIN. A bare ITF-14 case barcode begins with the
+   packaging indicator, and for US UPC-A goods that makes the first two digits
+   "10" — which the element-string walker reads as AI (10) = LOT, then swallows
+   the rest of the barcode as the lot value.
+
+   ⛔ The observed damage was a junk `lot`. The LATENT damage is far worse: an
+   ITF-14 beginning "17" parses as AI (17) = BEST BY. Verified —
+   `17250630123457` yields `{"12":"3457","17":"2025-06-30"}`. The page would
+   accept that FABRICATED date without prompting and stamp it `source='gs1'`,
+   the source we trust most, straight into an append-only ledger.
+   ⚠️ It also breaks the other way: a legitimate UPC-A beginning "01" is read as
+   AI (01), yields a 10-digit GTIN, fails the check digit, and is REJECTED.
+
+   The test cannot be "does it start with a known AI" — that is exactly what
+   misfires. It is "was this ever an element string at all":
+     * bracketed  "(01)..."          → yes
+     * FNC1 / AIM symbology id "]C1" → yes
+     * a GS separator present         → yes
+   Otherwise, an all-digit string of length 12 / 13 / 14 is a bare UPC-A /
+   EAN-13 / GTIN-14 and must bypass this parser completely.
+   ⚠️ Other all-digit lengths still go through: a genuine GS1-128 carrying only
+   fixed-length AIs (e.g. (01)+14 then (17)+6 = 22 digits) arrives with no
+   brackets and no separator, and must still parse. */
+function looksLikeElementString(s){
+  if(/[()]/.test(s) || s.includes(GS) || /\]C1/.test(s)) return true;
+  const digits = /^\d+$/.test(s);
+  if(digits && (s.length===12 || s.length===13 || s.length===14)) return false;
+  return true;
+}
 function parseElementString(scan){
   let s=(scan||"").trim(); if(!s) return {};
+  if(!looksLikeElementString(s)) return {};
   s=s.replace(/\]C1/g,"");
   if(s.includes("(")){
     const out={}; let m; const re=/\((\d{2,4})\)\s*([^(]*)/g;
