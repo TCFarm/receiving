@@ -268,6 +268,10 @@ function failedBefore(raw){
   failCount.set(k,n); return n;
 }
 /* A date barcode scanned before its item, held until the item arrives. */
+let lastCatalogFetch = 0;
+const CATALOG_REFETCH_MS = 60*1000;   /* ⛔ cooldown: a burst of unknown scans must
+   not turn into a burst of requests. One minute is far shorter than the gap
+   between adding a product in BC and the next case reaching the scanner. */
 let heldDate = null;
 const HELD_DATE_MAX_MS = 4*60*1000;   /* ⛔ expires — a stale held date would
    otherwise land silently on whatever gets scanned next, which is worse than
@@ -576,7 +580,18 @@ let lastFail = null;   // {kind, raw, upc} — what the photo prompt is about
 let unresolved=null;
 const device = (()=>{ let d=localStorage.getItem("dev"); if(!d){ d="t"+rand(3); localStorage.setItem("dev",d);} return d; })();
 
-function handle(raw){
+/* ⛔ `handle` awaits a catalog re-fetch, so two scans arriving during that gap
+   could interleave and corrupt `pending`. A scan gun fires a whole string then
+   Enter, so collisions are rare — but "rare" here means a wrong date on a real
+   case. Serialise, and re-try the second scan a moment later rather than
+   dropping it. */
+let handling = false;
+async function handle(raw){
+  if(handling){ setTimeout(()=>handle(raw), 120); return; }
+  handling = true;
+  try { return await handleScan(raw); } finally { handling = false; }
+}
+async function handleScan(raw){
   const v=(raw||"").trim(); if(!v) return;
   const ais=parseElementString(v);
   let gtin=ais["01"]||ais["02"]||null, upc=null, gtinOk=false;
@@ -604,7 +619,7 @@ function handle(raw){
   if(!gtin && !upcCandidate(v) && !pending && /[\/-]/.test(v)){
     const d0=parseGs1Date(v);
     if(d0 && plausibleBB(d0)){
-      heldDate={date:d0, at:Date.now()};
+      heldDate={date:d0, at:Date.now(), raw:v};
       renderHeld();
       return prompt_("go","Date captured — now scan the item",
         `Best-by <strong>${d0}</strong> is being held. Scan the item's barcode next `+
@@ -631,42 +646,75 @@ function handle(raw){
                                    : "Unrecognised code",
       tries>1
       ? `<span class="num">${esc(v.slice(0,44))}</span> is a <strong>lot or date code, not a
-         product code</strong> — rescanning it will never work.
-         <br><br>Scan the <strong>UPC barcode on the case</strong> first. If the date is on its
-         own barcode, scan that <em>after</em> the item (or before — it will be held).
+         product code</strong> — scanning it again will never work.
+         <br><br>Scan the <strong>UPC barcode on the case</strong>. If the date is on its own
+         barcode, scan that before or after the item — either way it will be held.
          <br><br>${photoBtn()}`
-      : `No GTIN or UPC in <span class="num">${esc(v.slice(0,44))}</span>. If this is the yellow KEHE pick label, scan the manufacturer label instead — its date is not the best-by. ${photoBtn()}`); }
+      : `No GTIN or UPC in <span class="num">${esc(v.slice(0,44))}</span>. If this is the yellow
+         KEHE pick label, scan the manufacturer label instead — its date is not the best-by.
+         ${photoBtn()}`);
+  }
 
-  const prod = CATALOG[upc];
+  /* ⛔ LOOK THE CASE CODE UP DIRECTLY, NOT ONLY ITS DERIVED UPC (found 2026-08-18).
+     Learned aliases are stored under the code as SCANNED — a 14-digit case GTIN,
+     or a bare code that reduces to nothing — but this only ever read
+     CATALOG[<derived consumer upc>]. Every alias the receipt ledger had taught
+     was unreachable, so the whole learning loop was inert (86 of them). */
+  const rawDigits = v.replace(/\D/g,"");
+  const look = () => CATALOG[upc] || (gtin ? CATALOG[gtin] : null) || CATALOG[rawDigits] || null;
+  let prod = look();
+  /* ⭐ KEEP IT CURRENT AT THE POINT OF FAILURE (Jack, 2026-08-18). The catalog is
+     rebuilt on a schedule, but "we added it in BigCommerce ten minutes ago" is
+     exactly the case that fails — and a tablet holds its copy for the whole
+     session. Before declaring a code unknown, re-fetch ONCE per cooldown and
+     look again. One small request, on a path that was already a dead end. */
+  if(!prod && Date.now()-lastCatalogFetch > CATALOG_REFETCH_MS){
+    lastCatalogFetch = Date.now();
+    try{
+      const fresh = await (await fetch("catalog.json",{cache:"no-store"})).json();
+      if(fresh && Object.keys(fresh).length){ CATALOG = fresh; prod = look(); }
+    }catch(_){ /* offline or Pages mid-deploy — fall through to the normal path */ }
+  }
   if(!prod){ reject("UNKNOWN_UPC", v, upc);
     /* ⛔ KEEP THE DATE. The label often encodes a perfectly good best-by beside a
        GTIN we simply do not have on file; discarding it here forces the operator
        to key a date the barcode already told us. */
-    unresolved = {gtin: gtin || "", upc, raw: v, bb: ais["17"]||ais["15"]||""};
+    /* ⭐ COLLECT EVERY CODE ON THE CASE (Jack, 2026-08-18). One unknown code is a
+       dead end; two codes off the SAME case are a permanent alias the moment the
+       operator names the product — and the retail UPC is very often on the case
+       right beside a manufacturer GTIN we have never seen. So a second unknown
+       scan APPENDS rather than starting over. */
+    if(unresolved) { if(!unresolved.codes.includes(v)) unresolved.codes.push(v); }
+    else unresolved = {gtin: gtin || "", upc, raw: v, codes: [v],
+                       bb: ais["17"]||ais["15"]||""};
+    if(!unresolved.bb) unresolved.bb = ais["17"]||ais["15"]||"";
     /* ⭐ Not a dead end. The case may well be a product we DO carry whose UPC
        is missing or different in BigCommerce — 29% of BC products carry no UPC
        at all, so a code that fails to resolve says little about whether we
        stock it. Offer the name search right here. */
     const tries = failedBefore(v);
-    /* ⛔ On a repeat, do NOT repeat the advice. The first message asks a question
-       worth asking once; after that the honest answer is "this will not scan,
-       here are the two things that DO work". */
-    return prompt_("stop", tries>1 ? `Still not found — ${tries} tries` : "Unknown UPC",
-      tries>1
-      ? `<span class="num">${upc}</span> is <strong>not in the catalog, and rescanning
-         cannot change that</strong> — the code is recorded either way, so please stop
-         rescanning and do one of these:
-         <br><br><button class="primary" id="unkFind">① Find it by name</button>
-         ${photoBtn()}
-         <br><span class="hint">If neither works, set the case aside and carry on —
-         nothing is lost, we have the code.</span>`
-      : `<span class="num">${upc}</span> is not in the catalog — recorded, so nobody
-         needs to write it down.
-         <br><br><strong>Did you scan the barcode under the UPC numbers on the
-         retail item</strong>, rather than a case or shipping label? Those often
-         carry a different code entirely.
-         <br><br><button class="primary" id="unkFind">Find it by name</button>
-         ${photoBtn()}`);
+    const n = unresolved.codes.length;
+    /* ⛔ TWO DIFFERENT COUNTERS, and conflating them hid the collection hint.
+       `tries` counts how often THIS code failed — it drives "stop rescanning".
+       `n` counts how many DIFFERENT codes we hold off this CASE — it drives
+       "keep going, you are building the link". A second, NEW barcode is not a
+       retry and must never be told to stop. */
+    const collecting =
+      `<strong>Scan any OTHER barcode on this case</strong> — the retail UPC, a second
+       label, anything. Two codes off the same box let us tie them together
+       permanently, so it scans first time from now on.` +
+      (n>1 ? `<br><span class="hint">${n} codes collected from this case so far.</span>` : "");
+    return prompt_("stop",
+      tries>1 ? `Scanning it again will not help — ${tries} tries` : "Unknown code",
+      (tries>1
+        ? `<span class="num">${upc}</span> is <strong>not in the catalog, and scanning the
+           same code again cannot change that</strong>. It is recorded either way.<br><br>`
+        : `<span class="num">${upc}</span> is not in the catalog — recorded, so nobody needs
+           to write it down.<br><br>`)
+      + collecting
+      + `<br><br><button class="primary" id="unkFind">Find it by name</button>${photoBtn()}`
+      + `<br><span class="hint">If none of that works, set the case aside and carry on —
+         nothing is lost, we have the codes.</span>`);
   }
   /* source answers "how often did the label do the work for us?" without
      anyone tallying it (Jack, 2026-08-13):
@@ -682,9 +730,15 @@ function handle(raw){
   let best = dated || null, how = dated ? "gs1" : (wasGs1 ? "keyed_gs1nodate" : "keyed_bare");
   /* ⭐ A date scanned just before the item lands here. The label's own date always
      wins — the held one is only a stand-in for what the operator would have keyed. */
+  let fromHeld = null;
   if(!best && heldDateValid()){ best = heldDate.date; how = "scanned_date";
-                                heldDate = null; renderHeld(); }
+                                fromHeld = heldDate.raw; heldDate = null; renderHeld(); }
   pending={upc,prod,gtin:gtin||"",lot:ais["10"]||"",best,
+           /* ⛔ A held date came off a DIFFERENT barcode than the item, so nothing
+              proves the two belong to the same case — only the operator can say.
+              `fromHeld` forces one confirmation step; `heldRaw` keeps the exact
+              string that was scanned so the pairing can be re-examined later. */
+           fromHeld: !!fromHeld, heldRaw: fromHeld || "",
            source: (isAudit()? "audit_" : "") + how};
   next();
 }
@@ -703,6 +757,7 @@ function next(){
   if(!isAudit() && prod.cls==="Frozen" && flags[prod.sku]===undefined) return askFlag();
   if(packNeeded()) return askPack();
   if(!pending.best) return askDate();
+  if(pending.fromHeld && !pending.heldConfirmed) return askConfirmHeld();
   commit();
 }
 /* The pack in force for the pending item: what we were told this session beats
@@ -879,7 +934,11 @@ async function save(row){
      A row can still be retrying in the queue when someone flips the toggle, and
      re-reading MODE here would relabel an in-flight row as the other kind. */
   const ref = row.audit ? ("AUDIT:" + (poVal() || "unspecified")) : poVal();
-  const v={ upc:row.upc, sku:row.prod.sku, gtin14:row.gtin||"", best_by:row.best,
+  /* ⭐ When the date arrived on its own barcode there is no case GTIN to store,
+     so the raw date scan goes in its place, tagged. `case_aliases()` only reads
+     14-digit values, so this can never be mistaken for a case code. */
+  const g14 = row.gtin || (row.heldRaw ? ("RAW:"+String(row.heldRaw).slice(0,40)) : "");
+  const v={ upc:row.upc, sku:row.prod.sku, gtin14:g14, best_by:row.best,
             lot:row.lot||"", units:row.units ?? 0, source:row.source,
             operator:account, po_ref:ref, device };
   const fields={ Title: `${row.audit?"AUDIT ":""}${row.prod.sku} ${row.best}` };
@@ -998,6 +1057,19 @@ async function patchUnits(row){
   }catch(e){ row.err="units not updated: "+e.message; render(); }
 }
 
+/* ⭐ The one question a held date has to answer: is this the same box? */
+function askConfirmHeld(){
+  const p=pending;
+  return prompt_("stop","Is this the same case?",
+    `You scanned best-by <strong>${p.best}</strong> just before this item.
+     <br><br><span class="num">${p.prod.sku}</span> — ${esc(p.prod.name)}
+     <br><br>Record <strong>${p.best}</strong> for it?
+     <div style="display:flex;gap:9px;flex-wrap:wrap;margin-top:12px">
+       <button class="primary" id="heldYes">Yes — same case</button>
+       <button id="heldNo">No — enter the date</button>
+     </div>`);
+}
+
 /* ---------- mode ---------- */
 /* ⛔ Blocking, and deliberately has no default and no dismiss: the scan box is
    blurred while it is up, so nothing can be recorded until someone has said
@@ -1107,6 +1179,13 @@ function photoBtn(){
 
 document.addEventListener("click", e=>{
   if(e.target && e.target.id==="dropHeld"){ heldDate=null; renderHeld(); clearPrompt(); return; }
+  if(e.target && e.target.id==="heldYes"){
+    pending.heldConfirmed=true; clearPrompt(); return next(); }
+  if(e.target && e.target.id==="heldNo"){
+    /* ⛔ Rejecting the pairing must not leave the date half-applied. */
+    pending.best=null; pending.fromHeld=false; pending.heldRaw="";
+    pending.source=(isAudit()?"audit_":"")+"keyed_bare";
+    clearPrompt(); return next(); }
   const id = e.target && e.target.id;
   if(id!=="pickReceive" && id!=="pickAudit") return;
   setMode(id==="pickAudit" ? "audit" : "receive");
@@ -1157,6 +1236,13 @@ document.addEventListener("click",e=>{
              source:(isAudit()?"audit_":"") +
                     (carry.gtin ? "keyed_casecode" : "keyed_notscannable"),
              alias_for: carry.gtin || carry.upc || ""};
+    /* ⭐ Teach the catalog EVERY code seen on this case, not just the one that
+       happened to be scanned first. `build_receiving_catalog.case_aliases()`
+       reads these back, so the next delivery scans clean whichever label the
+       receiver reaches for. Written as telemetry rows (sentinel sku) so they can
+       never be mistaken for stock. */
+    const extras=(carry.codes||[]).filter(c=>c!==carry.raw);
+    for(const code of extras) reject("ALIAS", `${code} -> ${prod.sku}`, upc);
     unresolved = null;
     return next();
   }
