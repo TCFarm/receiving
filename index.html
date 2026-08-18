@@ -96,6 +96,10 @@
   .modes button{border:0;border-radius:0;min-height:38px;padding:8px 15px;font-size:13.5px;
                 font-weight:700;background:var(--card);color:var(--ink-3)}
   .modes button.on{background:var(--go);color:#fff}
+  /* a switch that is WAITING on the save queue — must not read as "switched" */
+  .modes button.pend{background:var(--card);color:var(--ink-2);
+    animation:pendPulse 1s steps(2,end) infinite}
+  @keyframes pendPulse{50%{background:var(--wait);color:#fff}}
   .banner{border-left:5px solid var(--go);background:var(--go-soft);padding:11px 15px;
           border-radius:0 4px 4px 0;margin-bottom:14px;font-size:13.5px;color:var(--ink-2)}
   .banner strong{color:var(--ink)}
@@ -250,6 +254,18 @@ const poVal = () => (($("po")||{}).value||"").trim();
    reusing it costs nothing and avoids asking anyone to add a column mid-sweep.
    If a `location` column is ever added, move it and drop the prefix. */
 let MODE = localStorage.getItem("mode") === "audit" ? "audit" : "receive";
+/* A switch asked for while rows are still saving, applied when the queue drains. */
+let pendingMode = null;
+/* ⛔ THE MODE IS STICKY IN localStorage, AND THAT IS A TRAP. Whoever picked up
+   this tablet last set it, possibly days ago, so "what mode am I in?" is not a
+   question the operator can answer from memory. On 2026-08-18 a whole evening
+   sweep was filed as receipts by someone who believed they were auditing.
+   So after a gap, the page REFUSES to assume and asks. */
+const MODE_STALE_HOURS = 6;
+function modeIsStale(){
+  const t = +(localStorage.getItem("modeAt") || 0);
+  return !t || (Date.now() - t) > MODE_STALE_HOURS*3600*1000;
+}
 const isAudit = () => MODE === "audit";
 /* Cases vs units: on a shelf you count loose units; in a back stack you count
    cases. Guessing wrong silently multiplies the count by the case pack, so it
@@ -792,7 +808,11 @@ async function save(row){
       /* ⛔ Only a returned id counts as saved. A 2xx with no id is NOT success. */
       if(!created || !created.id) throw new Error("no item id returned");
       row.saved="saved"; row.id=created.id; queue--;
-      render(); return;
+      render();
+      if(pendingMode && !rows.some(r=>r.saved!=="saved")){
+        const want=pendingMode; pendingMode=null; setMode(want);
+      }
+      return;
     }catch(e){
       row.err = e.message;
       if(attempt===3){ row.saved="FAILED"; queue--; render(); return; }
@@ -896,17 +916,43 @@ async function patchUnits(row){
 }
 
 /* ---------- mode ---------- */
+/* ⛔ Blocking, and deliberately has no default and no dismiss: the scan box is
+   blurred while it is up, so nothing can be recorded until someone has said
+   which kind of scanning this is. The cost is one tap per session; the cost of
+   getting it wrong is a shelf sweep filed as a delivery, which corrupts every
+   shelf-life measurement derived from it. */
+function askMode(){
+  prompt_("stop","Which kind of scanning?",
+    `This tablet was last set to <strong>${isAudit()?"AUDIT — counting stock already on the floor"
+      :"RECEIVING — a delivery coming in"}</strong>, but that may have been someone else, `+
+    `on another day. Pick one before you scan.`,
+    `<div style="display:flex;gap:9px;flex-wrap:wrap;margin-top:12px">
+       <button class="primary" id="pickReceive">📦 Receiving a delivery</button>
+       <button class="primary" id="pickAudit" style="background:var(--wait)">📋 Auditing the shelf</button>
+     </div>`);
+}
 function setMode(m){
   /* ⛔ Refuse to switch while anything is still unsaved. The two modes write
      different kinds of row, and a queued receipt finishing after a switch to
      audit is exactly the mix-up this whole design exists to prevent. */
   const unsaved = rows.filter(r=>r.saved!=="saved").length;
   if(unsaved){
-    return prompt_("stop","Finish saving first",
-      `${unsaved} scan${unsaved>1?"s are":" is"} still saving. Switching now could file `+
-      `${unsaved>1?"them":"it"} as the wrong kind of scan. Wait for “saved”, then switch.`);
+    /* ⛔ A bare refusal reads as success (2026-08-18): the operator taps Audit,
+       glances away, and keeps scanning in RECEIVE mode believing they switched.
+       That is exactly what happened on the 8/18 evening sweep — 65 scans filed
+       as receipts. So DEFER the switch instead of dropping it, and apply it the
+       moment the queue drains. */
+    pendingMode = m;
+    $("mAudit").className   = m==="audit"   ? "on pend" : ($("mAudit").className||"");
+    $("mReceive").className = m==="receive" ? "on pend" : ($("mReceive").className||"");
+    return prompt_("stop","Switching as soon as it saves",
+      `${unsaved} scan${unsaved>1?"s are":" is"} still saving, so you are STILL IN `+
+      `<strong>${isAudit()?"AUDIT":"RECEIVING"}</strong> mode right now. `+
+      `⛔ Do not scan until the banner changes — it will switch to `+
+      `<strong>${m==="audit"?"AUDIT":"RECEIVING"}</strong> by itself in a moment.`);
   }
-  MODE = m; localStorage.setItem("mode", m);
+  pendingMode = null;
+  MODE = m; localStorage.setItem("mode", m); localStorage.setItem("modeAt", Date.now());
   document.body.classList.toggle("audit", isAudit());
   $("mReceive").className = isAudit()? "" : "on";
   $("mAudit").className   = isAudit()? "on" : "";
@@ -975,6 +1021,14 @@ function photoBtn(){
         helps us fix why it will not scan</span>
     </div>`;
 }
+
+document.addEventListener("click", e=>{
+  const id = e.target && e.target.id;
+  if(id!=="pickReceive" && id!=="pickAudit") return;
+  setMode(id==="pickAudit" ? "audit" : "receive");
+  localStorage.setItem("modeAt", Date.now());
+  clearPrompt();
+});
 
 document.addEventListener("change", async e=>{
   if(e.target.id!=="failPhoto") return;
@@ -1080,6 +1134,7 @@ function render(){
     const cls = r.saved==="saved"?"t-gs1":(r.saved==="FAILED"?"t-q":"t-man");
     return `<tr>
       <td>${esc(r.prod.name)}<div class="num" style="font-size:11px;color:var(--ink-3)">${esc(r.prod.sku)} · ${r.upc}</div>
+        ${r.audit?'<span class="tag t-man">AUDIT</span>':""}
         ${r.soft?'<span class="tag t-man">soft date</span>':""}
         ${r.unknownCls?'<span class="tag t-q">no storage class — assumed 14d</span>':""}</td>
       <td class="num"><span class="datecell" data-n="${r.n}"
@@ -1144,7 +1199,12 @@ async function start(){
     $("scan").focus();
     $("modes").style.display = "";
     setCount(COUNT);
+    /* ⛔ Read staleness BEFORE setMode — setMode stamps `modeAt`, so asking
+       afterwards always reports "fresh" and the prompt never fires. */
+    const staleMode = modeIsStale();
     setMode(MODE);          // paints the banner, labels, PO hint and roll-up
+    /* ⛔ After a gap, do NOT inherit the last person's mode silently. */
+    if(staleMode) askMode();
     $("foot").textContent =
       `Writing to “${CFG.listName}” on ${CFG.sitePath}. A row counts as saved only when SharePoint `+
       `returns its id — anything still showing “queued” or “FAILED” did not save. `+
