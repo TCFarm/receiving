@@ -149,6 +149,11 @@
       <input id="scan" autocomplete="off" autocapitalize="off" spellcheck="false"
              placeholder="ready" aria-label="Scan case label">
       <div class="hint" id="scanHint">Scan the MANUFACTURER label — not the yellow KEHE pick label.</div>
+      <div style="margin-top:9px">
+        <button id="cantScan" style="font-size:14px;padding:8px 13px;min-height:0">
+          Can&rsquo;t scan it?</button>
+        <span class="hint" style="display:inline;margin-left:9px">barcode too big, too tight, or damaged</span>
+      </div>
     </div>
 
     <div id="promptArea"></div>
@@ -591,6 +596,61 @@ function askFlag(){
     `<button class="primary" data-flag="yes">Yes — on the package</button>
      <button data-flag="no">No — case only</button>`);
 }
+/* ⛔ THE SCANNER IS NOT THE ONLY WAY IN (scanning team, 2026-08-16: some case
+   barcodes are "too big or too condensed" for the finger scanners).
+   Three ways to identify a case, in order of preference:
+
+     1. SCAN                      — fastest, and the date usually comes free
+     2. TYPE the printed digits   — already worked: `handle()` parses typed
+                                    input identically, it was just undiscoverable
+     3. FIND the product by name  — this panel, searching the local catalog
+
+   ⭐ Why search-by-name rather than photographing the barcode: product IDENTITY
+   is the part where a mistake is SILENT and expensive (a date attached to the
+   wrong SKU marks down the wrong stock). A DATE has two independent checks —
+   the plausible-range test and the monotonic floor in `_shared/best_by.py`.
+   So let the human do identity, where they are reliable, and keep the
+   validated field for the machine. */
+function askFind(){
+  prompt_("", "Find the product by name",
+    `Type part of the product or brand. ⛔ Only what is on the case in your hand
+     — a wrong pick dates the wrong stock.`,
+    `<input id="findq" type="text" autocomplete="off" autocapitalize="off"
+            spellcheck="false" placeholder="e.g. sour cream, cadia, mozzarella"
+            style="width:100%;font-size:18px;padding:11px;border:1px solid var(--line);
+                   border-radius:4px;background:var(--ground);color:var(--ink)"
+            aria-label="Search product name">
+     <div id="findres" style="margin-top:10px;max-height:46vh;overflow:auto"></div>`);
+  setTimeout(()=>{ const q=$("findq"); if(q){ q.focus();
+    q.addEventListener("input",()=>renderFind(q.value)); } },30);
+}
+
+function renderFind(q){
+  const box=$("findres"); if(!box) return;
+  const t=(q||"").trim().toLowerCase();
+  if(t.length<2){ box.innerHTML=`<div class="hint">Type at least two letters.</div>`; return; }
+  const words=t.split(/\s+/);
+  const hits=[];
+  for(const [upc,p] of Object.entries(CATALOG)){
+    const hay=((p.name||"")+" "+(p.sku||"")).toLowerCase();
+    if(words.every(w=>hay.includes(w))) hits.push([upc,p]);
+    if(hits.length>60) break;
+  }
+  if(!hits.length){ box.innerHTML=
+    `<div class="hint">No match. If it is genuinely not in our catalog, set the case
+      aside and carry on — tell Jack or Julia which product it was.</div>`; return; }
+  /* ⚠️ SKU and UPC are shown on every row on purpose: two sizes of the same
+     product read identically by name, and picking the wrong one is the exact
+     silent error this panel exists to avoid. */
+  box.innerHTML = hits.slice(0,40).map(([upc,p])=>
+    `<button class="findpick" data-upc="${upc}" style="display:block;width:100%;text-align:left;
+        margin:0 0 6px;padding:11px 13px;min-height:0;font-size:15px">
+       ${esc(p.name||"(no name)")}
+       <div class="num" style="font-size:11px;color:var(--ink-3);margin-top:2px">
+         ${esc(p.sku||"")} · ${upc} · ${esc(p.cls||"?")}</div>
+     </button>`).join("");
+}
+
 function askDate(){
   prompt_("", "No date on the label — enter it",
     `<strong>${esc(pending.prod.name)}</strong> — tap for a calendar, or type six digits MMDDYY.`,
@@ -779,6 +839,19 @@ function prompt_(kind,title,body,actions){
 function clearPrompt(){ $("promptArea").innerHTML=""; $("scan").value=""; $("scan").focus(); }
 
 document.addEventListener("click",e=>{
+  if(e.target.closest("#cantScan")) return askFind();
+  const fp=e.target.closest(".findpick");
+  if(fp){
+    const upc=fp.dataset.upc, prod=CATALOG[upc];
+    if(!prod) return;
+    /* ⭐ `keyed_notscannable` is its own source value, not folded into
+       keyed_bare. It measures how often the SCANNER failed rather than how
+       often the LABEL lacked a date — different problems, different fixes
+       (optics/technique vs supplier encoding). */
+    pending={upc, prod, gtin:"", lot:"", best:null,
+             source:(isAudit()?"audit_":"")+"keyed_notscannable"};
+    return next();
+  }
   const u=e.target.closest(".unitcell");
   if(u){
     const row=rows.find(r=>String(r.n)===u.dataset.n); if(!row) return;
