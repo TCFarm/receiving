@@ -306,17 +306,23 @@ function gtin14ToConsumer(g){
   return body;                           // genuine EAN-13, already complete
 }
 const eom=(y,m)=>new Date(y,m,0).getDate();
-const iso=(y,m,d)=>`${y}-${String(m).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
+const iso3=(y,m,d)=>`${y}-${String(m).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
 function parseGs1Date(v){
   const s=String(v||"").trim(); if(!s) return null;
+  /* ⛔ ISO FIRST. A label date barcode reads "2029/03/31"; the M/D/Y branch
+     below parses 2029 as a month, fails, and the whole scan was rejected as
+     UNREADABLE — 4 times in one shift (2026-08-18). */
+  const iso=s.match(/^(\d{4})[\/-](\d{1,2})[\/-](\d{1,2})$/);
+  if(iso){ const yy=+iso[1], mm=+iso[2], dd=+iso[3];
+    if(mm>=1&&mm<=12) return iso3(yy,mm,dd||eom(yy,mm)); }
   const m=s.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{2,4})$/);
   if(m){ let mm=+m[1],dd=+m[2],yy=+m[3]; if(yy<100) yy+=2000;
-    if(mm<1||mm>12) return null; return iso(yy,mm,dd||eom(yy,mm)); }
+    if(mm<1||mm>12) return null; return iso3(yy,mm,dd||eom(yy,mm)); }
   const d=s.replace(/\D/g,""); if(d.length!==6) return null;
   let yy=2000+ +d.slice(0,2), mm=+d.slice(2,4), dd=+d.slice(4,6);
   if(mm<1||mm>12) return null;
   if(yy-new Date().getFullYear()>50) yy-=100;
-  return iso(yy,mm,dd||eom(yy,mm));      // DD=00 means end of month
+  return iso3(yy,mm,dd||eom(yy,mm));      // DD=00 means end of month
 }
 function normalize(a){
   const o={...a};
@@ -498,6 +504,16 @@ const rows=[]; const rejects=[]; const flags={}; let pending=null; let queue=0;
    every future count of that SKU. Re-asking once per delivery is the cheap side
    of that trade. */
 const packs={};
+/* ⭐ The case GTIN is NOT derivable from the consumer UPC. Verified 2026-08-18:
+   a Cadia case scanned 10015369012882 — a VALID GTIN, just a different GS1
+   number than the retail unit's 815369012881 (prefix 0015369 vs 815369).
+   Manufacturers routinely assign a separate case GTIN, so `gtin14ToConsumer`
+   can never resolve those by arithmetic — they must be LOOKED UP.
+   So when a scan fails to resolve, hold it: if the operator then identifies the
+   product by name, the receipt row carries BOTH the raw GTIN and the right SKU,
+   and a catalog rebuild turns that pairing into a permanent alias. Two steps
+   ONCE per product, one scan for ever after. */
+let unresolved=null;
 const device = (()=>{ let d=localStorage.getItem("dev"); if(!d){ d="t"+rand(3); localStorage.setItem("dev",d);} return d; })();
 
 function handle(raw){
@@ -517,15 +533,41 @@ function handle(raw){
   if(gtin && !gtinOk){ reject("BAD_CHECKDIGIT", v, "");
     return prompt_("stop","Bad read — rescan",
       `GTIN <span class="num">${esc(gtin)}</span> fails its own check digit. Nothing was recorded.`); }
+  /* ⭐ MANY LABELS PUT THE DATE ON ITS OWN BARCODE. If something is already
+     waiting for a date and this scan is a plausible date, that IS the answer —
+     do not reject it. Measured 2026-08-18: 88% of rows had to be keyed because
+     the date arrived on a second barcode the page threw away. */
+  if(!gtin && pending && !pending.best && /[\/-]/.test(v)){
+    /* ⛔ REQUIRE A SEPARATOR. A bare 6-digit code parses happily as YYMMDD, and
+       lot codes of exactly that shape are in circulation — "270708" was scanned
+       today and would silently become 2027-07-08 on the wrong item. Every real
+       date barcode seen so far carries separators ("2029/03/31", "12/14/26"),
+       so demanding one costs nothing and removes the whole false-accept class. */
+    const asDate = parseGs1Date(v);
+    if(asDate && plausibleBB(asDate)){
+      pending.best = asDate;
+      pending.source = (pending.source||"").replace(/^audit_/,"")==="keyed_bare"
+        ? (isAudit()?"audit_":"")+"scanned_date" : pending.source;
+      return next();
+    }
+  }
   if(!upc){ reject("UNREADABLE", v, "");
     return prompt_("stop","Unrecognised code",
       `No GTIN or UPC in <span class="num">${esc(v.slice(0,44))}</span>. If this is the yellow KEHE pick label, scan the manufacturer label instead — its date is not the best-by.`); }
 
   const prod = CATALOG[upc];
   if(!prod){ reject("UNKNOWN_UPC", v, upc);
+    unresolved = {gtin: gtin || "", upc, raw: v};
+    /* ⭐ Not a dead end. The case may well be a product we DO carry whose UPC
+       is missing or different in BigCommerce — 29% of BC products carry no UPC
+       at all, so a code that fails to resolve says little about whether we
+       stock it. Offer the name search right here. */
     return prompt_("stop","Unknown UPC",
-      `<span class="num">${upc}</span> is not in the catalog. Set the case aside and carry on — we have recorded the code, so nobody needs to write it down.`); }
-
+      `<span class="num">${upc}</span> is not in the catalog — recorded, so nobody
+       needs to write it down. It may still be a product we carry under a
+       different code.
+       <br><br><button class="primary" id="unkFind">Find it by name</button>`);
+  }
   /* source answers "how often did the label do the work for us?" without
      anyone tallying it (Jack, 2026-08-13):
        gs1              → date came encoded in the barcode, zero typing
@@ -670,7 +712,33 @@ function askDate(){
   },30);
 }
 
+/* ⛔ A best-by already in the past is either expired stock on the shelf or a
+   keying slip, and BOTH need a human. Accepted silently on 2026-08-18:
+   DIngd5167SmO went in with best_by 2026-07-28, twenty-one days gone. */
+function plausibleBB(d){
+  try{
+    const t=new Date(); t.setHours(0,0,0,0);
+    const x=new Date(d+"T00:00:00");
+    const days=Math.round((x-t)/86400000);
+    return days>=-1 && days<=1825;      // not past, not beyond ~5 years
+  }catch(_){ return true; }
+}
+
 function commit(){
+  /* last gate before it becomes a receipt */
+  if(pending && pending.best && !plausibleBB(pending.best)){
+    const bad=pending.best; const p=pending;
+    return prompt_("stop","Check that date",
+      `<strong>${esc(p.prod.name)}</strong> — <span class="num">${bad}</span> is
+       in the past or implausibly far out. If the case really is expired, set it
+       aside. If it was mistyped, re-enter it.`,
+      `<button class="primary" id="bbRedo">Re-enter the date</button>
+       <button id="bbKeep">It really is ${esc(bad)} — record it</button>`);
+  }
+  commit_();
+}
+
+function commit_(){
   const p=pending; pending=null;
   /* Storage class comes from __Storage_Location, falling back to the SKU
      prefix — R=Refrigerated, D=Dry, F=Frozen (Jack, 2026-08-11). That
@@ -829,7 +897,7 @@ function flash(r){
     <div class="meta">${r.upc} · best by ${r.best} · order by ${addDays(r.best,-6)}${r.lot?" · lot "+esc(r.lot):""}</div></div>`;
 }
 function addDays(s,n){ const [y,m,d]=s.split("-").map(Number);
-  const dt=new Date(y,m-1,d+n); return iso(dt.getFullYear(),dt.getMonth()+1,dt.getDate()); }
+  const dt=new Date(y,m-1,d+n); return iso3(dt.getFullYear(),dt.getMonth()+1,dt.getDate()); }
 
 function prompt_(kind,title,body,actions){
   $("promptArea").innerHTML=`<div class="prompt ${kind}"><h2>${title}</h2><p>${body}</p>${actions||""}</div>`;
@@ -840,6 +908,9 @@ function clearPrompt(){ $("promptArea").innerHTML=""; $("scan").value=""; $("sca
 
 document.addEventListener("click",e=>{
   if(e.target.closest("#cantScan")) return askFind();
+  if(e.target.closest("#unkFind")) return askFind();
+  if(e.target.closest("#bbRedo") && pending){ pending.best=null; return askDate(); }
+  if(e.target.closest("#bbKeep") && pending){ return commit_(); }
   const fp=e.target.closest(".findpick");
   if(fp){
     const upc=fp.dataset.upc, prod=CATALOG[upc];
@@ -848,8 +919,15 @@ document.addEventListener("click",e=>{
        keyed_bare. It measures how often the SCANNER failed rather than how
        often the LABEL lacked a date — different problems, different fixes
        (optics/technique vs supplier encoding). */
-    pending={upc, prod, gtin:"", lot:"", best:null,
-             source:(isAudit()?"audit_":"")+"keyed_notscannable"};
+    /* ⛔ Do NOT drop the unresolved GTIN here — it is the whole point. An
+       earlier version set gtin:"" and threw away the pairing that makes the
+       case code learnable. */
+    const carry = unresolved || {};
+    pending={upc, prod, gtin: carry.gtin || "", lot:"", best:null,
+             source:(isAudit()?"audit_":"") +
+                    (carry.gtin ? "keyed_casecode" : "keyed_notscannable"),
+             alias_for: carry.gtin || carry.upc || ""};
+    unresolved = null;
     return next();
   }
   const u=e.target.closest(".unitcell");
