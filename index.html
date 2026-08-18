@@ -131,6 +131,7 @@
 
   <div id="app" style="display:none">
     <div id="bannerArea"></div>
+  <div id="heldArea"></div>
 
     <div class="scanbox" id="scanbox" style="border-color:var(--line)">
       <label class="big" for="po" id="poLabel">Delivery / PO number — optional</label>
@@ -256,6 +257,38 @@ const poVal = () => (($("po")||{}).value||"").trim();
 let MODE = localStorage.getItem("mode") === "audit" ? "audit" : "receive";
 /* A switch asked for while rows are still saving, applied when the queue drains. */
 let pendingMode = null;
+/* ⛔ 60% OF ALL REJECTS ON 2026-08-18 WERE RE-TRIES OF A CODE THAT HAD ALREADY
+   FAILED — one code six times, another five, a date string four. Rescanning
+   cannot help: the code is not in the catalog, or is not a product code at all.
+   The page said the same thing every time, so the only way out anyone found was
+   to stop. Count the failures and CHANGE THE ADVICE on the second one. */
+const failCount = new Map();
+function failedBefore(raw){
+  const k=String(raw||"").trim(); const n=(failCount.get(k)||0)+1;
+  failCount.set(k,n); return n;
+}
+/* A date barcode scanned before its item, held until the item arrives. */
+let heldDate = null;
+const HELD_DATE_MAX_MS = 4*60*1000;   /* ⛔ expires — a stale held date would
+   otherwise land silently on whatever gets scanned next, which is worse than
+   asking. Shown on screen the whole time it is live. */
+function heldDateValid(){
+  if(!heldDate) return false;
+  if(Date.now()-heldDate.at > HELD_DATE_MAX_MS){ heldDate=null; renderHeld(); return false; }
+  return true;
+}
+function renderHeld(){
+  const el=$("heldArea"); if(!el) return;
+  el.innerHTML = heldDateValid()
+    ? `<div class="banner"><strong>Holding best-by ${heldDate.date}</strong> — scan the item it
+       belongs to. <button id="dropHeld" style="margin-left:8px">Discard</button></div>` : "";
+}
+/* Does this look like a product code at all? Used to keep a bare 6-digit lot
+   from being read as a date, and a date from being read as a product. */
+function upcCandidate(v){
+  const d=String(v||"").replace(/\D/g,"");
+  return d.length===12 || d.length===13 || d.length===14;
+}
 /* ⛔ THE MODE IS STICKY IN localStorage, AND THAT IS A TRAP. Whoever picked up
    this tablet last set it, possibly days ago, so "what mode am I in?" is not a
    question the operator can answer from memory. On 2026-08-18 a whole evening
@@ -295,6 +328,15 @@ function rand(n){ const a=new Uint8Array(n); crypto.getRandomValues(a); return b
 
 /* ---------- GS1 parsing (ported from gs1_case_label.py) ---------- */
 const FIXED={"00":18,"01":14,"02":14,"11":6,"12":6,"13":6,"15":6,"16":6,"17":6,"20":2};
+/* ⛔ MEASUREMENT AIs SIT BETWEEN THE GTIN AND THE DATE ON EVERY VARIABLE-WEIGHT
+   CASE (cheese, deli, meat), and an AI we do not know ABORTS the parse — so the
+   best-by that follows it is silently thrown away. Measured 2026-08-18: a
+   Rumiano case read
+       (01)10811355127062 (3202)000450 (15)261120 (10)0702643
+   and we captured the GTIN, hit 3202, stopped, and made someone type the date
+   that was right there. AI 31nn–36nn are all 4 chars + 6 digits. */
+for(const p of ["31","32","33","34","35","36"])
+  for(let i=0;i<100;i++) FIXED[p+String(i).padStart(2,"0")]=6;
 const VAR={"10":20,"21":20,"30":8,"37":8};
 const GS=String.fromCharCode(29);
 
@@ -555,6 +597,20 @@ function handle(raw){
      waiting for a date and this scan is a plausible date, that IS the answer —
      do not reject it. Measured 2026-08-18: 88% of rows had to be keyed because
      the date arrived on a second barcode the page threw away. */
+  /* ⭐ THE DATE MAY ARRIVE FIRST. Nothing says the operator scans the UPC before
+     the date barcode, and refusing a date because no item is pending is what
+     made someone scan "2029/03/31" FOUR times on 2026-08-18 and then give up.
+     Hold it, say so on screen, and apply it to the next item scanned. */
+  if(!gtin && !upcCandidate(v) && !pending && /[\/-]/.test(v)){
+    const d0=parseGs1Date(v);
+    if(d0 && plausibleBB(d0)){
+      heldDate={date:d0, at:Date.now()};
+      renderHeld();
+      return prompt_("go","Date captured — now scan the item",
+        `Best-by <strong>${d0}</strong> is being held. Scan the item's barcode next `+
+        `and it will be filled in for you. <button class="primary" id="dropHeld">Discard it</button>`);
+    }
+  }
   if(!gtin && pending && !pending.best && /[\/-]/.test(v)){
     /* ⛔ REQUIRE A SEPARATOR. A bare 6-digit code parses happily as YYMMDD, and
        lot codes of exactly that shape are in circulation — "270708" was scanned
@@ -570,24 +626,47 @@ function handle(raw){
     }
   }
   if(!upc){ reject("UNREADABLE", v, "");
-    return prompt_("stop","Unrecognised code",
-      `No GTIN or UPC in <span class="num">${esc(v.slice(0,44))}</span>. If this is the yellow KEHE pick label, scan the manufacturer label instead — its date is not the best-by.`); }
+    const tries = failedBefore(v);
+    return prompt_("stop", tries>1 ? `That code is not a product code — ${tries} tries`
+                                   : "Unrecognised code",
+      tries>1
+      ? `<span class="num">${esc(v.slice(0,44))}</span> is a <strong>lot or date code, not a
+         product code</strong> — rescanning it will never work.
+         <br><br>Scan the <strong>UPC barcode on the case</strong> first. If the date is on its
+         own barcode, scan that <em>after</em> the item (or before — it will be held).
+         <br><br>${photoBtn()}`
+      : `No GTIN or UPC in <span class="num">${esc(v.slice(0,44))}</span>. If this is the yellow KEHE pick label, scan the manufacturer label instead — its date is not the best-by. ${photoBtn()}`); }
 
   const prod = CATALOG[upc];
   if(!prod){ reject("UNKNOWN_UPC", v, upc);
-    unresolved = {gtin: gtin || "", upc, raw: v};
+    /* ⛔ KEEP THE DATE. The label often encodes a perfectly good best-by beside a
+       GTIN we simply do not have on file; discarding it here forces the operator
+       to key a date the barcode already told us. */
+    unresolved = {gtin: gtin || "", upc, raw: v, bb: ais["17"]||ais["15"]||""};
     /* ⭐ Not a dead end. The case may well be a product we DO carry whose UPC
        is missing or different in BigCommerce — 29% of BC products carry no UPC
        at all, so a code that fails to resolve says little about whether we
        stock it. Offer the name search right here. */
-    return prompt_("stop","Unknown UPC",
-      `<span class="num">${upc}</span> is not in the catalog — recorded, so nobody
-       needs to write it down.
-       <br><br><strong>Did you scan the barcode under the UPC numbers on the
-       retail item</strong>, rather than a case or shipping label? Those often
-       carry a different code entirely.
-       <br><br><button class="primary" id="unkFind">Find it by name</button>
-       ${photoBtn()}`);
+    const tries = failedBefore(v);
+    /* ⛔ On a repeat, do NOT repeat the advice. The first message asks a question
+       worth asking once; after that the honest answer is "this will not scan,
+       here are the two things that DO work". */
+    return prompt_("stop", tries>1 ? `Still not found — ${tries} tries` : "Unknown UPC",
+      tries>1
+      ? `<span class="num">${upc}</span> is <strong>not in the catalog, and rescanning
+         cannot change that</strong> — the code is recorded either way, so please stop
+         rescanning and do one of these:
+         <br><br><button class="primary" id="unkFind">① Find it by name</button>
+         ${photoBtn()}
+         <br><span class="hint">If neither works, set the case aside and carry on —
+         nothing is lost, we have the code.</span>`
+      : `<span class="num">${upc}</span> is not in the catalog — recorded, so nobody
+         needs to write it down.
+         <br><br><strong>Did you scan the barcode under the UPC numbers on the
+         retail item</strong>, rather than a case or shipping label? Those often
+         carry a different code entirely.
+         <br><br><button class="primary" id="unkFind">Find it by name</button>
+         ${photoBtn()}`);
   }
   /* source answers "how often did the label do the work for us?" without
      anyone tallying it (Jack, 2026-08-13):
@@ -600,8 +679,12 @@ function handle(raw){
   const wasGs1 = !!(ais["01"]||ais["02"]);
   /* ⛔ The audit_ prefix is applied HERE, at the single point where source is
      decided, so no later branch can produce an unprefixed audit row. */
-  const how = dated ? "gs1" : (wasGs1 ? "keyed_gs1nodate" : "keyed_bare");
-  pending={upc,prod,gtin:gtin||"",lot:ais["10"]||"",best:dated||null,
+  let best = dated || null, how = dated ? "gs1" : (wasGs1 ? "keyed_gs1nodate" : "keyed_bare");
+  /* ⭐ A date scanned just before the item lands here. The label's own date always
+     wins — the held one is only a stand-in for what the operator would have keyed. */
+  if(!best && heldDateValid()){ best = heldDate.date; how = "scanned_date";
+                                heldDate = null; renderHeld(); }
+  pending={upc,prod,gtin:gtin||"",lot:ais["10"]||"",best,
            source: (isAudit()? "audit_" : "") + how};
   next();
 }
@@ -1023,6 +1106,7 @@ function photoBtn(){
 }
 
 document.addEventListener("click", e=>{
+  if(e.target && e.target.id==="dropHeld"){ heldDate=null; renderHeld(); clearPrompt(); return; }
   const id = e.target && e.target.id;
   if(id!=="pickReceive" && id!=="pickAudit") return;
   setMode(id==="pickAudit" ? "audit" : "receive");
@@ -1067,7 +1151,9 @@ document.addEventListener("click",e=>{
        earlier version set gtin:"" and threw away the pairing that makes the
        case code learnable. */
     const carry = unresolved || {};
-    pending={upc, prod, gtin: carry.gtin || "", lot:"", best:null,
+    const carriedBb = carry.bb ? parseGs1Date(carry.bb) : null;
+    pending={upc, prod, gtin: carry.gtin || "", lot:"",
+             best: (carriedBb && plausibleBB(carriedBb)) ? carriedBb : null,
              source:(isAudit()?"audit_":"") +
                     (carry.gtin ? "keyed_casecode" : "keyed_notscannable"),
              alias_for: carry.gtin || carry.upc || ""};
