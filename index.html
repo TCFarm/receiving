@@ -504,6 +504,8 @@ const rows=[]; const rejects=[]; const flags={}; let pending=null; let queue=0;
    every future count of that SKU. Re-asking once per delivery is the cheap side
    of that trade. */
 const packs={};
+const PHOTO_FOLDER = "BB Receipts Photos";
+let lastFail = null;   // {kind, raw, upc} — what the photo prompt is about
 /* ⭐ The case GTIN is NOT derivable from the consumer UPC. Verified 2026-08-18:
    a Cadia case scanned 10015369012882 — a VALID GTIN, just a different GS1
    number than the retail unit's 815369012881 (prefix 0015369 vs 815369).
@@ -564,9 +566,12 @@ function handle(raw){
        stock it. Offer the name search right here. */
     return prompt_("stop","Unknown UPC",
       `<span class="num">${upc}</span> is not in the catalog — recorded, so nobody
-       needs to write it down. It may still be a product we carry under a
-       different code.
-       <br><br><button class="primary" id="unkFind">Find it by name</button>`);
+       needs to write it down.
+       <br><br><strong>Did you scan the barcode under the UPC numbers on the
+       retail item</strong>, rather than a case or shipping label? Those often
+       carry a different code entirely.
+       <br><br><button class="primary" id="unkFind">Find it by name</button>
+       ${photoBtn()}`);
   }
   /* source answers "how often did the label do the work for us?" without
      anyone tallying it (Jack, 2026-08-13):
@@ -796,6 +801,45 @@ async function save(row){
   }
 }
 
+/* ⭐ PHOTO ON FAILURE — for TROUBLESHOOTING, not as a substitute for data
+   (Jack, 2026-08-18: "take a photo of the box for any that fail to scan so you
+   can troubleshoot ... build up a more reliable tool").
+
+   ⛔ The distinction matters and is the reason this is safe: the reject row
+   ALREADY exists and the receipt still has to be captured properly by name.
+   The photo attaches EVIDENCE to a failure that is already recorded, so it
+   creates no queue of half-captured stock — the failure mode I refused this
+   feature over when it was framed as a way to log the item.
+
+   ⚠️ Downscaled in the browser first. A 5 MB phone photo over warehouse wifi
+   stalls the scan loop, and 1600px is far more than enough to read a barcode
+   and a printed date. */
+async function shrink(file, max=1600, quality=0.72){
+  const img = await new Promise((res,rej)=>{
+    const i=new Image(); i.onload=()=>res(i); i.onerror=rej;
+    i.src=URL.createObjectURL(file);
+  });
+  const scale = Math.min(1, max/Math.max(img.width,img.height));
+  const c=document.createElement("canvas");
+  c.width=Math.round(img.width*scale); c.height=Math.round(img.height*scale);
+  c.getContext("2d").drawImage(img,0,0,c.width,c.height);
+  URL.revokeObjectURL(img.src);
+  return await new Promise(r=>c.toBlob(r,"image/jpeg",quality));
+}
+
+async function uploadPhoto(file, label){
+  const blob = await shrink(file);
+  const stamp = new Date().toISOString().replace(/[:.]/g,"-");
+  const name = `${stamp}_${(label||"scan").replace(/[^A-Za-z0-9._-]/g,"")}.jpg`;
+  const t = await getToken();
+  const r = await fetch(
+    `${GRAPH}/drives/${CFG.driveId}/root:/${PHOTO_FOLDER}/${name}:/content`,
+    {method:"PUT", headers:{Authorization:"Bearer "+t, "Content-Type":"image/jpeg"}, body:blob});
+  if(!r.ok) throw new Error(`upload ${r.status}`);
+  const j = await r.json();
+  return {name, url: j.webUrl, kb: Math.round(blob.size/1024)};
+}
+
 async function reject(kind, raw, upc){
   /* Every scan the page REFUSED is written down (Jack, 2026-08-13). Nobody
      is going to keep a tally on paper, so if the page does not record its own
@@ -814,6 +858,7 @@ async function reject(kind, raw, upc){
      interrupt receiving. The on-screen counter is kept regardless, so even a
      total write failure still leaves the number visible for a screenshot. */
   rejects.push({kind, raw:String(raw||"").slice(0,60)});
+  lastFail = {kind, raw:String(raw||""), upc:upc||""};
   render();
   const base={ Title:"! "+kind };
   base[FIELD.sku]="!"+kind;  base[FIELD.upc]=upc||"";
@@ -826,6 +871,19 @@ async function reject(kind, raw, upc){
            {method:"POST", body:JSON.stringify({fields:variant})}); return; }
     catch(_){}
   }
+}
+
+async function patchDate(row){
+  /* ⛔ A wrong date could not be fixed. Units had tap-to-correct from the
+     start; the DATE — the whole point of the tool — had none, so a mis-key was
+     permanent (2026-08-18: Simply Organic garlic powder went in at 2026-07-28
+     when the case read 2029, and Julia had no way to put it right).
+     ⭐ Same PATCH path as units: correct the row that is already in SharePoint,
+     never write a second one. */
+  try{
+    await graph(`/sites/${siteId}/lists/${listId}/items/${row.id}/fields`,
+      {method:"PATCH", body: JSON.stringify({[FIELD.best_by]: row.best})});
+  }catch(e){ row.err="date not updated: "+e.message; render(); }
 }
 
 async function patchUnits(row){
@@ -904,6 +962,38 @@ function prompt_(kind,title,body,actions){
   $("scan").blur();
   if(!actions) setTimeout(clearPrompt, 2800);
 }
+/* One button, reused by every failure prompt. `capture=environment` opens the
+   rear camera straight away on a tablet. */
+function photoBtn(){
+  return `<div style="margin-top:11px">
+      <label for="failPhoto" style="display:inline-block;padding:10px 16px;border:1px solid var(--line);
+             border-radius:4px;background:var(--card);cursor:pointer;font-size:15px">
+        📷 Photograph the label</label>
+      <input id="failPhoto" type="file" accept="image/*" capture="environment"
+             style="display:none" aria-label="Photograph the label">
+      <span class="hint" id="photoMsg" style="display:inline;margin-left:9px">
+        helps us fix why it will not scan</span>
+    </div>`;
+}
+
+document.addEventListener("change", async e=>{
+  if(e.target.id!=="failPhoto") return;
+  const f=e.target.files && e.target.files[0]; if(!f) return;
+  const msg=$("photoMsg");
+  const fail = lastFail || {};
+  if(msg) msg.textContent="uploading…";
+  try{
+    const up = await uploadPhoto(f, (fail.kind||"scan")+"_"+(fail.raw||"").slice(0,20));
+    /* ⛔ Recorded as a REJECT row, never a receipt — it is evidence about a
+       failure, not stock. `raw_scan` carries the filename so the photo and the
+       code that failed stay tied together. */
+    await reject("PHOTO_"+(fail.kind||"SCAN"), `${fail.raw||""} PHOTO=${up.name}`, fail.upc||"");
+    if(msg) msg.textContent=`saved (${up.kb} KB) — thank you, carry on`;
+  }catch(err){
+    if(msg) msg.textContent="photo did not upload: "+err.message;
+  }
+});
+
 function clearPrompt(){ $("promptArea").innerHTML=""; $("scan").value=""; $("scan").focus(); }
 
 document.addEventListener("click",e=>{
@@ -929,6 +1019,20 @@ document.addEventListener("click",e=>{
              alias_for: carry.gtin || carry.upc || ""};
     unresolved = null;
     return next();
+  }
+  const dc=e.target.closest(".datecell");
+  if(dc){
+    const row=rows.find(r=>String(r.n)===dc.dataset.n); if(!row) return;
+    const val=window.prompt(
+      `Best-by for ${row.prod.name}?\nYYYY-MM-DD, or six digits MMDDYY.`, row.best);
+    if(val===null) return;
+    const d=parseGs1Date(val.trim());
+    if(!d) return alert("Could not read that as a date. Try 2029-03-31 or 033129.");
+    /* ⛔ The same plausibility gate as a fresh scan — a correction can be a
+       mis-key too, and this is the field the whole model runs on. */
+    if(!plausibleBB(d) && !confirm(`${d} is in the past or very far out. Record it anyway?`)) return;
+    row.best=d; render(); if(row.id) patchDate(row);
+    return;
   }
   const u=e.target.closest(".unitcell");
   if(u){
@@ -978,7 +1082,9 @@ function render(){
       <td>${esc(r.prod.name)}<div class="num" style="font-size:11px;color:var(--ink-3)">${esc(r.prod.sku)} · ${r.upc}</div>
         ${r.soft?'<span class="tag t-man">soft date</span>':""}
         ${r.unknownCls?'<span class="tag t-q">no storage class — assumed 14d</span>':""}</td>
-      <td class="num">${r.best}<div style="font-size:11px;color:var(--ink-3)">order by ${addDays(r.best,-6)}</div></td>
+      <td class="num"><span class="datecell" data-n="${r.n}"
+          style="cursor:pointer;border-bottom:1px dashed var(--ink-3)"
+          title="tap to correct the best-by">${r.best}</span><div style="font-size:11px;color:var(--ink-3)">order by ${addDays(r.best,-6)}</div></td>
       <td class="num"><span class="unitcell" data-n="${r.n}"
           style="cursor:pointer;border-bottom:1px dashed var(--ink-3)"
           title="tap to correct">${r.units ?? "?"}</span></td>
