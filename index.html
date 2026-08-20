@@ -289,6 +289,16 @@ function renderHeld(){
 }
 /* Does this look like a product code at all? Used to keep a bare 6-digit lot
    from being read as a date, and a date from being read as a product. */
+/* ⭐ SHELF-LOCATION BARCODES (2026-08-20). The racks carry location labels —
+   `DG-01-P1`, `DG-04-C1-L`, `DG-13-C1-C` — and during the first real audit sweep
+   the counter scanned one into the product box and got "Unrecognised code",
+   twice, before giving up and typing it. Scanning the location is FASTER and
+   less error-prone than typing it, so treat it as what it obviously is.
+   ⛔ The pattern must not collide with a product code: it requires two LETTERS,
+   a hyphen and digits, so no UPC/GTIN (all digits) can ever match. */
+const LOCATION_RE = /^[A-Z]{2}-\d{1,3}(-[A-Z0-9]{1,4}){1,3}$/i;
+const looksLikeLocation = v => LOCATION_RE.test(String(v||"").trim());
+
 function upcCandidate(v){
   const d=String(v||"").replace(/\D/g,"");
   return d.length===12 || d.length===13 || d.length===14;
@@ -593,6 +603,15 @@ async function handle(raw){
 }
 async function handleScan(raw){
   const v=(raw||"").trim(); if(!v) return;
+
+  /* ⭐ A location label sets WHERE we are counting — it is never a product.
+     ⚠️ Only in AUDIT mode: in receiving the same field carries the PO, and a
+     rack label there would silently mislabel a delivery. */
+  if(isAudit() && looksLikeLocation(v)){
+    const po=$("po"); if(po) po.value=v;
+    return prompt_("go","Location set",
+      `Now counting at <strong>${esc(v)}</strong>. Scan the items on this shelf.`);
+  }
   const ais=parseElementString(v);
   let gtin=ais["01"]||ais["02"]||null, upc=null, gtinOk=false;
   if(gtin){
