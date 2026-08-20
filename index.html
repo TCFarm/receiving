@@ -872,13 +872,23 @@ function renderFind(q){
   /* ⚠️ SKU and UPC are shown on every row on purpose: two sizes of the same
      product read identically by name, and picking the wrong one is the exact
      silent error this panel exists to avoid. */
+  /* ⭐ TWO actions per row. "Can't find it" is HERE, not on the date prompt,
+     because this panel is reachable WITHOUT scanning anything — which is the
+     whole situation being reported. (The first version put it on the date
+     prompt, which only opens after a successful scan: unreachable by
+     construction. Jack, 2026-08-20.) */
   box.innerHTML = hits.slice(0,40).map(([upc,p])=>
-    `<button class="findpick" data-upc="${upc}" style="display:block;width:100%;text-align:left;
-        margin:0 0 6px;padding:11px 13px;min-height:0;font-size:15px">
-       ${esc(p.name||"(no name)")}
-       <div class="num" style="font-size:11px;color:var(--ink-3);margin-top:2px">
-         ${esc(p.sku||"")} · ${upc} · ${esc(p.cls||"?")}</div>
-     </button>`).join("");
+    `<div style="display:flex;gap:6px;margin:0 0 6px">
+       <button class="findpick" data-upc="${upc}" style="flex:1;text-align:left;
+          margin:0;padding:11px 13px;min-height:0;font-size:15px">
+         ${esc(p.name||"(no name)")}
+         <div class="num" style="font-size:11px;color:var(--ink-3);margin-top:2px">
+           ${esc(p.sku||"")} · ${upc} · ${esc(p.cls||"?")}</div>
+       </button>
+       <button class="findmiss" data-upc="${upc}" title="Record that you looked here and it was not there"
+          style="margin:0;padding:11px 12px;min-height:0;font-size:13px;white-space:nowrap">
+         can't find it</button>
+     </div>`).join("");
 }
 
 function askDate(){
@@ -892,7 +902,6 @@ function askDate(){
        <button class="primary" id="dok">Save</button>
      </div>
      <div style="margin-top:11px">
-       <button id="notHere">Not on the shelf</button>
        <button id="noDate">No date printed on this product</button>
        <span class="hint" style="display:inline;margin-left:9px">
          soap, paper goods, cleaning supplies — many carry none</span>
@@ -1294,18 +1303,23 @@ document.addEventListener("click", e=>{
      product has none, so the SKU stops being asked and stops appearing on the
      scan worklist. The row carries NO best_by, so the drain's `no_date` skip
      keeps it out of the shelf-life ledger, exactly as it should. */
-  /* ⭐ OUT OF STOCK / NOT FOUND (2026-08-20). Seven worklist items were not on
-     the shelf and there was no way to say so — the counter just skipped them, so
-     the list looks half-done and nobody learns that Finale's count is wrong.
-     Recorded as telemetry (sentinel sku), never as a receipt. */
-  if(e.target && e.target.id==="notHere"){
-    if(!pending) return clearPrompt();
-    const sku=pending.prod.sku, nm=pending.prod.name;
-    pending=null; clearPrompt();
-    reject("NOT_ON_SHELF", `${sku} ${nm}`.slice(0,60), "");
-    return prompt_("go","Recorded as not on the shelf",
-      `<strong>${esc(nm)}</strong> — noted. Carry on with the next item.`);
-  }
+  /* ⛔ THERE IS NO "not on the shelf" BUTTON, AND THERE SHOULD NOT BE
+     (removed 2026-08-20, same day it was added — Jack: "where would they be
+     scanning 'not on shelf'? is that something where the item is just
+     backstock?").
+
+     Two things were wrong with it:
+       1. ⛔ UNREACHABLE. It sat inside the DATE prompt, which only opens after a
+          successful scan of the physical item. If the item is not there you have
+          nothing to scan, so the button could only ever be pressed when the
+          thing it described was false.
+       2. ⛔ WRONG CONCEPT. "Not in this pick slot" is NOT "out of stock" — it is
+          usually backstock. Recording it as OOS would put a false zero into the
+          one system that is supposed to be ground truth.
+
+     ⭐ Absence is DERIVED, not captured: sweep a location, and any SKU the
+     catalog says we hold that never appears is unaccounted for. That needs no
+     button and cannot be forgotten. */
   if(e.target && e.target.id==="noDate"){
     if(!pending) return clearPrompt();
     noDateSkus[pending.prod.sku]=1;
@@ -1355,6 +1369,24 @@ document.addEventListener("click",e=>{
   if(e.target.closest("#unkFind")) return askFind();
   if(e.target.closest("#bbRedo") && pending){ pending.best=null; return askDate(); }
   if(e.target.closest("#bbKeep") && pending){ return commit_(); }
+  /* ⛔ "COULDN'T FIND IT HERE" IS NOT "OUT OF STOCK" (Jack, 2026-08-20:
+     "is that something where the item is just backstock?"). It usually IS
+     backstock. So this records exactly what the person observed — they looked at
+     THIS location and it was not there — and nothing more. ⛔ It must never be
+     read as a stock count, which is why it is telemetry with a sentinel sku and
+     carries the location it was looked for at. */
+  const fm=e.target.closest(".findmiss");
+  if(fm){
+    const upc=fm.dataset.upc, prod=CATALOG[upc];
+    if(!prod) return;
+    const where = poVal() || "location not set";
+    reject("NOT_FOUND_HERE", `${prod.sku} ${prod.name} @ ${where}`.slice(0,60), upc);
+    clearPrompt();
+    return prompt_("go","Noted — not at this location",
+      `<strong>${esc(prod.name)}</strong> was not found at <strong>${esc(where)}</strong>.
+       <br><span class="hint">Recorded as "looked here, not here" — not as out of stock.
+       It may still be in backstock.</span>`);
+  }
   const fp=e.target.closest(".findpick");
   if(fp){
     const upc=fp.dataset.upc, prod=CATALOG[upc];
