@@ -664,6 +664,36 @@ async function handleScan(raw){
       return next();
     }
   }
+  /* ⭐ ACCEPT A TYPED SKU OR PRODUCT NAME (2026-08-20).
+     Watched a counter lose 7 minutes on one Zevia: they typed the SKU
+     (`DBevg2741Zva`), then a code, then the product name — three rejects in 70
+     seconds — before finding "Can't scan it?". Everything they typed was a
+     perfectly good way to identify the product; the box just refused to listen.
+     ⛔ A rejection here is never "we cannot know what this is" — it is "we did
+     not try the obvious readings". */
+  if(!upc){
+    // 1) an exact SKU -> resolve it outright, no search needed
+    const bySku = Object.entries(CATALOG).find(([u,p]) =>
+      (p.sku||"").toLowerCase() === v.toLowerCase());
+    if(bySku){
+      const [u2,p2] = bySku;
+      unresolved = null;
+      pending = {upc:u2, prod:p2, gtin:"", lot:"", best:null,
+                 source:(isAudit()?"audit_":"") + "keyed_sku"};
+      return next();
+    }
+    // 2) words, not a code -> it is a NAME. Open the search already filled in.
+    /* ⛔ Test the ORIGINAL string, not its digits. The first version asked
+       whether `v.replace(/\D/g,"")` was all digits — for "Zevia … - 12oz" that
+       is "12", which of course IS all digits, so the guard inverted and the name
+       path never ran. Three or more consecutive letters is the whole test; a
+       pure number like "2203448" has none and correctly falls through. */
+    if(/[a-z]{3}/i.test(v)){
+      askFind();
+      setTimeout(()=>{ const b=$("findq"); if(b){ b.value=v; renderFind(v); } }, 40);
+      return;
+    }
+  }
   if(!upc){ reject("UNREADABLE", v, "");
     const tries = failedBefore(v);
     return prompt_("stop", tries>1 ? `That code is not a product code — ${tries} tries`
@@ -862,7 +892,12 @@ function renderFind(q){
   const words=t.split(/\s+/);
   const hits=[];
   for(const [upc,p] of Object.entries(CATALOG)){
-    const hay=((p.name||"")+" "+(p.sku||"")).toLowerCase();
+    /* ⛔ SEARCH THE BRAND TOO. The catalog keeps brand separate from name, and
+       the haystack was name+sku only — so typing "Zevia Sugar Orange Soda"
+       returned NOTHING even though we stock it, because "Zevia" lives in `br`.
+       People identify products by brand first; leaving it out made the search
+       useless in exactly the case it exists for. (2026-08-20) */
+    const hay=((p.br||"")+" "+(p.name||"")+" "+(p.sku||"")).toLowerCase();
     if(words.every(w=>hay.includes(w))) hits.push([upc,p]);
     if(hits.length>60) break;
   }
@@ -881,7 +916,7 @@ function renderFind(q){
     `<div style="display:flex;gap:6px;margin:0 0 6px">
        <button class="findpick" data-upc="${upc}" style="flex:1;text-align:left;
           margin:0;padding:11px 13px;min-height:0;font-size:15px">
-         ${esc(p.name||"(no name)")}
+         ${p.br? `<span style="color:var(--ink-2)">${esc(p.br)}</span> ` : ""}${esc(p.name||"(no name)")}
          <div class="num" style="font-size:11px;color:var(--ink-3);margin-top:2px">
            ${esc(p.sku||"")} · ${upc} · ${esc(p.cls||"?")}</div>
        </button>
