@@ -132,6 +132,7 @@
   <div id="app" style="display:none">
     <div id="bannerArea"></div>
   <div id="heldArea"></div>
+  <div id="pendingArea"></div>
 
     <div class="scanbox" id="scanbox" style="border-color:var(--line)">
       <label class="big" for="po" id="poLabel">Delivery / PO number — optional</label>
@@ -272,6 +273,10 @@ let lastCatalogFetch = 0;
 const CATALOG_REFETCH_MS = 60*1000;   /* ⛔ cooldown: a burst of unknown scans must
    not turn into a burst of requests. One minute is far shorter than the gap
    between adding a product in BC and the next case reaching the scanner. */
+/* SKUs confirmed to carry no printed date — remembered so the sweep is not
+   stopped by the same soap twice. */
+let noDateSkus = (()=>{ try{ return JSON.parse(localStorage.getItem("noDateSkus")||"{}"); }
+                        catch(_){ return {}; } })();
 let heldDate = null;
 const HELD_DATE_MAX_MS = 4*60*1000;   /* ⛔ expires — a stale held date would
    otherwise land silently on whatever gets scanned next, which is worse than
@@ -775,7 +780,12 @@ function next(){
      so audit mode skips it. */
   if(!isAudit() && prod.cls==="Frozen" && flags[prod.sku]===undefined) return askFlag();
   if(packNeeded()) return askPack();
-  if(!pending.best) return askDate();
+  /* already established that this product carries no date — do not ask again */
+  if(!pending.best && noDateSkus[pending.prod.sku] && !pending.noDate){
+    pending.noDate = true;
+    pending.source = (isAudit()?"audit_":"") + "no_date_on_package";
+  }
+  if(!pending.best && !pending.noDate) return askDate();
   if(pending.fromHeld && !pending.heldConfirmed) return askConfirmHeld();
   commit();
 }
@@ -880,6 +890,12 @@ function askDate(){
        <input id="typed" type="text" class="num" inputmode="numeric" maxlength="6"
               placeholder="MMDDYY" aria-label="Type best by as MMDDYY">
        <button class="primary" id="dok">Save</button>
+     </div>
+     <div style="margin-top:11px">
+       <button id="notHere">Not on the shelf</button>
+       <button id="noDate">No date printed on this product</button>
+       <span class="hint" style="display:inline;margin-left:9px">
+         soap, paper goods, cleaning supplies — many carry none</span>
      </div>`);
   setTimeout(()=>{
     const el=$("typed"), pick=$("pick");
@@ -937,11 +953,70 @@ function commit_(){
      worse than a blank somebody fills in. */
   const _pk = packFor(p.prod.sku, p.prod.pack);
   const dflt = isAudit() && COUNT==="units" ? 1 : (_pk > 0 ? _pk : null);
+  /* ⛔ Capture the PO / shelf area ON THE ROW. A recovered scan is sent later,
+     possibly after someone has moved to another shelf — reading the live field
+     at send time would file it to the wrong location. */
   const row={ ...p, cls, unknownCls, soft: cls==="Frozen" && flags[p.prod.sku]===false,
-              units: dflt, audit: isAudit(), saved:"queued", id:null, n:rows.length+1 };
+              units: dflt, audit: isAudit(), _po: poVal(),
+              saved:"queued", id:null, n:rows.length+1 };
   rows.unshift(row); queue++;
-  clearPrompt(); render(); flash(row);
+  persistPending();                 // ⭐ on disk BEFORE the network is touched
+  clearPrompt(); render(); renderPending(); flash(row);
   save(row);
+}
+
+/* ⛔ A SCAN MUST SURVIVE A DROPPED CONNECTION (2026-08-20).
+   Six audit scans were lost to "Failed to fetch" — the wifi drops in the racks,
+   `fetch` throws before the request completes, four retries burn out inside ~5
+   seconds, and the row died with the page. The counter saw a red FAILED tag and
+   moved on; the units were never recorded and nobody could tell which they were.
+
+   Unsaved rows are now mirrored into localStorage the moment they are committed
+   and removed only once SharePoint returns an id. They are re-loaded on the next
+   page load and retried automatically whenever the browser comes back online.
+   ⚠️ localStorage survives a reload, a crash and a battery death — the queue does
+   NOT depend on the page staying open. */
+const PENDING_KEY = "unsaved_v1";
+
+function persistPending(){
+  try{
+    const out = rows.filter(r => r.saved !== "saved").map(r => ({
+      upc:r.upc, prod:r.prod, best:r.best, lot:r.lot, units:r.units,
+      source:r.source, audit:r.audit, gtin:r.gtin, heldRaw:r.heldRaw,
+      /* ⛔ key it `_po`, the SAME name the row uses — persisting it as `po` and
+         restoring with a spread silently dropped the shelf location, and the
+         recovered scan filed as "AUDIT:unspecified". */
+      cls:r.cls, _po:r._po, noDate:r.noDate, n:r.n }));
+    localStorage.setItem(PENDING_KEY, JSON.stringify(out));
+  }catch(_){ /* quota or private mode — never let this break a scan */ }
+}
+
+function loadPending(){
+  try{ return JSON.parse(localStorage.getItem(PENDING_KEY) || "[]"); }
+  catch(_){ return []; }
+}
+
+async function retryPending(){
+  const stuck = rows.filter(r => r.saved === "FAILED");
+  if(!stuck.length) return;
+  for(const r of stuck){ r.saved = "queued"; r.err = ""; }
+  render();
+  for(const r of stuck) await save(r);
+}
+
+/* ⭐ The browser tells us when the network is back — retry immediately rather
+   than waiting for someone to notice the red tags. */
+window.addEventListener("online", () => { renderPending(); retryPending(); });
+setInterval(() => { if(navigator.onLine) retryPending(); }, 45000);
+
+function renderPending(){
+  const el = $("pendingArea"); if(!el) return;
+  const n = rows.filter(r => r.saved !== "saved").length;
+  el.innerHTML = n ? `<div class="banner" style="border-left-color:var(--stop)">
+      <strong>${n} scan${n>1?"s":""} not saved yet.</strong>
+      ${navigator.onLine ? "Retrying automatically." : "No network — they are held safely and will send when it returns."}
+      Do not clear the browser data. <button id="retryNow" style="margin-left:8px">Retry now</button>
+    </div>` : "";
 }
 
 async function save(row){
@@ -952,12 +1027,13 @@ async function save(row){
   /* ⛔ `row.audit` is captured at commit time, NOT read from the live MODE.
      A row can still be retrying in the queue when someone flips the toggle, and
      re-reading MODE here would relabel an in-flight row as the other kind. */
-  const ref = row.audit ? ("AUDIT:" + (poVal() || "unspecified")) : poVal();
+  const po = (row._po !== undefined && row._po !== null) ? row._po : poVal();
+  const ref = row.audit ? ("AUDIT:" + (po || "unspecified")) : po;
   /* ⭐ When the date arrived on its own barcode there is no case GTIN to store,
      so the raw date scan goes in its place, tagged. `case_aliases()` only reads
      14-digit values, so this can never be mistaken for a case code. */
   const g14 = row.gtin || (row.heldRaw ? ("RAW:"+String(row.heldRaw).slice(0,40)) : "");
-  const v={ upc:row.upc, sku:row.prod.sku, gtin14:g14, best_by:row.best,
+  const v={ upc:row.upc, sku:row.prod.sku, gtin14:g14, best_by:row.best || "",
             lot:row.lot||"", units:row.units ?? 0, source:row.source,
             operator:account, po_ref:ref, device };
   const fields={ Title: `${row.audit?"AUDIT ":""}${row.prod.sku} ${row.best}` };
@@ -969,6 +1045,7 @@ async function save(row){
       /* ⛔ Only a returned id counts as saved. A 2xx with no id is NOT success. */
       if(!created || !created.id) throw new Error("no item id returned");
       row.saved="saved"; row.id=created.id; queue--;
+      persistPending(); renderPending();
       render();
       if(pendingMode && !rows.some(r=>r.saved!=="saved")){
         const want=pendingMode; pendingMode=null; setMode(want);
@@ -976,7 +1053,11 @@ async function save(row){
       return;
     }catch(e){
       row.err = e.message;
-      if(attempt===3){ row.saved="FAILED"; queue--; render(); return; }
+      if(attempt===3){
+        /* ⛔ FAILED is not final and must not read as final — the row stays in
+           the persisted queue and the auto-retry keeps trying. */
+        row.saved="FAILED"; queue--; persistPending(); renderPending(); render(); return;
+      }
       await new Promise(r=>setTimeout(r, 600*Math.pow(2,attempt)));
     }
   }
@@ -1172,9 +1253,18 @@ function setCount(c){
 /* ---------- UI ---------- */
 function flash(r){
   $("lastArea").innerHTML=`<div class="last"><div class="nm">✓ ${esc(r.prod.name)}</div>
-    <div class="meta">${r.upc} · best by ${r.best} · order by ${addDays(r.best,-6)}${r.lot?" · lot "+esc(r.lot):""}</div></div>`;
+    <div class="meta">${r.upc} · ${r.best
+        ? `best by ${r.best} · order by ${addDays(r.best,-6)}`
+        : `no date printed`}${r.lot?" · lot "+esc(r.lot):""}</div></div>`;
 }
-function addDays(s,n){ const [y,m,d]=s.split("-").map(Number);
+function addDays(s,n){
+  /* ⛔ RETURN "" FOR A MISSING DATE, NEVER THROW. A "no date printed" row has
+     best===null, and this threw inside render() — one bar of soap would have
+     frozen the whole sweep mid-shelf. Guarding the three CALL SITES was the
+     wrong fix: I patched two, deployed nothing, and the third (the audit
+     roll-up) still crashed. Guard the helper. */
+  if(!s) return "";
+  const [y,m,d]=s.split("-").map(Number);
   const dt=new Date(y,m-1,d+n); return iso3(dt.getFullYear(),dt.getMonth()+1,dt.getDate()); }
 
 function prompt_(kind,title,body,actions){
@@ -1197,6 +1287,34 @@ function photoBtn(){
 }
 
 document.addEventListener("click", e=>{
+  if(e.target && e.target.id==="retryNow"){ retryPending(); return; }
+  /* ⭐ SOME PRODUCTS CARRY NO DATE AT ALL (2026-08-20). Soap, parchment paper and
+     disinfectant spray all stalled the sweep because a date was mandatory. ⛔ The
+     answer is NOT to invent one — it is recorded as a real observation that this
+     product has none, so the SKU stops being asked and stops appearing on the
+     scan worklist. The row carries NO best_by, so the drain's `no_date` skip
+     keeps it out of the shelf-life ledger, exactly as it should. */
+  /* ⭐ OUT OF STOCK / NOT FOUND (2026-08-20). Seven worklist items were not on
+     the shelf and there was no way to say so — the counter just skipped them, so
+     the list looks half-done and nobody learns that Finale's count is wrong.
+     Recorded as telemetry (sentinel sku), never as a receipt. */
+  if(e.target && e.target.id==="notHere"){
+    if(!pending) return clearPrompt();
+    const sku=pending.prod.sku, nm=pending.prod.name;
+    pending=null; clearPrompt();
+    reject("NOT_ON_SHELF", `${sku} ${nm}`.slice(0,60), "");
+    return prompt_("go","Recorded as not on the shelf",
+      `<strong>${esc(nm)}</strong> — noted. Carry on with the next item.`);
+  }
+  if(e.target && e.target.id==="noDate"){
+    if(!pending) return clearPrompt();
+    noDateSkus[pending.prod.sku]=1;
+    try{ localStorage.setItem("noDateSkus", JSON.stringify(noDateSkus)); }catch(_){}
+    pending.best = null;
+    pending.noDate = true;
+    pending.source = (isAudit()?"audit_":"") + "no_date_on_package";
+    clearPrompt(); return commit();
+  }
   if(e.target && e.target.id==="dropHeld"){ heldDate=null; renderHeld(); clearPrompt(); return; }
   if(e.target && e.target.id==="heldYes"){
     pending.heldConfirmed=true; clearPrompt(); return next(); }
@@ -1330,7 +1448,12 @@ function render(){
         ${r.unknownCls?'<span class="tag t-q">no storage class — assumed 14d</span>':""}</td>
       <td class="num"><span class="datecell" data-n="${r.n}"
           style="cursor:pointer;border-bottom:1px dashed var(--ink-3)"
-          title="tap to correct the best-by">${r.best}</span><div style="font-size:11px;color:var(--ink-3)">order by ${addDays(r.best,-6)}</div></td>
+          title="tap to correct the best-by">${r.best || "no date"}</span>${
+            /* ⛔ A no-date row has best===null and `addDays(null,…)` THREW, taking
+               render() down with it — one soap would have frozen the whole sweep
+               mid-shelf. Caught in test 2026-08-20, before deploy. */
+            r.best ? `<div style="font-size:11px;color:var(--ink-3)">order by ${addDays(r.best,-6)}</div>` : ""
+          }</td>
       <td class="num"><span class="unitcell" data-n="${r.n}"
           style="cursor:pointer;border-bottom:1px dashed var(--ink-3)"
           title="tap to correct">${r.units ?? "?"}</span></td>
@@ -1354,7 +1477,8 @@ function render(){
       .sort((a,b)=> a.best<b.best?-1: a.best>b.best?1: a.name.localeCompare(b.name))
       .map(e=>`<tr class="grp">
         <td>${esc(e.name)}<div class="num" style="font-size:11px;color:var(--ink-3)">${esc(e.sku)}</div></td>
-        <td class="num">${e.best}<div style="font-size:11px;color:var(--ink-3)">order by ${addDays(e.best,-6)}</div></td>
+        <td class="num">${e.best || "no date"}<div style="font-size:11px;color:var(--ink-3)">${
+            e.best ? "order by "+addDays(e.best,-6) : ""}</div></td>
         <td class="num qty">${e.u}${e.unk?' <span class="tag t-q">+?</span>':""}</td>
         <td class="num">${e.n}</td></tr>`).join("");
   }
@@ -1392,6 +1516,14 @@ async function start(){
     setCount(COUNT);
     /* ⛔ Read staleness BEFORE setMode — setMode stamps `modeAt`, so asking
        afterwards always reports "fresh" and the prompt never fires. */
+    /* ⭐ RESTORE ANY SCANS THAT NEVER REACHED SHAREPOINT. They may be from a
+       session that died in the racks hours ago — recovering them is the whole
+       point of persisting the queue. */
+    for(const p of loadPending()){
+      rows.push({...p, saved:"FAILED", id:null,
+                 prod:p.prod, n:(rows.length+1), err:"recovered — not yet saved"});
+    }
+    if(rows.length){ renderPending(); setTimeout(retryPending, 800); }
     const staleMode = modeIsStale();
     setMode(MODE);          // paints the banner, labels, PO hint and roll-up
     /* ⛔ After a gap, do NOT inherit the last person's mode silently. */
