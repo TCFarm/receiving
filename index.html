@@ -528,7 +528,18 @@ async function graph(path, opts={}){
     headers:{...(opts.headers||{}), Authorization:"Bearer "+t, "Content-Type":"application/json"}});
   const txt = await r.text();
   let j=null; try{ j = txt ? JSON.parse(txt) : null; }catch(_){}
-  if(!r.ok) throw new Error((j&&j.error&&j.error.message) || `Graph ${r.status}`);
+  if(!r.ok){
+    /* ⛔⛔ CARRY THE STATUS. `graph()` threw an undifferentiated Error, so
+       `retryPending` could not tell a dropped packet (retry forever — correct)
+       from a permanent 400 (retry forever — a LOCKOUT). That is how the
+       2026-08-26 empty-date bug locked an operator out, and any other permanent
+       4xx reproduces it. ⭐ 429 and 408 ARE retryable; other 4xx are not. */
+    const err = new Error((j&&j.error&&j.error.message) || `Graph ${r.status}`);
+    err.status = r.status;
+    err.permanent = (r.status >= 400 && r.status < 500
+                     && r.status !== 429 && r.status !== 408);
+    throw err;
+  }
   return j;
 }
 
@@ -593,6 +604,20 @@ let lastFail = null;   // {kind, raw, upc} — what the photo prompt is about
    and a catalog rebuild turns that pairing into a permanent alias. Two steps
    ONCE per product, one scan for ever after. */
 let unresolved=null;
+/* ⛔⛔ A MONOTONIC ROW NUMBER. `n` used to be `rows.length+1`, which was
+   collision-free ONLY because rows were never removed — and the 2026-08-26
+   Discard escape hatch splices them out. After a discard the counter reissues
+   numbers that SAVED rows still hold, and `rows.find(r => String(r.n)===...)`
+   then returns the NEWEST match: tapping the date cell of an old saved row
+   PATCHed a DIFFERENT product's SharePoint item, invisibly. Worse on the units
+   path, which also writes `packs[sku]`, poisoning the session pack for the wrong
+   SKU so every later case of it records a wrong count.
+   ⛔ Never derive an identity from a mutable collection's length. */
+let rowSeq = 0;
+function nextRowN(){ return ++rowSeq; }
+/* ⛔ How long two codes may be treated as coming off the SAME case. Mirrors
+   `HELD_MS` — a stale collection pairs unrelated cartons permanently. */
+const UNRESOLVED_MS = 4*60*1000;
 const device = (()=>{ let d=localStorage.getItem("dev"); if(!d){ d="t"+rand(3); localStorage.setItem("dev",d);} return d; })();
 
 /* ⛔ `handle` awaits a catalog re-fetch, so two scans arriving during that gap
@@ -738,8 +763,12 @@ async function handleScan(raw){
        operator names the product — and the retail UPC is very often on the case
        right beside a manufacturer GTIN we have never seen. So a second unknown
        scan APPENDS rather than starting over. */
+    /* ⛔ AND IT EXPIRES, like `heldDate`. Two codes only belong together if they
+       came off the same box within a plausible handling window; an hour-old
+       collection is a different carton. */
+    if(unresolved && (Date.now() - (unresolved.t || 0)) > UNRESOLVED_MS) unresolved = null;
     if(unresolved) { if(!unresolved.codes.includes(v)) unresolved.codes.push(v); }
-    else unresolved = {gtin: gtin || "", upc, raw: v, codes: [v],
+    else unresolved = {gtin: gtin || "", upc, raw: v, codes: [v], t: Date.now(),
                        bb: ais["17"]||ais["15"]||""};
     if(!unresolved.bb) unresolved.bb = ais["17"]||ais["15"]||"";
     /* ⭐ Not a dead end. The case may well be a product we DO carry whose UPC
@@ -787,6 +816,21 @@ async function handleScan(raw){
   let fromHeld = null;
   if(!best && heldDateValid()){ best = heldDate.date; how = "scanned_date";
                                 fromHeld = heldDate.raw; heldDate = null; renderHeld(); }
+  /* ⛔⛔ A RESOLVED SCAN ENDS THE UNRESOLVED CASE. This was missing entirely
+     (audit 2026-08-26) and it silently CORRUPTED DATA:
+     `unresolved` was cleared only by the typed-SKU path and by `findpick`, so an
+     unknown case the operator set aside stayed "open" indefinitely. Twenty
+     ordinary scans later, a SECOND unknown code APPENDED itself to the FIRST
+     case's collection — and when the operator then named that second product,
+     case A's GTIN was written as product B's `gtin14` (learned by
+     `case_aliases()` as a PERMANENT alias, so every future scan of case A
+     resolves to the wrong product) and case A's best-by was recorded against
+     product B's stock.
+     ⛔ This is exactly the failure `scripts/learn_case_alias.py` refuses to risk
+     — reached here with no operator error at all.
+     ⭐ Clearing on the next successful scan is the honest boundary: whatever the
+     operator is doing now, it is not that case. */
+  if(unresolved) unresolved = null;
   pending={upc,prod,gtin:gtin||"",lot:ais["10"]||"",best,
            /* ⛔ A held date came off a DIFFERENT barcode than the item, so nothing
               proves the two belong to the same case — only the operator can say.
@@ -953,6 +997,18 @@ function askDate(){
 /* ⛔ A best-by already in the past is either expired stock on the shelf or a
    keying slip, and BOTH need a human. Accepted silently on 2026-08-18:
    DIngd5167SmO went in with best_by 2026-07-28, twenty-one days gone. */
+/* ⛔ A real calendar date, not just a well-SHAPED one. `parseGs1Date` pads
+   digits and never checks the day-of-month, so "290231" yields "2029-02-31" —
+   shaped fine, impossible, and rejected by SharePoint's DATE column with the
+   400 that caused the 2026-08-26 lockout. */
+function isRealDate(iso){
+  const m=/^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso||""));
+  if(!m) return false;
+  const d=new Date(Date.UTC(+m[1], +m[2]-1, +m[3]));
+  return d.getUTCFullYear()===+m[1] && d.getUTCMonth()===+m[2]-1
+         && d.getUTCDate()===+m[3];
+}
+
 function plausibleBB(d){
   try{
     const t=new Date(); t.setHours(0,0,0,0);
@@ -1002,7 +1058,7 @@ function commit_(){
      at send time would file it to the wrong location. */
   const row={ ...p, cls, unknownCls, soft: cls==="Frozen" && flags[p.prod.sku]===false,
               units: dflt, audit: isAudit(), _po: poVal(),
-              saved:"queued", id:null, n:rows.length+1 };
+              saved:"queued", id:null, n:nextRowN() };
   rows.unshift(row); queue++;
   persistPending();                 // ⭐ on disk BEFORE the network is touched
   clearPrompt(); render(); renderPending(); flash(row);
@@ -1041,9 +1097,14 @@ function loadPending(){
 }
 
 async function retryPending(){
-  const stuck = rows.filter(r => r.saved === "FAILED");
+  /* ⛔ FAILED only — never UNSAVEABLE. A permanently-rejected row re-queued
+     every 45 s is precisely the lockout loop. */
+  const stuck = rows.filter(r => r.saved === "FAILED" && !r.inflight);
   if(!stuck.length) return;
-  for(const r of stuck){ r.saved = "queued"; r.err = ""; }
+  /* ⛔ `queue++` HERE, or the counter goes NEGATIVE. `save()` decrements on BOTH
+     success and final failure, so re-queueing without incrementing lost one from
+     the count every retry cycle — an operator saw "UNSAVED -7" on 2026-08-26. */
+  for(const r of stuck){ r.saved = "queued"; r.err = ""; queue++; }
   render();
   for(const r of stuck) await save(r);
 }
@@ -1080,15 +1141,45 @@ async function save(row){
   const v={ upc:row.upc, sku:row.prod.sku, gtin14:g14, best_by:row.best || "",
             lot:row.lot||"", units:row.units ?? 0, source:row.source,
             operator:account, po_ref:ref, device };
-  const fields={ Title: `${row.audit?"AUDIT ":""}${row.prod.sku} ${row.best}` };
+  const fields={ Title: `${row.audit?"AUDIT ":""}${row.prod.sku} ${row.best||"(no date yet)"}` };
   for(const k of REQUIRED) fields[FIELD[k]] = v[k];
+  /* ⛔⛔ NEVER SEND AN EMPTY STRING TO THE best_by COLUMN. It is typed as a
+     DATE in SharePoint, and "" is rejected with
+     "One of the provided arguments is not acceptable" — a 400 that the retry
+     loop then repeats forever.
+     ⚠️ THIS LOCKED AN OPERATOR OUT OF THE TOOL on 2026-08-26: six audit scans
+     keyed before their dates were entered all failed this way, `retryPending`
+     re-queued them every 45s, and `setMode` refuses to switch tabs while
+     anything is unsaved — so the Audit-shelf tab became unreachable with no way
+     to cancel.
+     ⭐ The REJECT path a few hundred lines below already knew this trap
+     ("best_by is deliberately OMITTED rather than blanked") — the main save path
+     did the opposite. OMIT the key entirely; the row saves and the date is
+     PATCHed in the moment it is entered. */
+  if(!row.best) delete fields[FIELD.best_by];
+  /* ⛔⛔ AND A CALENDAR-INVALID DATE MUST NOT BE SENT EITHER. Fixing only the
+     EMPTY-string trigger left the lockout reachable through another door:
+     `parseGs1Date("290231")` returns "2029-02-31", which SharePoint rejects with
+     the same 400, and `retryPending` then repeats it every 45 s forever — while
+     the escape hatch's advice ("if a row shows NO DATE, tap its date cell") does
+     not apply, because the row HAS a date. ⭐ Drop an impossible date rather than
+     the whole row: the scan still records, and it lands on the undated worklist
+     where a human can fix it. */
+  if(row.best && !isRealDate(row.best)){
+    row.err = `date ${row.best} is not a real calendar date — sent without it`;
+    delete fields[FIELD.best_by];
+  }
+  /* ⛔ Marks the row as ACTUALLY IN FLIGHT so nothing can start a second save of
+     it (see the date-cell handler). `saved==="queued"` is not enough — a row sits
+     in that state both before and during the attempt loop. */
+  row.inflight = true;
   for(let attempt=0; attempt<4; attempt++){
     try{
       const created = await graph(`/sites/${siteId}/lists/${listId}/items`,
         {method:"POST", body: JSON.stringify({fields})});
       /* ⛔ Only a returned id counts as saved. A 2xx with no id is NOT success. */
       if(!created || !created.id) throw new Error("no item id returned");
-      row.saved="saved"; row.id=created.id; queue--;
+      row.saved="saved"; row.id=created.id; queue--; row.inflight=false;
       persistPending(); renderPending();
       render();
       if(pendingMode && !rows.some(r=>r.saved!=="saved")){
@@ -1097,10 +1188,19 @@ async function save(row){
       return;
     }catch(e){
       row.err = e.message;
+      /* ⛔ A PERMANENT REJECTION MUST NOT BE RETRIED. Repeating it cannot change
+         the answer; it only keeps the row unsaved, which blocks the mode switch
+         forever. ⭐ `UNSAVEABLE` is a distinct state so the escape hatch can
+         name it and the operator sees WHY rather than an endless "retrying". */
+      if(e && e.permanent){
+        row.saved="UNSAVEABLE"; queue--; row.inflight=false;
+        persistPending(); renderPending(); render(); return;
+      }
       if(attempt===3){
         /* ⛔ FAILED is not final and must not read as final — the row stays in
            the persisted queue and the auto-retry keeps trying. */
-        row.saved="FAILED"; queue--; persistPending(); renderPending(); render(); return;
+        row.saved="FAILED"; queue--; row.inflight=false;
+        persistPending(); renderPending(); render(); return;
       }
       await new Promise(r=>setTimeout(r, 600*Math.pow(2,attempt)));
     }
@@ -1235,6 +1335,27 @@ function setMode(m){
      different kinds of row, and a queued receipt finishing after a switch to
      audit is exactly the mix-up this whole design exists to prevent. */
   const unsaved = rows.filter(r=>r.saved!=="saved").length;
+  /* ⛔⛔ AN ESCAPE HATCH. Without one, a row that can NEVER save locks the tool:
+     `retryPending` re-queues it every 45s and this gate refuses the switch
+     forever. That happened on 2026-08-26 — six permanently-failing audit scans
+     made the Audit-shelf tab unreachable, and there was no way to cancel out.
+     ⭐ Offer DISCARD only for rows that have exhausted their retries (FAILED),
+     never for a row still legitimately in flight, and name what is being thrown
+     away so it is a decision rather than an accident. */
+  const dead = rows.filter(r=>r.saved==="FAILED" || r.saved==="UNSAVEABLE");
+  if(unsaved && dead.length===unsaved){
+    return prompt_("stop", `${dead.length} scan${dead.length>1?"s":""} cannot be saved`,
+      `These have failed every retry, so the mode cannot switch while they are `+
+      `queued:<br><br>` +
+      dead.slice(0,8).map(r=>`<span class="num">${esc(r.prod.sku)}</span> — `+
+        `${esc(r.best||"NO DATE")}${r.err?` <span class="hint">(${esc(String(r.err).slice(0,60))})</span>`:""}`).join("<br>") +
+      `<br><br><strong>If a row shows NO DATE, tap its date cell and enter the `+
+      `best-by — that alone usually fixes it and it will save itself.</strong>`+
+      `<br><br><button class="primary" id="dropDead" data-mode="${m}">Discard `+
+      `${dead.length} and switch to ${m==="audit"?"AUDIT":"RECEIVING"}</button>`+
+      `<br><span class="hint">⛔ Discarding loses those scans — the items will `+
+      `have no best-by recorded. Prefer entering the date.</span>`);
+  }
   if(unsaved){
     /* ⛔ A bare refusal reads as success (2026-08-18): the operator taps Audit,
        glances away, and keeps scanning in RECEIVE mode believing they switched.
@@ -1311,13 +1432,44 @@ function addDays(s,n){
   const [y,m,d]=s.split("-").map(Number);
   const dt=new Date(y,m-1,d+n); return iso3(dt.getFullYear(),dt.getMonth()+1,dt.getDate()); }
 
+let promptTimer = null;
 function prompt_(kind,title,body,actions){
+  /* ⛔⛔ CANCEL THE PREVIOUS TIMER (audit 2026-08-26). The handle was never
+     stored, so a 2.8 s timer armed by an EARLIER prompt kept running and wiped
+     a LATER, persistent one — e.g. a location prompt at t=0 destroying the date
+     prompt opened at t=1.5 s. `pending` was still set but nothing on screen
+     referred to it, the next scan overwrote it, and the case was never recorded:
+     no row, so `beforeunload` did not warn either. Silent loss of a scan. */
+  if(promptTimer){ clearTimeout(promptTimer); promptTimer = null; }
   $("promptArea").innerHTML=`<div class="prompt ${kind}"><h2>${title}</h2><p>${body}</p>${actions||""}</div>`;
   $("scan").blur();
-  if(!actions) setTimeout(clearPrompt, 2800);
+  /* ⛔⛔ A PROMPT CONTAINING A CONTROL MUST NOT AUTO-DISMISS. This used to key
+     only off the 4th argument, so every prompt that put its <button> or <input>
+     inside `body` was wiped after 2.8 s — including the new Discard escape
+     hatch, the unknown-code "Find it by name" button that is the entry point of
+     the whole alias-learning loop, every "Photograph the label" input, and the
+     held-date "Discard it". Under three seconds to read a list of 8 SKUs and
+     decide is not a usable escape hatch.
+     ⭐ Detect a control ANYWHERE in the rendered prompt instead of trusting the
+     call site to have used the right argument. */
+  const interactive = !!actions ||
+        !!$("promptArea").querySelector("button,input,select,textarea,label[for]");
+  if(!interactive) promptTimer = setTimeout(clearPrompt, 2800);
 }
 /* One button, reused by every failure prompt. `capture=environment` opens the
    rear camera straight away on a tablet. */
+/* ⛔ A PERMANENT per-tablet flag with no way to un-set it was a hazard: one tap
+   of "No date printed on this product" silently committed every future case of
+   that SKU with no date and never asked again, and the SKU also drops off the
+   scan worklist so nobody notices. `packs` is deliberately session-scoped for
+   exactly this reason; this had the same hazard and no reset. */
+function clearNoDate(sku){
+  if(!sku || !noDateSkus[sku]) return false;
+  delete noDateSkus[sku];
+  try{ localStorage.setItem("noDateSkus", JSON.stringify(noDateSkus)); }catch(_){}
+  return true;
+}
+
 function photoBtn(){
   return `<div style="margin-top:11px">
       <label for="failPhoto" style="display:inline-block;padding:10px 16px;border:1px solid var(--line);
@@ -1397,7 +1549,8 @@ document.addEventListener("change", async e=>{
   }
 });
 
-function clearPrompt(){ $("promptArea").innerHTML=""; $("scan").value=""; $("scan").focus(); }
+function clearPrompt(){
+  if(promptTimer){ clearTimeout(promptTimer); promptTimer = null; } $("promptArea").innerHTML=""; $("scan").value=""; $("scan").focus(); }
 
 document.addEventListener("click",e=>{
   if(e.target.closest("#cantScan")) return askFind();
@@ -1450,18 +1603,80 @@ document.addEventListener("click",e=>{
     unresolved = null;
     return next();
   }
+  /* ⭐ `closest()`, matching the `#unkFind` handler above — `e.target.id` breaks
+     the moment a button gains any child element, and a dead Discard button
+     re-creates the lock-out this whole escape hatch exists to relieve. */
+  if(e.target.closest("#dropDead")){
+    /* ⛔ Drop ONLY the exhausted rows, and say how many went — a silent discard
+       of scanned stock is worse than the lock-out it relieves. */
+    const dead = rows.filter(r=>r.saved==="FAILED" || r.saved==="UNSAVEABLE");
+    const skus = dead.map(r=>r.prod.sku).join(", ");
+    for(const r of dead){ const i=rows.indexOf(r); if(i>=0) rows.splice(i,1); }
+    queue = rows.filter(r=>r.saved!=="saved").length;
+    persistPending(); renderPending(); render();
+    console.warn("discarded unsaveable scans:", skus);
+    /* ⛔⛔ USE THE MODE THE OPERATOR PRESSED. This used to be
+       `pendingMode || (isAudit() ? "receive" : "audit")` — but `setMode` returns
+       BEFORE setting `pendingMode` on this path, so `pendingMode` was always
+       null and the mode was simply INVERTED, ignoring `m` entirely. Tapping
+       "Receiving" while in RECEIVING (to confirm the mode, or a mis-tap)
+       promised RECEIVING and switched to AUDIT — filing a delivery as
+       `audit_*`, which is the single worst outcome this whole design exists to
+       prevent (65 scans mis-filed on 2026-08-18). */
+    const want = e.target.closest("#dropDead").dataset.mode
+                 || pendingMode || (isAudit() ? "receive" : "audit");
+    pendingMode = null; setMode(want);
+    return;
+  }
   const dc=e.target.closest(".datecell");
   if(dc){
     const row=rows.find(r=>String(r.n)===dc.dataset.n); if(!row) return;
     const val=window.prompt(
       `Best-by for ${row.prod.name}?\nYYYY-MM-DD, or six digits MMDDYY.`, row.best);
     if(val===null) return;
-    const d=parseGs1Date(val.trim());
+    /* ⛔⛔ SWAP MMDDYY -> YYMMDD, as the prompt promises. This field said MMDDYY
+       and then passed the string STRAIGHT to `parseGs1Date`, which reads YYMMDD
+       — so `120126` (1 Dec 2026) became **2012-01-26** and `033129` failed
+       outright. Every MMDDYY entry yielded a year of 2001-2012; the plausibility
+       gate caught it, but that gate is a confirm() the operator can accept.
+       ⛔ And the new Discard escape hatch explicitly tells operators to use this
+       field to fix a no-date row, so it was the recommended path into a wrong
+       year. `askDate` has always swapped correctly — this one did not. */
+    const raw = val.trim();
+    const swapped = /^\d{6}$/.test(raw) ? raw.slice(4,6)+raw.slice(0,4) : raw;
+    const d=parseGs1Date(swapped);
+    /* ⭐ Entering a real date DISPROVES the "no printed date" flag for that SKU,
+       so clear it — otherwise one mis-tap blinds the tool to that product for
+       ever, on that tablet, with no UI to undo it. This is the natural place:
+       the operator is already telling us the date exists. */
+    if(d && clearNoDate(row.prod.sku)){
+      console.info("cleared no-date flag for", row.prod.sku);
+    }
     if(!d) return alert("Could not read that as a date. Try 2029-03-31 or 033129.");
     /* ⛔ The same plausibility gate as a fresh scan — a correction can be a
        mis-key too, and this is the field the whole model runs on. */
     if(!plausibleBB(d) && !confirm(`${d} is in the past or very far out. Record it anyway?`)) return;
-    row.best=d; render(); if(row.id) patchDate(row);
+    row.best=d; render();
+    /* ⛔ A FAILED row has NO id, so `patchDate` was a NO-OP on exactly the rows
+       that needed fixing — the operator types the missing date and nothing
+       happens (2026-08-26). ⭐ If it never saved, SAVE it now; the date is
+       usually the very thing that was missing. */
+    if(row.id){ patchDate(row); }
+    /* ⛔⛔ ONLY AN EXHAUSTED ROW. The guard was `!== "saved"`, which INCLUDES a
+       row currently inside `save()`'s retry loop (up to ~4.2 s of backoff plus
+       network, longer on the flaky wifi this queue exists for). Tapping the date
+       cell in that window started a SECOND concurrent save of the same row:
+       two SharePoint rows for one scan — one dateless, one dated — so the drain
+       double-counts the units, `row.id` ends as whichever POST replied last so a
+       later `patchDate` corrects the wrong item, and combined with Discard the
+       counter still went negative. ⭐ `inflight` makes it structural, not a
+       timing bet. */
+    else if((row.saved==="FAILED"||row.saved==="UNSAVEABLE") && !row.inflight){
+      /* ⭐ An UNSAVEABLE row becomes saveable the moment the bad value is
+         corrected — a fixed date is the whole point. */
+      row.saved="queued"; row.err=""; queue++;
+      persistPending(); render(); save(row);
+    }
     return;
   }
   const u=e.target.closest(".unitcell");
@@ -1475,7 +1690,19 @@ document.addEventListener("click",e=>{
       /* ⭐ A tap-correction TEACHES the session (Jack, 2026-08-16): fixing case 1
          must carry to cases 2, 3 and 4 rather than being re-typed each time. */
       packs[row.prod.sku]=n;
-      render(); if(row.id) patchUnits(row);
+      render();
+      /* ⛔ PERSIST IT. This path had no `persistPending()`, so correcting the
+         units of an UNSAVED row was never written to localStorage — after a
+         reload the row came back with the old quantity and the correction was
+         silently gone. It did reach SharePoint if a later retry happened to
+         succeed (because `save()` rebuilds `fields` at call time), so the loss
+         looked random. Same class as the `po`/`_po` bug already fixed in
+         `persistPending`. */
+      persistPending();
+      if(row.id){ patchUnits(row); }
+      else if((row.saved==="FAILED"||row.saved==="UNSAVEABLE") && !row.inflight){
+        row.saved="queued"; row.err=""; queue++; render(); save(row);
+      }
     }
     return;
   }
@@ -1507,7 +1734,10 @@ document.addEventListener("click",e=>{
 function render(){
   $("empty").hidden = rows.length>0;
   $("tb").innerHTML = rows.map(r=>{
-    const cls = r.saved==="saved"?"t-gs1":(r.saved==="FAILED"?"t-q":"t-man");
+    /* ⛔ UNSAVEABLE must read as a FAILURE, not as a neutral state — it is the
+       row that will never save without a human. */
+    const bad = (r.saved==="FAILED" || r.saved==="UNSAVEABLE");
+    const cls = r.saved==="saved"?"t-gs1":(bad?"t-q":"t-man");
     return `<tr>
       <td>${esc(r.prod.name)}<div class="num" style="font-size:11px;color:var(--ink-3)">${esc(r.prod.sku)} · ${r.upc}</div>
         ${r.audit?'<span class="tag t-man">AUDIT</span>':""}
@@ -1525,7 +1755,7 @@ function render(){
           style="cursor:pointer;border-bottom:1px dashed var(--ink-3)"
           title="tap to correct">${r.units ?? "?"}</span></td>
       <td><span class="tag ${r.source==="gs1"?"t-gs1":"t-man"}">${r.source==="gs1"?"GS1":"keyed"}</span></td>
-      <td><span class="tag ${cls}">${r.saved}</span>${r.err&&r.saved==="FAILED"?`<div style="font-size:11px;color:var(--stop)">${esc(r.err)}</div>`:""}</td>
+      <td><span class="tag ${cls}">${r.saved}</span>${r.err&&bad?`<div style="font-size:11px;color:var(--stop)">${esc(r.err)}</div>`:""}</td>
     </tr>`;}).join("");
   /* AUDIT roll-up: units per (sku, best by). This is the actual deliverable of
      a sweep — "how many units do we hold at each date" — and showing it live
@@ -1587,8 +1817,11 @@ async function start(){
        session that died in the racks hours ago — recovering them is the whole
        point of persisting the queue. */
     for(const p of loadPending()){
-      rows.push({...p, saved:"FAILED", id:null,
-                 prod:p.prod, n:(rows.length+1), err:"recovered — not yet saved"});
+      /* ⛔ `nextRowN()`, not `rows.length+1` — the same identity bug as on the
+         scan path. A restored row that shared an `n` with a later scan would
+         send a date or unit correction to the wrong SharePoint item. */
+      rows.push({...p, saved:"FAILED", id:null, inflight:false,
+                 prod:p.prod, n:nextRowN(), err:"recovered — not yet saved"});
     }
     if(rows.length){ renderPending(); setTimeout(retryPending, 800); }
     const staleMode = modeIsStale();
