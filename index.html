@@ -544,7 +544,7 @@ async function graph(path, opts={}){
 }
 
 /* ---------- startup: resolve site + list, VALIDATE columns ---------- */
-let siteId=null, listId=null, CATALOG={};
+let siteId=null, listId=null, driveId=null, CATALOG={};
 
 async function bootstrap(){
   const site = await graph(`/sites/${CFG.hostname}:${CFG.sitePath}`);
@@ -567,6 +567,21 @@ async function bootstrap(){
       `Matching ignores capitalisation, so these are genuinely absent rather than `+
       `differently cased. Columns found: `+
       `${[...byLower.values()].filter(n=>!n.startsWith("_")).join(", ")}`);
+
+  /* ⭐ PHOTO UPLOAD TARGET — resolved here, and the button does not exist
+     without it (fixed 2026-08-27). ⛔ It was previously read as `CFG.driveId`,
+     a key that has NEVER existed on CFG, so every upload PUT went to
+     `/drives/undefined/...` and could only 404. The page offered a camera it
+     could not use — the worst kind of defect, because the operator does the
+     work and believes the evidence was filed.
+     ⛔ NON-FATAL BY DESIGN: photos are troubleshooting evidence, never stock
+     data, so a drive we cannot resolve must not stop receiving. ⚠️ `/drives`
+     (plural) returns [] in this tenant (a Graph quirk documented in
+     IT-Provisioning/ONEDRIVE-SHORTCUTS.md), so ask for `/drive` — singular. */
+  try{
+    const dr = await graph(`/sites/${siteId}/drive?$select=id`);
+    driveId = dr && dr.id ? dr.id : null;
+  }catch(_){ driveId = null; }
 
   try{ CATALOG = await (await fetch("catalog.json",{cache:"no-cache"})).json(); }
   catch(_){ CATALOG = {}; }
@@ -1234,12 +1249,14 @@ async function shrink(file, max=1600, quality=0.72){
 }
 
 async function uploadPhoto(file, label){
+  if(!driveId) throw new Error(
+    "no document library resolved on this site, so there is nowhere to put the photo");
   const blob = await shrink(file);
   const stamp = new Date().toISOString().replace(/[:.]/g,"-");
   const name = `${stamp}_${(label||"scan").replace(/[^A-Za-z0-9._-]/g,"")}.jpg`;
   const t = await getToken();
   const r = await fetch(
-    `${GRAPH}/drives/${CFG.driveId}/root:/${PHOTO_FOLDER}/${name}:/content`,
+    `${GRAPH}/drives/${driveId}/root:/${PHOTO_FOLDER}/${name}:/content`,
     {method:"PUT", headers:{Authorization:"Bearer "+t, "Content-Type":"image/jpeg"}, body:blob});
   if(!r.ok) throw new Error(`upload ${r.status}`);
   const j = await r.json();
@@ -1471,6 +1488,12 @@ function clearNoDate(sku){
 }
 
 function photoBtn(){
+  /* ⛔ NEVER OFFER A CONTROL THAT CANNOT WORK. If bootstrap could not resolve a
+     document library, the camera would take the photo, the PUT would fail, and the
+     operator would reasonably believe they had filed evidence. Absent button >
+     broken button. The reject row is already written either way — the photo only
+     ever ATTACHES to a failure that is recorded, so its absence loses no data. */
+  if(!driveId) return "";
   return `<div style="margin-top:11px">
       <label for="failPhoto" style="display:inline-block;padding:10px 16px;border:1px solid var(--line);
              border-radius:4px;background:var(--card);cursor:pointer;font-size:15px">
