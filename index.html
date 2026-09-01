@@ -180,7 +180,7 @@
 
     <div class="tw">
       <table>
-        <thead><tr><th>Product</th><th>Best by</th><th>Units</th><th>Src</th><th>Saved</th></tr></thead>
+        <thead><tr><th>Product</th><th>Best by</th><th>Units</th><th>Src</th><th>Saved</th><th></th></tr></thead>
         <tbody id="tb"></tbody>
       </table>
     </div>
@@ -868,7 +868,13 @@ function next(){
      during a shelf sweep would block a counter holding a case they did not open,
      so audit mode skips it. */
   if(!isAudit() && prod.cls==="Frozen" && flags[prod.sku]===undefined) return askFlag();
-  if(packNeeded()) return askPack();
+  /* ⛔ `askPack()` (once per SKU) is NO LONGER in the flow — `askQty()` below
+     replaced it (Jack, 2026-09-01). Asking the pack once and then silently
+     applying it to every later scan is exactly what made a wrong quantity
+     un-fixable at the moment it was made: the operator had to finish the scan
+     and then go back and tap the history cell, which is too slow on a shelf.
+     ⭐ `askQty` still TEACHES `packs[sku]`, so the pack is PRE-FILLED on every
+     later case — the learning is kept, the silence is not. */
   /* already established that this product carries no date — do not ask again */
   if(!pending.best && noDateSkus[pending.prod.sku] && !pending.noDate){
     pending.noDate = true;
@@ -876,6 +882,13 @@ function next(){
   }
   if(!pending.best && !pending.noDate) return askDate();
   if(pending.fromHeld && !pending.heldConfirmed) return askConfirmHeld();
+  /* ⛔ EVERY SCAN, EVERY MODE — receiving and audit alike (Jack, 2026-09-01:
+     "everytime we scan in any place the qty needs to be editable"). One case is
+     rarely one quantity: a shelf holds 1 unit at one date and 10 at another, and
+     a delivery holds part-cases. Defaulting silently and making the operator
+     correct it afterwards in the history is slower than asking, and a default
+     nobody was shown is a default nobody checks. */
+  if(pending.qty == null && !pending.qtyUnknown) return askQty();
   commit();
 }
 /* The pack in force for the pending item: what we were told this session beats
@@ -883,29 +896,11 @@ function next(){
 function packFor(sku, fallback){
   return (packs[sku] !== undefined) ? packs[sku] : (fallback ?? null);
 }
-function packNeeded(){
-  if(isAudit() && COUNT==="units") return false;   // counting loose units, pack is irrelevant
-  const p = packFor(pending.prod.sku, pending.prod.pack);
-  return p === null || p === undefined;            // ⛔ 0 means "asked and declined" — never re-ask
-}
-function askPack(){
-  prompt_("", "How many units in this case?",
-    `<strong>${esc(pending.prod.name)}</strong> — we have no case pack on file for this
-     item, and the ledger counts UNITS at each date.<br><br>
-     Count one case and enter it. <strong>You will only be asked once</strong> — every
-     other case of this item today uses the same number.`,
-    `<div class="dateRow">
-       <input id="pk" type="text" class="num" inputmode="numeric" maxlength="4"
-              placeholder="e.g. 12" aria-label="Units per case">
-       <button class="primary" id="pkok">Save</button>
-       <button id="pkskip">Don't know — skip</button>
-     </div>`);
-  setTimeout(()=>{
-    const el=$("pk");
-    if(el){ el.focus();
-      el.addEventListener("keydown",e=>{ if(e.key==="Enter") $("pkok").click(); }); }
-  },30);
-}
+/* ⛔ `packNeeded()` / `askPack()` were REMOVED 2026-09-01, not left unused —
+   `askQty()` asks on every scan and teaches `packs[sku]` itself, so the
+   once-per-SKU pack question can no longer fire. Dead code that looks live is
+   how a later reader "restores" a step that was deliberately taken out.
+   Rationale: docs/RECEIVING_DATE_CAPTURE.md → "Quantity at scan time". */
 
 function askFlag(){
   prompt_("", "Is the best-by date printed on the PACKAGE?",
@@ -1009,6 +1004,43 @@ function askDate(){
   },30);
 }
 
+/* ⭐ THE QUANTITY STEP (Jack, 2026-09-01). Asked on EVERY scan, in BOTH modes,
+   as the last question before the row is committed.
+
+   ⛔ It is PRE-FILLED, never blank where we know the answer — the case pack in
+   receiving and in audit's "counting cases", 1 loose unit in audit's "counting
+   units" — and the field is focused and selected, so accepting it is one tap or
+   one Enter. Making the common case cost a keystroke is what buys the ability to
+   change it without leaving the scan.
+   ⛔ "Don't know" still records the scan with a blank quantity: the date is the
+   expensive fact, and a guessed count creates phantom units at a real date. */
+function askQty(){
+  const p = pending;
+  const loose = isAudit() && COUNT === "units";
+  const pk = packFor(p.prod.sku, p.prod.pack);
+  const dflt = loose ? 1 : (pk > 0 ? pk : null);
+  prompt_("", loose ? "How many units at this date?" : "How many units in this case?",
+    `<strong>${esc(p.prod.name)}</strong> &mdash; best by
+     <strong>${p.best || "no date"}</strong>.<br><br>` +
+    (loose
+      ? `Count what is on the shelf <strong>at this date only</strong>. Scan the same
+         item again for a different date.`
+      : `The ledger counts UNITS at each date, so enter the units in this case
+         &mdash; a part-case is normal.` +
+        (pk > 0 ? ` <span class="hint" style="display:inline">Pack on file: ${pk}.</span>` : "")),
+    `<div class="dateRow">
+       <input id="qty" type="text" class="num" inputmode="numeric" maxlength="5"
+              value="${dflt ?? ""}" placeholder="e.g. 12" aria-label="Quantity">
+       <button class="primary" id="qok">Save</button>
+       <button id="qskip">Don&rsquo;t know</button>
+     </div>`);
+  setTimeout(()=>{
+    const el=$("qty");
+    if(el){ el.focus(); el.select();
+      el.addEventListener("keydown",e=>{ if(e.key==="Enter") $("qok").click(); }); }
+  },30);
+}
+
 /* ⛔ A best-by already in the past is either expired stock on the shelf or a
    keying slip, and BOTH need a human. Accepted silently on 2026-08-18:
    DIngd5167SmO went in with best_by 2026-07-28, twenty-one days gone. */
@@ -1067,7 +1099,13 @@ function commit_(){
      guessing — a wrong quantity creates phantom units at a real date, which is
      worse than a blank somebody fills in. */
   const _pk = packFor(p.prod.sku, p.prod.pack);
-  const dflt = isAudit() && COUNT==="units" ? 1 : (_pk > 0 ? _pk : null);
+  /* ⭐ `p.qty` is what the operator actually answered at `askQty`; the fallbacks
+     below only fire on a path that somehow skipped it. `qtyUnknown` is an
+     explicit "Don't know" and must stay NULL — it renders as a tappable "?" and
+     is excluded from the roll-up total rather than counted as zero. */
+  const dflt = p.qtyUnknown ? null
+             : (p.qty != null ? p.qty
+             : (isAudit() && COUNT==="units" ? 1 : (_pk > 0 ? _pk : null)));
   /* ⛔ Capture the PO / shelf area ON THE ROW. A recovered scan is sent later,
      possibly after someone has moved to another shelf — reading the live field
      at send time would file it to the wrong location. */
@@ -1114,7 +1152,7 @@ function loadPending(){
 async function retryPending(){
   /* ⛔ FAILED only — never UNSAVEABLE. A permanently-rejected row re-queued
      every 45 s is precisely the lockout loop. */
-  const stuck = rows.filter(r => r.saved === "FAILED" && !r.inflight);
+  const stuck = rows.filter(r => r.saved === "FAILED" && !r.inflight && !r.deleted);
   if(!stuck.length) return;
   /* ⛔ `queue++` HERE, or the counter goes NEGATIVE. `save()` decrements on BOTH
      success and final failure, so re-queueing without incrementing lost one from
@@ -1140,6 +1178,15 @@ function renderPending(){
 }
 
 async function save(row){
+  /* ⛔⛔ A DELETED ROW MUST NEVER BE SENT (found in review, 2026-09-01).
+     `retryPending()` SNAPSHOTS the stuck rows and then awaits `save()` on each
+     in turn, so a row further down that list sits in `queued` with `inflight`
+     false — which is exactly the state the delete button allows. Deleting it
+     there removed it from the screen and from `rows`, and the retry loop then
+     POSTed it anyway: a scan the operator had just deleted reappeared in
+     SharePoint, with an id nothing on screen was tracking, so it could not be
+     deleted a second time. The `inflight` guard alone cannot cover this. */
+  if(row.deleted) { row.inflight = false; return; }
   /* Keyed through FIELD so the payload uses the list's own internal names
      (e.g. "UPC" not "upc"). A mismatched key is accepted by Graph and the
      value is SILENTLY DISCARDED — the row saves looking fine and the column
@@ -1189,6 +1236,9 @@ async function save(row){
      in that state both before and during the attempt loop. */
   row.inflight = true;
   for(let attempt=0; attempt<4; attempt++){
+    /* ⛔ RE-CHECK EVERY ATTEMPT. A delete can land during a backoff sleep (up to
+       ~4.2 s), and resuming the loop afterwards would recreate the row. */
+    if(row.deleted){ row.inflight = false; return; }
     try{
       const created = await graph(`/sites/${siteId}/lists/${listId}/items`,
         {method:"POST", body: JSON.stringify({fields})});
@@ -1316,6 +1366,41 @@ async function patchUnits(row){
     await graph(`/sites/${siteId}/lists/${listId}/items/${row.id}/fields`,
       {method:"PATCH", body: JSON.stringify({[FIELD.units]: row.units})});
   }catch(e){ row.err="units not updated: "+e.message; render(); }
+}
+
+async function deleteRow(row){
+  /* ⭐ Remove it from the screen FIRST so the counter sees the correction
+     immediately, then delete it in SharePoint — and PUT IT BACK if that fails.
+     ⛔ The reverse order would leave a mis-scan visible for the length of a
+     warehouse-wifi round trip, and the operator would tap it again. */
+  /* ⛔ FLAG IT BEFORE ANYTHING ELSE. `retryPending` may already be holding a
+     reference to this row in its own snapshot array; the flag is the only thing
+     that reaches that copy. */
+  row.deleted = true;
+  const i=rows.indexOf(row); if(i>=0) rows.splice(i,1);
+  /* ⛔ RECOMPUTE the queue, never `queue--`. The row may have been saved,
+     queued, FAILED or UNSAVEABLE, each of which has already decremented or not;
+     the same recompute idiom the `#dropDead` hatch uses is the only one that
+     cannot go negative. */
+  queue = rows.filter(r=>r.saved!=="saved").length;
+  persistPending(); renderPending(); render();
+  if(!row.id) return;                       // never reached SharePoint — nothing to delete
+  try{
+    await graph(`/sites/${siteId}/lists/${listId}/items/${row.id}`, {method:"DELETE"});
+  }catch(e){
+    /* ⭐ A 404 MEANS IT IS ALREADY GONE — that is the outcome we wanted, not a
+       failure. Restoring the row here would put a scan back on screen that no
+       longer exists in SharePoint, and the next delete attempt would 404 again:
+       an un-clearable row. Treat it as done. */
+    if(e && e.status === 404) return;
+    rows.splice(Math.min(i, rows.length), 0, row);
+    row.deleted = false;                    // ⛔ it is back on the list — let it save again
+    row.err = "not deleted: " + e.message;
+    queue = rows.filter(r=>r.saved!=="saved").length;
+    persistPending(); renderPending(); render();
+    alert("Could not delete that scan: " + e.message +
+          "\n\nIt has been put back on the list — try again.");
+  }
 }
 
 /* ⭐ The one question a held date has to answer: is this the same box? */
@@ -1537,7 +1622,12 @@ document.addEventListener("click", e=>{
     pending.best = null;
     pending.noDate = true;
     pending.source = (isAudit()?"audit_":"") + "no_date_on_package";
-    clearPrompt(); return commit();
+    /* ⛔ `next()`, NOT `commit()` (found in review, 2026-09-01). Calling commit
+       directly jumped the whole question ladder, so a "no date printed" item —
+       soap, paper goods, cleaning supplies — committed on the silent default
+       and never offered the quantity step. Every path into a row must go
+       through `next()`; that is the entire reason the ladder exists. */
+    clearPrompt(); return next();
   }
   if(e.target && e.target.id==="dropHeld"){ heldDate=null; renderHeld(); clearPrompt(); return; }
   if(e.target && e.target.id==="heldYes"){
@@ -1702,6 +1792,26 @@ document.addEventListener("click",e=>{
     }
     return;
   }
+  /* ⭐ DELETE A SCAN FROM THE HISTORY (Jack, 2026-09-01). Date and units were
+     both tap-correctable, but a scan of the WRONG PRODUCT could not be undone —
+     the only escape hatch (`#dropDead`) drops rows that FAILED to save, which is
+     the opposite case. A mis-scan that saved cleanly was permanent.
+     ⛔ It deletes the SharePoint item too, not just the on-screen row: leaving
+     the row in the list would put phantom units at a real date into the ledger
+     while the operator believes it is gone. */
+  const dl=e.target.closest(".delcell");
+  if(dl){
+    const row=rows.find(r=>String(r.n)===dl.dataset.n); if(!row) return;
+    /* ⛔ Never touch a row inside `save()`'s retry loop — its POST is still in
+       flight and would land after the delete, recreating the row with an id
+       nothing is tracking. Same reasoning as the date-cell `inflight` guard. */
+    if(row.inflight){ alert("That scan is still saving. Try again in a moment."); return; }
+    if(!confirm(`Delete this scan?\n\n${row.prod.name}\n`+
+                `${row.best || "no date"}  \u00b7  ${row.units ?? "?"} units\n\n`+
+                `It is removed from the ledger for good.`)) return;
+    deleteRow(row);
+    return;
+  }
   const u=e.target.closest(".unitcell");
   if(u){
     const row=rows.find(r=>String(r.n)===u.dataset.n); if(!row) return;
@@ -1729,16 +1839,27 @@ document.addEventListener("click",e=>{
     }
     return;
   }
-  if(e.target.id==="pkok" && pending){
-    const n=parseInt(($("pk")||{}).value||"",10);
-    if(isNaN(n) || n<=0){ const el=$("pk"); if(el) el.style.borderColor="var(--stop)"; return; }
-    packs[pending.prod.sku]=n; return next();
+  if(e.target.id==="qok" && pending){
+    const n=parseInt((($("qty")||{}).value||"").trim(),10);
+    if(isNaN(n) || n<=0){ const el=$("qty"); if(el) el.style.borderColor="var(--stop)"; return; }
+    pending.qty=n; pending.qtyUnknown=false;
+    /* ⭐ LEARN THE PACK ONLY WHEN WE HAD NONE (fixed in review, 2026-09-01).
+       ⛔ Writing `packs[sku]` on EVERY case answer poisons the pre-fill: receive
+       one PART case of 5 from a 12-pack and every later case of that SKU
+       pre-fills 5 — and the pre-fill is accepted with a single Enter, which is
+       precisely the silent-default hazard this step exists to remove. A pack
+       already on file (catalog or earlier answer) is evidence; a typed number
+       that differs from it is a part case, true of THIS case only.
+       ⛔ A LOOSE-UNIT count teaches nothing either way: "3 on the shelf" is not
+       a case pack. ⭐ The history tap-correction still overwrites the pack —
+       that one IS the operator saying the pack on file is wrong. */
+    if(!(isAudit() && COUNT==="units") && !(packFor(pending.prod.sku, pending.prod.pack) > 0)){
+      packs[pending.prod.sku]=n;
+    }
+    return next();
   }
-  if(e.target.id==="pkskip" && pending){
-    /* ⛔ 0 = asked and declined. Recorded so the question is not repeated for
-       every remaining case — an unanswered prompt that keeps reappearing is
-       worse than no prompt. The row still saves and still shows a tappable "?". */
-    packs[pending.prod.sku]=0; return next();
+  if(e.target.id==="qskip" && pending){
+    pending.qtyUnknown=true; return next();
   }
   const f=e.target.closest("[data-flag]");
   if(f && pending){ flags[pending.prod.sku]= f.dataset.flag==="yes"; return next(); }
@@ -1779,6 +1900,10 @@ function render(){
           title="tap to correct">${r.units ?? "?"}</span></td>
       <td><span class="tag ${r.source==="gs1"?"t-gs1":"t-man"}">${r.source==="gs1"?"GS1":"keyed"}</span></td>
       <td><span class="tag ${cls}">${r.saved}</span>${r.err&&bad?`<div style="font-size:11px;color:var(--stop)">${esc(r.err)}</div>`:""}</td>
+      <td class="num"><button class="delcell" data-n="${r.n}" title="delete this scan"
+          aria-label="Delete this scan"
+          style="margin:0;padding:9px 14px;min-height:0;font-size:17px;line-height:1;
+                 color:var(--stop);font-weight:700">&times;</button></td>
     </tr>`;}).join("");
   /* AUDIT roll-up: units per (sku, best by). This is the actual deliverable of
      a sweep — "how many units do we hold at each date" — and showing it live
