@@ -544,7 +544,7 @@ async function graph(path, opts={}){
 }
 
 /* ---------- startup: resolve site + list, VALIDATE columns ---------- */
-let siteId=null, listId=null, driveId=null, CATALOG={};
+let siteId=null, listId=null, driveId=null, CATALOG={}, CATALOG_BY_SKU={};
 
 async function bootstrap(){
   const site = await graph(`/sites/${CFG.hostname}:${CFG.sitePath}`);
@@ -585,6 +585,14 @@ async function bootstrap(){
 
   try{ CATALOG = await (await fetch("catalog.json",{cache:"no-cache"})).json(); }
   catch(_){ CATALOG = {}; }
+  /* ⭐ SKU-keyed view, for the central no-date flag. Built once here rather than
+     scanned per scan — the catalog is ~3.4k entries and the scan path is the
+     one place that must never get slower. */
+  CATALOG_BY_SKU = {};
+  for(const k in CATALOG){
+    const v = CATALOG[k];
+    if(v && v.sku && !(v.sku in CATALOG_BY_SKU)) CATALOG_BY_SKU[v.sku] = v;
+  }
 }
 
 /* ---------- the scan flow ---------- */
@@ -949,7 +957,7 @@ function next(){
      ⭐ `askQty` still TEACHES `packs[sku]`, so the pack is PRE-FILLED on every
      later case — the learning is kept, the silence is not. */
   /* already established that this product carries no date — do not ask again */
-  if(!pending.best && noDateSkus[pending.prod.sku] && !pending.noDate){
+  if(!pending.best && noDateFor(pending.prod.sku) && !pending.noDate){
     pending.noDate = true;
     pending.source = (isAudit()?"audit_":"") + "no_date_on_package";
   }
@@ -1642,6 +1650,27 @@ function prompt_(kind,title,body,actions){
    that SKU with no date and never asked again, and the SKU also drops off the
    scan worklist so nobody notices. `packs` is deliberately session-scoped for
    exactly this reason; this had the same hazard and no reset. */
+/* ⭐⭐ THE NO-DATE FLAG IS NOW CENTRAL, NOT PER-TABLET (ruling: Jack, 2026-09-03).
+   ⛔ THE OLD HAZARD: `noDateSkus` lived only in this device's localStorage, so
+   the same product was re-asked on every other tablet, and one mis-tap blinded
+   THIS tablet for ever with no way to reset it from anywhere.
+   ⭐ The catalog now carries `nd: 1` per SKU, derived by
+   `build_receiving_catalog.no_date_skus()` from the RECEIPT LEDGER — a SKU is
+   flagged only while it has at least one `no_date_on_package` receipt AND ZERO
+   receipts carrying a real best-by.
+   ⭐ SO IT CORRECTS ITSELF, EVERYWHERE: the moment any receipt for that SKU
+   records a real date — a full case scan, another tablet, a tap-correction on
+   the history — the flag stops being emitted at the next catalog refresh
+   (05:50/11:50/17:50) and every device starts asking again. ⛔ No per-device
+   reset to remember, because there is no per-device truth any more.
+   ⚠️ The local map is still honoured so the answer holds for the rest of THIS
+   session before the next refresh, and `clearNoDate` still clears it locally. */
+function noDateFor(sku){
+  if(!sku || String(sku).startsWith("!")) return false;   // ⛔ never a sentinel
+  if(noDateSkus[sku]) return true;
+  const p = CATALOG_BY_SKU[sku];
+  return !!(p && (p.nd===1 || p.nd===true));
+}
 function clearNoDate(sku){
   if(!sku || !noDateSkus[sku]) return false;
   delete noDateSkus[sku];
@@ -1694,8 +1723,18 @@ document.addEventListener("click", e=>{
      button and cannot be forgotten. */
   if(e.target && e.target.id==="noDate"){
     if(!pending) return clearPrompt();
-    noDateSkus[pending.prod.sku]=1;
-    try{ localStorage.setItem("noDateSkus", JSON.stringify(noDateSkus)); }catch(_){}
+    /* ⛔⛔ NEVER LEARN A NO-DATE FLAG FOR A SENTINEL SKU (bug found + fixed
+       2026-09-03, introduced the same day with `!PENDING_ID`). `!PENDING_ID` is
+       not a product — it is "we could not name this carton" — so writing it here
+       set the flag for the SENTINEL, and the ladder in `next()` then skipped the
+       date prompt for EVERY future unidentified carton on this tablet, silently
+       recording each as "no date printed". That is the exact opposite of what
+       the pending-identification row exists to do, and nothing would have
+       looked wrong. */
+    if(!String(pending.prod.sku||"").startsWith("!")){
+      noDateSkus[pending.prod.sku]=1;
+      try{ localStorage.setItem("noDateSkus", JSON.stringify(noDateSkus)); }catch(_){}
+    }
     pending.best = null;
     pending.noDate = true;
     pending.source = (isAudit()?"audit_":"") + "no_date_on_package";
