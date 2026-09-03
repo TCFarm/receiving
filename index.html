@@ -619,6 +619,22 @@ let lastFail = null;   // {kind, raw, upc} — what the photo prompt is about
    and a catalog rebuild turns that pairing into a permanent alias. Two steps
    ONCE per product, one scan for ever after. */
 let unresolved=null;
+/* ⭐⭐ THE UNIT SCAN (ruling: Jack, 2026-09-03). An unknown CASE code is
+   resolvable by the one thing always available at the dock: a retail unit inside
+   the carton. The operator taps "scan one unit", scans it, and we get the SKU
+   from our own catalog — so the case code is learned with the strongest evidence
+   there is, and ⛔ no photo and no later human confirmation are needed.
+
+   ⛔⛔ WHY THIS IS A DELIBERATE, ARMED, SINGLE-SHOT FLAG AND NOT "carry the
+   unresolved codes onto the next successful scan": that is EXACTLY the
+   corruption fixed on 2026-08-26 (see the `unresolved = null` guard below). An
+   unknown case left open silently attached itself to an unrelated product twenty
+   scans later, writing a PERMANENT wrong alias and filing the case's best-by
+   against the wrong stock. Proximity is not intent.
+   ⭐ So the link is only ever made when the operator has SAID they are scanning a
+   unit out of that specific case: armed by a button, consumed by exactly one
+   scan, and expiring on the same clock as the collection itself. */
+let unitScanFor=null;
 /* ⛔⛔ A MONOTONIC ROW NUMBER. `n` used to be `rows.length+1`, which was
    collision-free ONLY because rows were never removed — and the 2026-08-26
    Discard escape hatch splices them out. After a discard the counter reissues
@@ -802,6 +818,17 @@ async function handleScan(raw){
        label, anything. Two codes off the same box let us tie them together
        permanently, so it scans first time from now on.` +
       (n>1 ? `<br><span class="hint">${n} codes collected from this case so far.</span>` : "");
+    /* ⭐ A 14-DIGIT SCAN AND A 12-DIGIT SCAN ARE DIFFERENT PROBLEMS and need
+       different instructions (measured 2026-09-03 over the whole reject log: 76
+       case GTINs vs 37 plain retail UPCs).
+         a CASE code  → the unit inside it is very likely one we carry: SCAN A
+                        UNIT and the pairing is learned automatically.
+         a UNIT code  → we scanned the actual retail barcode and still do not
+                        know it, so the product's UPC is missing from our system.
+                        ⛔ That is a Finale/BigCommerce data fix, and no amount of
+                        rescanning will change it. Say so, by name. */
+    const rawDigits = (v||"").replace(/\D/g,"");
+    const looksCase = rawDigits.length===14 || !!gtin;
     return prompt_("stop",
       tries>1 ? `Scanning it again will not help — ${tries} tries` : "Unknown code",
       (tries>1
@@ -809,10 +836,20 @@ async function handleScan(raw){
            same code again cannot change that</strong>. It is recorded either way.<br><br>`
         : `<span class="num">${upc}</span> is not in the catalog — recorded, so nobody needs
            to write it down.<br><br>`)
-      + collecting
-      + `<br><br><button class="primary" id="unkFind">Find it by name</button>${photoBtn()}`
-      + `<br><span class="hint">If none of that works, set the case aside and carry on —
-         nothing is lost, we have the codes.</span>`);
+      + (looksCase
+          ? `<strong>This is a CASE barcode.</strong> Open the case and scan ONE unit
+             from inside it — that tells us what this is, and the case will scan
+             first time from every future delivery.`
+          : `<strong>This is the unit's own barcode</strong>, so this product's UPC is
+             missing from our system. Enter the date and quantity, then tell Julia
+             to add UPC <span class="num">${upc}</span> in Finale.`)
+      + `<br><br>` + collecting
+      + `<br><br>${looksCase
+            ? `<button class="primary" id="unkUnit">Scan a unit from inside the case</button>`
+            : ``}`
+      + `<button ${looksCase?"":`class="primary"`} id="unkFind">Find it by name</button>${photoBtn()}`
+      + `<br><span class="hint">Either way the date is worth more than the code — if you can
+         name the product, we can still record its best-by.</span>`);
   }
   /* source answers "how often did the label do the work for us?" without
      anyone tallying it (Jack, 2026-08-13):
@@ -845,6 +882,38 @@ async function handleScan(raw){
      — reached here with no operator error at all.
      ⭐ Clearing on the next successful scan is the honest boundary: whatever the
      operator is doing now, it is not that case. */
+  /* ⭐⭐ CONSUME AN ARMED UNIT SCAN — this is where the case code is learned.
+     The operator said "I am scanning a unit out of that carton", and this scan
+     resolved to a product we carry, so every code collected off that case is
+     written as an ALIAS to this SKU. `case_aliases()` folds them into
+     catalog.json at the next refresh and the carton scans clean for ever after.
+     ⛔ This is the ONLY path that links a case code to a product without a human
+     re-confirming it later, and it is safe for exactly one reason: it was ARMED
+     BY AN EXPLICIT TAP on that case's own prompt, it is consumed by ONE scan,
+     and it expires on the same clock as the collection.
+     ⛔ Measured 2026-09-03: the same unknown codes had been rescanned up to SEVEN
+     times because a resolving scan discarded the pairing — the operator was
+     already doing the right thing and we threw the answer away. */
+  let unitAlias = null;
+  if(unitScanFor){
+    const fresh = (Date.now() - (unitScanFor.t||0)) <= UNRESOLVED_MS;
+    if(fresh){
+      unitAlias = unitScanFor;
+      /* ⛔ Only the CASE's codes, never this unit's own barcode — aliasing a
+         product's real UPC to itself is noise at best, and if the unit scan was
+         a different size of the same brand it would be a wrong alias. */
+      const own = new Set([v, upc, gtin].filter(Boolean).map(x=>String(x)));
+      const codes = (unitAlias.codes||[]).filter(c => !own.has(String(c)));
+      for(const code of codes) reject("ALIAS", `${code} -> ${prod.sku}`, upc);
+      /* ⭐ And carry the CASE's best-by if the unit did not bring one — the date
+         was often printed on the carton, not on the unit. */
+      if(!best && unitAlias.bb){
+        const d = parseGs1Date(unitAlias.bb);
+        if(d && plausibleBB(d)){ best = d; how = "keyed_casecode"; }
+      }
+    }
+    unitScanFor = null;        // ⛔ single-shot, whether it was fresh or stale
+  }
   if(unresolved) unresolved = null;
   pending={upc,prod,gtin:gtin||"",lot:ais["10"]||"",best,
            /* ⛔ A held date came off a DIFFERENT barcode than the item, so nothing
@@ -1667,6 +1736,19 @@ function clearPrompt(){
 
 document.addEventListener("click",e=>{
   if(e.target.closest("#cantScan")) return askFind();
+  /* ⭐ ARM the unit scan for THIS case, then get out of the way. Single-shot and
+     time-boxed; the very next resolving scan consumes it. */
+  if(e.target.closest("#unkUnit")){
+    if(!unresolved) return clearPrompt();
+    unitScanFor = {...unresolved, t: Date.now()};
+    return prompt_("go","Now scan one unit from inside the case",
+      `Open the carton and scan a single retail unit. We will record the date and
+       quantity against it, and remember that
+       <span class="num">${esc(unitScanFor.raw||unitScanFor.upc||"")}</span> means that
+       product from now on.<br><br>
+       <span class="hint">⛔ It must be a unit from THIS carton. If you have moved on,
+       scan the case again first.</span>`);
+  }
   if(e.target.closest("#unkFind")) return askFind();
   if(e.target.closest("#bbRedo") && pending){ pending.best=null; return askDate(); }
   if(e.target.closest("#bbKeep") && pending){ return commit_(); }
