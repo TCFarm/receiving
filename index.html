@@ -760,72 +760,13 @@ async function handleScan(raw){
   }
   if(!upc){ reject("UNREADABLE", v, "");
     const tries = failedBefore(v);
-    return prompt_("stop", tries>1 ? `That code is not a product code — ${tries} tries`
-                                   : "Unrecognised code",
-      tries>1
-      ? `<span class="num">${esc(v.slice(0,44))}</span> is a <strong>lot or date code, not a
-         product code</strong> — scanning it again will never work.
-         <br><br>Scan the <strong>UPC barcode on the case</strong>. If the date is on its own
-         barcode, scan that before or after the item — either way it will be held.
-         <br><br>${photoBtn()}`
-      : `No GTIN or UPC in <span class="num">${esc(v.slice(0,44))}</span>. If this is the yellow
-         KEHE pick label, scan the manufacturer label instead — its date is not the best-by.
-         ${photoBtn()}`);
-  }
-
-  /* ⛔ LOOK THE CASE CODE UP DIRECTLY, NOT ONLY ITS DERIVED UPC (found 2026-08-18).
-     Learned aliases are stored under the code as SCANNED — a 14-digit case GTIN,
-     or a bare code that reduces to nothing — but this only ever read
-     CATALOG[<derived consumer upc>]. Every alias the receipt ledger had taught
-     was unreachable, so the whole learning loop was inert (86 of them). */
-  const rawDigits = v.replace(/\D/g,"");
-  const look = () => CATALOG[upc] || (gtin ? CATALOG[gtin] : null) || CATALOG[rawDigits] || null;
-  let prod = look();
-  /* ⭐ KEEP IT CURRENT AT THE POINT OF FAILURE (Jack, 2026-08-18). The catalog is
-     rebuilt on a schedule, but "we added it in BigCommerce ten minutes ago" is
-     exactly the case that fails — and a tablet holds its copy for the whole
-     session. Before declaring a code unknown, re-fetch ONCE per cooldown and
-     look again. One small request, on a path that was already a dead end. */
-  if(!prod && Date.now()-lastCatalogFetch > CATALOG_REFETCH_MS){
-    lastCatalogFetch = Date.now();
-    try{
-      const fresh = await (await fetch("catalog.json",{cache:"no-store"})).json();
-      if(fresh && Object.keys(fresh).length){ CATALOG = fresh; prod = look(); }
-    }catch(_){ /* offline or Pages mid-deploy — fall through to the normal path */ }
-  }
-  if(!prod){ reject("UNKNOWN_UPC", v, upc);
-    /* ⛔ KEEP THE DATE. The label often encodes a perfectly good best-by beside a
-       GTIN we simply do not have on file; discarding it here forces the operator
-       to key a date the barcode already told us. */
-    /* ⭐ COLLECT EVERY CODE ON THE CASE (Jack, 2026-08-18). One unknown code is a
-       dead end; two codes off the SAME case are a permanent alias the moment the
-       operator names the product — and the retail UPC is very often on the case
-       right beside a manufacturer GTIN we have never seen. So a second unknown
-       scan APPENDS rather than starting over. */
-    /* ⛔ AND IT EXPIRES, like `heldDate`. Two codes only belong together if they
-       came off the same box within a plausible handling window; an hour-old
-       collection is a different carton. */
-    if(unresolved && (Date.now() - (unresolved.t || 0)) > UNRESOLVED_MS) unresolved = null;
-    if(unresolved) { if(!unresolved.codes.includes(v)) unresolved.codes.push(v); }
-    else unresolved = {gtin: gtin || "", upc, raw: v, codes: [v], t: Date.now(),
-                       bb: ais["17"]||ais["15"]||""};
-    if(!unresolved.bb) unresolved.bb = ais["17"]||ais["15"]||"";
-    /* ⭐ Not a dead end. The case may well be a product we DO carry whose UPC
-       is missing or different in BigCommerce — 29% of BC products carry no UPC
-       at all, so a code that fails to resolve says little about whether we
-       stock it. Offer the name search right here. */
-    const tries = failedBefore(v);
-    const n = unresolved.codes.length;
-    /* ⛔ TWO DIFFERENT COUNTERS, and conflating them hid the collection hint.
-       `tries` counts how often THIS code failed — it drives "stop rescanning".
-       `n` counts how many DIFFERENT codes we hold off this CASE — it drives
-       "keep going, you are building the link". A second, NEW barcode is not a
-       retry and must never be told to stop. */
-    const collecting =
-      `<strong>Scan any OTHER barcode on this case</strong> — the retail UPC, a second
-       label, anything. Two codes off the same box let us tie them together
-       permanently, so it scans first time from now on.` +
-      (n>1 ? `<br><span class="hint">${n} codes collected from this case so far.</span>` : "");
+    /* ⛔ The `collecting` hint ("scan any OTHER barcode on this case") was
+       REMOVED with the old prompt, not orphaned: `askDate` now offers "Scan a
+       unit from inside the case" as an explicit action, which is the same advice
+       as a button instead of a paragraph. The multi-code collection itself still
+       happens — `unresolved.codes` keeps appending — it is simply no longer
+       explained in prose nobody read. ⛔ Do not reinstate the text without
+       removing the button, or the prompt says the same thing twice. */
     /* ⭐ A 14-DIGIT SCAN AND A 12-DIGIT SCAN ARE DIFFERENT PROBLEMS and need
        different instructions (measured 2026-09-03 over the whole reject log: 76
        case GTINs vs 37 plain retail UPCs).
@@ -1083,6 +1024,42 @@ function noDateBtn(){
   const unnamed = String(((pending||{}).prod||{}).sku||"").startsWith("!");
   return `<button id="noDate">${unnamed ? "This item has no printed date"
                                         : "No date printed on this product"}</button>`;
+}
+/* ⭐ Preset reasons, because a free-text box on a tablet in a cold room is a box
+   nobody fills in. ⛔ Every option is ONE TAP and one of them is "too busy", so
+   the prompt is never a trap the operator has to lie their way out of. */
+const SKIP_REASONS = [
+  "Date is unreadable",
+  "Carton sealed — cannot reach a unit",
+  "Too busy — coming back to it",
+  "Damaged or short shipped",
+  "Not our product / wrong delivery",
+];
+function askSkipReason(){
+  prompt_("stop", "Why are you skipping it?",
+    `One tap. ⭐ This is the only thing that tells us whether to fix the label, the
+     process or the delivery — a skip with no reason is just a gap.`,
+    SKIP_REASONS.map(r =>
+      `<button data-skip="${esc(r)}" style="display:block;width:100%;text-align:left;
+         margin:0 0 7px;padding:11px 13px;min-height:0;font-size:15px">${esc(r)}</button>`
+    ).join("") +
+    `<div style="margin-bottom:9px">${photoBtn()}
+       <span class="hint" style="display:inline;margin-left:8px">⭐ a photo of the label
+         is the only evidence left once the carton is put away — it is how the last
+         three code classes were diagnosed</span></div>
+     <div class="dateRow" style="margin-top:9px">
+       <input id="skipWhy" type="text" placeholder="something else — type it"
+              aria-label="Other reason"
+              style="flex:1;font-size:15px;padding:10px;border:1px solid var(--line);
+                     border-radius:4px;background:var(--ground);color:var(--ink)">
+       <button data-skip="other">Save</button>
+     </div>`);
+  setTimeout(()=>{
+    const el=$("skipWhy");
+    if(el) el.addEventListener("keydown",ev=>{
+      if(ev.key==="Enter"){ const b=document.querySelector('[data-skip="other"]'); if(b) b.click(); }
+    });
+  },30);
 }
 function askDate(){
   /* ⭐⭐ AN UNNAMED CARTON IS ASKED FOR ITS DATE FIRST, NOT LAST (ruling: Jack,
@@ -1849,11 +1826,32 @@ document.addEventListener("click",e=>{
      guessed date or a false "no date printed" — and that lie would be learned
      CENTRALLY by `no_date_skus()` and stop us ever asking for that product
      again. A recorded gap beats a wrong fact. */
-  if(e.target.closest("#pendSkip")){
+  /* ⭐⭐ A SKIP IS DATA, SO ASK WHY (ruling: Jack, 2026-09-03). ⛔ "The operator
+     gave up" is not a finding — it is the ABSENCE of one, and it is what left
+     98 cartons in `abandoned_scans.csv` with no explanation anyone could act on.
+     ⭐ The reason is the whole value: "carton sealed" says the unit-scan path
+     cannot work here, "unreadable" is a supplier print-quality complaint,
+     "too busy" is a staffing or flow problem, "not our product" is a delivery
+     error. Those are four different fixes that look identical without the why. */
+  if(e.target.closest("#pendSkip")) return askSkipReason();
+  const sk = e.target.closest("[data-skip]");
+  if(sk){
+    const why = sk.dataset.skip === "other"
+      /* ⛔ CAP IT. `reject()` truncates the whole string to 60 chars for the
+         SharePoint write, and the code + " :: " already spends ~18 — a longer
+         note would be chopped mid-word and read as a different reason. */
+      ? ((($("skipWhy")||{}).value||"").trim().slice(0,38) || "other — no detail given")
+      : sk.dataset.skip;
+    /* ⛔ Record BEFORE discarding, and record against the CODE — the reject row
+       for this scan already exists, so this row is the explanation beside it. */
+    const code = (pending && pending.pendingCodes ? pending.pendingCodes.split(" ")[0] : "")
+                 || ((unresolved||{}).raw) || ((pending||{}).upc) || "";
+    reject("SKIPPED", `${code} :: ${why}`, (pending||{}).upc || "");
     pending = null; unresolved = null; unitScanFor = null;
-    return prompt_("", "Carton skipped",
-      `Nothing was recorded for it beyond the code. ⛔ Set it aside so somebody can
-       come back to it — the date is not recoverable once it is put away.`);
+    return prompt_("", "Carton skipped — reason recorded",
+      `<strong>${esc(why)}</strong><br><br>⛔ Set the carton aside so somebody can come
+       back to it: the date is not recoverable once it is put away. The reason is on
+       the receiving report, so a pattern gets fixed rather than repeated.`);
   }
   if(e.target.closest("#unkUnit")){
     /* ⛔ Drop the half-built sentinel row FIRST. Leaving it set would mean the
