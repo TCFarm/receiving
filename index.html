@@ -837,32 +837,41 @@ async function handleScan(raw){
                         rescanning will change it. Say so, by name. */
     const rawDigits = (v||"").replace(/\D/g,"");
     const looksCase = rawDigits.length===14 || !!gtin;
-    return prompt_("stop",
-      tries>1 ? `Scanning it again will not help — ${tries} tries` : "Unknown code",
-      (tries>1
-        ? `<span class="num">${upc}</span> is <strong>not in the catalog, and scanning the
-           same code again cannot change that</strong>. It is recorded either way.<br><br>`
-        : `<span class="num">${upc}</span> is not in the catalog — recorded, so nobody needs
-           to write it down.<br><br>`)
-      + (looksCase
-          ? `<strong>This is a CASE barcode.</strong> Open the case and scan ONE unit
-             from inside it — that tells us what this is, and the case will scan
-             first time from every future delivery.`
-          : `<strong>This is the unit's own barcode</strong>, so this product's UPC is
-             missing from our system. Record the date below, then
-             <strong>confirm UPC <span class="num">${upc}</span> is learned in Finale
-             before completing receiving</strong> — once Finale knows it, this scans
-             clean from then on.`)
-      + `<br><br>` + collecting
-      + `<br><br>${looksCase
-            ? `<button class="primary" id="unkUnit">Scan a unit from inside the case</button>`
-            : ``}`
-      + `<button ${looksCase?"":`class="primary"`} id="unkFind">Find it by name</button>`
-      + `<button id="unkDate">Record the date anyway</button>${photoBtn()}`
-      + `<br><span class="hint">⭐ The DATE is worth more than the code. "Record the date
-         anyway" keeps it even when we cannot name the product yet — it is attached
-         automatically once the UPC is learned in Finale.</span>`);
+    /* ⭐ START THE DATE LADDER NOW. The reject row is already written above, so
+       the code is recorded either way; this makes the DATE the default outcome
+       rather than an option nobody taps. `askDate` renders the identification
+       choices on its own prompt, so nothing is taken away. */
+    pending = {upc: upc || "", prod: {sku: "!PENDING_ID",
+                 name: "UNIDENTIFIED — " + (v || upc || "no code"),
+                 cls: "Refrigerated", pack: null},
+               gtin: gtin || "", lot: ais["10"]||"", best: null,
+               source: (isAudit()?"audit_":"") + "pending_identification",
+               pendingCodes: (unresolved.codes||[]).slice(0,6).join(" ")};
+    /* ⭐ A date that WAS encoded on the label still wins — no reason to make
+       someone key what the barcode already said. */
+    if(unresolved.bb){
+      const d0 = parseGs1Date(unresolved.bb);
+      if(d0 && plausibleBB(d0)) pending.best = d0;
+    }
+    if(!looksCase && tries<=1){
+      /* a plain retail code: say the Finale instruction ONCE, then get the date */
+      prompt_("stop","This product's UPC is missing from our system",
+        `<span class="num">${upc}</span> is the unit's own barcode, so no case code is
+         hiding it. <strong>Confirm UPC ${upc} is learned in Finale before completing
+         receiving.</strong><br><br>Recording the date next — it is attached
+         automatically once Finale knows the code.
+         <br><br><button class="primary" id="pendGo">Enter the date</button>
+         <button id="pendSkip">Skip this carton</button>`);
+      return;
+    }
+    return next();
   }
+  /* ⛔ The old unknown-code prompt lived here and has been REMOVED, not parked
+     behind a flag: it gated on IDENTIFICATION and made the date an optional
+     button, which is the defect fixed above. Its useful parts — the case-vs-unit
+     guidance, the code-collection hint, the Finale instruction and the
+     identification options — all moved onto `askDate`, which now runs first. */
+
   /* source answers "how often did the label do the work for us?" without
      anyone tallying it (Jack, 2026-08-13):
        gs1              → date came encoded in the barcode, zero typing
@@ -1062,8 +1071,26 @@ function renderFind(q){
 }
 
 function askDate(){
-  prompt_("", "No date on the label — enter it",
-    `<strong>${esc(pending.prod.name)}</strong> — tap for a calendar, or type six digits MMDDYY.`,
+  /* ⭐⭐ AN UNNAMED CARTON IS ASKED FOR ITS DATE FIRST, NOT LAST (ruling: Jack,
+     2026-09-03). Until now the unknown-code prompt gated on IDENTIFICATION and
+     put the date behind an optional button, so an operator who tapped nothing
+     left us a bare code — no date, no quantity. ⛔ That is backwards: identity
+     can be recovered later from Finale, the catalog or a unit scan, but a date
+     nobody wrote down is gone the moment the pallet is put away.
+     ⭐ So the ladder now runs immediately for a `!PENDING_ID` row and the
+     identification options ride along ON this prompt — the operator can still
+     take either of them, and nothing has been lost if they do, because a
+     resolved product is asked for its date anyway. */
+  const unnamed = String((pending.prod||{}).sku||"").startsWith("!");
+  const rawCode = (pending.pendingCodes||"").split(" ")[0] || pending.upc || "";
+  prompt_("", unnamed ? "We do not know this code — what is the best-by?"
+                      : "No date on the label — enter it",
+    (unnamed
+      ? `<span class="num">${esc(rawCode)}</span> is not in the catalog.
+         <strong>The date is worth more than the code</strong> — record it here and we
+         will attach it to the product once the UPC is known.`
+      : `<strong>${esc(pending.prod.name)}</strong>`) +
+    ` — tap for a calendar, or type six digits MMDDYY.`,
     `<div class="dateRow">
        <input id="pick" type="date" aria-label="Pick best by date">
        <span class="or">or</span>
@@ -1075,7 +1102,20 @@ function askDate(){
        <button id="noDate">No date printed on this product</button>
        <span class="hint" style="display:inline;margin-left:9px">
          soap, paper goods, cleaning supplies — many carry none</span>
-     </div>`);
+     </div>` +
+    (unnamed
+      /* ⛔ AND AN HONEST WAY OUT. Without "Skip this carton" the only exits from
+         a forced prompt are a made-up date or "no date printed" — a FALSE answer
+         that would then be learned centrally and stop us ever asking again. A
+         skipped carton is a known gap; a fabricated one is a wrong fact. */
+      ? `<div style="margin-top:13px;border-top:1px solid var(--line);padding-top:11px">
+           <button id="unkUnit">Scan a unit from inside the case</button>
+           <button id="unkFind">Find it by name</button>
+           <button id="pendSkip">Skip this carton</button>
+           <div class="hint">Either identification option keeps everything — a named
+             product is asked for its date next anyway.</div>
+         </div>`
+      : ``));
   setTimeout(()=>{
     const el=$("typed"), pick=$("pick");
     if(el){ el.focus();
@@ -1785,7 +1825,22 @@ document.addEventListener("click",e=>{
   if(e.target.closest("#cantScan")) return askFind();
   /* ⭐ ARM the unit scan for THIS case, then get out of the way. Single-shot and
      time-boxed; the very next resolving scan consumes it. */
+  if(e.target.closest("#pendGo") && pending) { clearPrompt(); return next(); }
+  /* ⛔ AN HONEST SKIP. The alternative exits from a forced date prompt are a
+     guessed date or a false "no date printed" — and that lie would be learned
+     CENTRALLY by `no_date_skus()` and stop us ever asking for that product
+     again. A recorded gap beats a wrong fact. */
+  if(e.target.closest("#pendSkip")){
+    pending = null; unresolved = null; unitScanFor = null;
+    return prompt_("", "Carton skipped",
+      `Nothing was recorded for it beyond the code. ⛔ Set it aside so somebody can
+       come back to it — the date is not recoverable once it is put away.`);
+  }
   if(e.target.closest("#unkUnit")){
+    /* ⛔ Drop the half-built sentinel row FIRST. Leaving it set would mean the
+       unit scan overwrites `pending` mid-flight, and a partially answered
+       ladder for a DIFFERENT identity is how a date lands on the wrong SKU. */
+    pending = null;
     if(!unresolved) return clearPrompt();
     unitScanFor = {...unresolved, t: Date.now()};
     return prompt_("go","Now scan one unit from inside the case",
@@ -1811,23 +1866,10 @@ document.addEventListener("click",e=>{
      with its ORIGINAL scan date intact.
      ⛔ The sentinel must never look like stock: sku `!PENDING_ID`, and the
      drain's own sentinel guard already refuses to fold a `!`-prefixed sku. */
-  if(e.target.closest("#unkDate")){
-    const c = unresolved || {};
-    const codes = (c.codes||[]).slice(0,6);
-    pending = {upc: c.upc || "", prod: {sku: "!PENDING_ID",
-                 name: "UNIDENTIFIED — " + (codes[0] || "no code"),
-                 cls: "Refrigerated", pack: null},
-               gtin: c.gtin || "", lot: "", best: null,
-               /* ⛔ SHORTEST guarantee assumed while unknown: `cls` above is
-                  Refrigerated deliberately, so nothing downstream can treat an
-                  unidentified carton as long-life. */
-               source: (isAudit()?"audit_":"") + "pending_identification",
-               pendingCodes: codes.join(" ")};
-    unresolved = null; unitScanFor = null;
-    clearPrompt();
-    return next();          // -> date, then quantity, then commit
-  }
-  if(e.target.closest("#unkFind")) return askFind();
+  /* ⛔ `#unkDate` ("Record the date anyway") was REMOVED 2026-09-03 — the date
+     ladder now runs automatically for an unknown code, so an optional button
+     asking for the same thing could only be a second, colder path. */
+  if(e.target.closest("#unkFind")){ pending = null; return askFind(); }
   if(e.target.closest("#bbRedo") && pending){ pending.best=null; return askDate(); }
   if(e.target.closest("#bbKeep") && pending){ return commit_(); }
   /* ⛔ "COULDN'T FIND IT HERE" IS NOT "OUT OF STOCK" (Jack, 2026-08-20:
