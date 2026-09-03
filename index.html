@@ -861,6 +861,7 @@ async function handleScan(raw){
          receiving.</strong><br><br>Recording the date next — it is attached
          automatically once Finale knows the code.
          <br><br><button class="primary" id="pendGo">Enter the date</button>
+         ${noDateBtn()}
          <button id="pendSkip">Skip this carton</button>`);
       return;
     }
@@ -1070,6 +1071,19 @@ function renderFind(q){
      </div>`).join("");
 }
 
+/* ⭐⭐ "THIS ITEM HAS NO DATE" MUST BE ONE TAP WHEREVER A DATE IS ASKED OR
+   FORCED (ruling: Jack, 2026-09-03). It used to live only on `askDate`, so an
+   operator standing at the plausibility challenge or the missing-UPC notice had
+   to walk BACK to the date prompt to say the thing that was true. ⛔ A forced
+   prompt whose honest answer is two taps away is how a wrong date gets keyed —
+   the operator picks whatever clears the screen.
+   ⚠️ The label changes for an UNNAMED carton, because "this product" is a claim
+   we cannot make when we do not know what the product is. */
+function noDateBtn(){
+  const unnamed = String(((pending||{}).prod||{}).sku||"").startsWith("!");
+  return `<button id="noDate">${unnamed ? "This item has no printed date"
+                                        : "No date printed on this product"}</button>`;
+}
 function askDate(){
   /* ⭐⭐ AN UNNAMED CARTON IS ASKED FOR ITS DATE FIRST, NOT LAST (ruling: Jack,
      2026-09-03). Until now the unknown-code prompt gated on IDENTIFICATION and
@@ -1099,7 +1113,7 @@ function askDate(){
        <button class="primary" id="dok">Save</button>
      </div>
      <div style="margin-top:11px">
-       <button id="noDate">No date printed on this product</button>
+       ${noDateBtn()}
        <span class="hint" style="display:inline;margin-left:9px">
          soap, paper goods, cleaning supplies — many carry none</span>
      </div>` +
@@ -1195,7 +1209,8 @@ function commit(){
        in the past or implausibly far out. If the case really is expired, set it
        aside. If it was mistyped, re-enter it.`,
       `<button class="primary" id="bbRedo">Re-enter the date</button>
-       <button id="bbKeep">It really is ${esc(bad)} — record it</button>`);
+       <button id="bbKeep">It really is ${esc(bad)} — record it</button>
+       ${noDateBtn()}`);
   }
   commit_();
 }
@@ -1775,6 +1790,10 @@ document.addEventListener("click", e=>{
       noDateSkus[pending.prod.sku]=1;
       try{ localStorage.setItem("noDateSkus", JSON.stringify(noDateSkus)); }catch(_){}
     }
+    /* ⛔ CLEAR whatever date got us here. Reached from the plausibility
+       challenge, `pending.best` holds the implausible value the operator has
+       just disowned — committing with it set would record the very date they
+       said does not exist. */
     pending.best = null;
     pending.noDate = true;
     pending.source = (isAudit()?"audit_":"") + "no_date_on_package";
