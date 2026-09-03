@@ -841,15 +841,19 @@ async function handleScan(raw){
              from inside it — that tells us what this is, and the case will scan
              first time from every future delivery.`
           : `<strong>This is the unit's own barcode</strong>, so this product's UPC is
-             missing from our system. Enter the date and quantity, then tell Julia
-             to add UPC <span class="num">${upc}</span> in Finale.`)
+             missing from our system. Record the date below, then
+             <strong>confirm UPC <span class="num">${upc}</span> is learned in Finale
+             before completing receiving</strong> — once Finale knows it, this scans
+             clean from then on.`)
       + `<br><br>` + collecting
       + `<br><br>${looksCase
             ? `<button class="primary" id="unkUnit">Scan a unit from inside the case</button>`
             : ``}`
-      + `<button ${looksCase?"":`class="primary"`} id="unkFind">Find it by name</button>${photoBtn()}`
-      + `<br><span class="hint">Either way the date is worth more than the code — if you can
-         name the product, we can still record its best-by.</span>`);
+      + `<button ${looksCase?"":`class="primary"`} id="unkFind">Find it by name</button>`
+      + `<button id="unkDate">Record the date anyway</button>${photoBtn()}`
+      + `<br><span class="hint">⭐ The DATE is worth more than the code. "Record the date
+         anyway" keeps it even when we cannot name the product yet — it is attached
+         automatically once the UPC is learned in Finale.</span>`);
   }
   /* source answers "how often did the label do the work for us?" without
      anyone tallying it (Jack, 2026-08-13):
@@ -1268,7 +1272,11 @@ async function save(row){
   /* ⭐ When the date arrived on its own barcode there is no case GTIN to store,
      so the raw date scan goes in its place, tagged. `case_aliases()` only reads
      14-digit values, so this can never be mistaken for a case code. */
-  const g14 = row.gtin || (row.heldRaw ? ("RAW:"+String(row.heldRaw).slice(0,40)) : "");
+  /* ⭐ For a pending-identification row the CODES are the only handle the drain
+     has to resolve it later, so they go in `gtin14` where `case_aliases()` and
+     the resolver both already look. */
+  const g14 = row.pendingCodes || row.gtin
+              || (row.heldRaw ? ("RAW:"+String(row.heldRaw).slice(0,40)) : "");
   const v={ upc:row.upc, sku:row.prod.sku, gtin14:g14, best_by:row.best || "",
             lot:row.lot||"", units:row.units ?? 0, source:row.source,
             operator:account, po_ref:ref, device };
@@ -1748,6 +1756,37 @@ document.addEventListener("click",e=>{
        product from now on.<br><br>
        <span class="hint">⛔ It must be a unit from THIS carton. If you have moved on,
        scan the case again first.</span>`);
+  }
+  /* ⭐⭐ RECORD THE DATE WITHOUT AN IDENTITY (ruling: Jack, 2026-09-03).
+     ⛔ THE HOLE THIS CLOSES: a carton whose product is in neither the catalog nor
+     Finale had NO path to record its best-by at all — `REJECT_COLS` carries no
+     `best_by`, and find-by-name dead-ends at "set the case aside". So on the
+     FIRST handling of a genuinely new or re-numbered item the date was lost, and
+     that is exactly the item whose date we most need: nobody has a history for
+     it.
+     ⭐ So we take the date and quantity against a SENTINEL sku. `receiving_drain`
+     keeps these out of `receipts.csv` (they would corrupt shelf life — no SKU to
+     attribute them to) and re-checks them every run; the moment the code becomes
+     resolvable — normally because a human learned the UPC in Finale and
+     `finale-data-refresh` picked it up — the row is promoted to a real receipt
+     with its ORIGINAL scan date intact.
+     ⛔ The sentinel must never look like stock: sku `!PENDING_ID`, and the
+     drain's own sentinel guard already refuses to fold a `!`-prefixed sku. */
+  if(e.target.closest("#unkDate")){
+    const c = unresolved || {};
+    const codes = (c.codes||[]).slice(0,6);
+    pending = {upc: c.upc || "", prod: {sku: "!PENDING_ID",
+                 name: "UNIDENTIFIED — " + (codes[0] || "no code"),
+                 cls: "Refrigerated", pack: null},
+               gtin: c.gtin || "", lot: "", best: null,
+               /* ⛔ SHORTEST guarantee assumed while unknown: `cls` above is
+                  Refrigerated deliberately, so nothing downstream can treat an
+                  unidentified carton as long-life. */
+               source: (isAudit()?"audit_":"") + "pending_identification",
+               pendingCodes: codes.join(" ")};
+    unresolved = null; unitScanFor = null;
+    clearPrompt();
+    return next();          // -> date, then quantity, then commit
   }
   if(e.target.closest("#unkFind")) return askFind();
   if(e.target.closest("#bbRedo") && pending){ pending.best=null; return askDate(); }
