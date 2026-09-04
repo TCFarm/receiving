@@ -544,7 +544,7 @@ async function graph(path, opts={}){
 }
 
 /* ---------- startup: resolve site + list, VALIDATE columns ---------- */
-let siteId=null, listId=null, driveId=null, CATALOG={}, CATALOG_BY_SKU={};
+let siteId=null, listId=null, driveId=null, CATALOG={};
 
 async function bootstrap(){
   const site = await graph(`/sites/${CFG.hostname}:${CFG.sitePath}`);
@@ -585,14 +585,6 @@ async function bootstrap(){
 
   try{ CATALOG = await (await fetch("catalog.json",{cache:"no-cache"})).json(); }
   catch(_){ CATALOG = {}; }
-  /* ⭐ SKU-keyed view, for the central no-date flag. Built once here rather than
-     scanned per scan — the catalog is ~3.4k entries and the scan path is the
-     one place that must never get slower. */
-  CATALOG_BY_SKU = {};
-  for(const k in CATALOG){
-    const v = CATALOG[k];
-    if(v && v.sku && !(v.sku in CATALOG_BY_SKU)) CATALOG_BY_SKU[v.sku] = v;
-  }
 }
 
 /* ---------- the scan flow ---------- */
@@ -627,22 +619,6 @@ let lastFail = null;   // {kind, raw, upc} — what the photo prompt is about
    and a catalog rebuild turns that pairing into a permanent alias. Two steps
    ONCE per product, one scan for ever after. */
 let unresolved=null;
-/* ⭐⭐ THE UNIT SCAN (ruling: Jack, 2026-09-03). An unknown CASE code is
-   resolvable by the one thing always available at the dock: a retail unit inside
-   the carton. The operator taps "scan one unit", scans it, and we get the SKU
-   from our own catalog — so the case code is learned with the strongest evidence
-   there is, and ⛔ no photo and no later human confirmation are needed.
-
-   ⛔⛔ WHY THIS IS A DELIBERATE, ARMED, SINGLE-SHOT FLAG AND NOT "carry the
-   unresolved codes onto the next successful scan": that is EXACTLY the
-   corruption fixed on 2026-08-26 (see the `unresolved = null` guard below). An
-   unknown case left open silently attached itself to an unrelated product twenty
-   scans later, writing a PERMANENT wrong alias and filing the case's best-by
-   against the wrong stock. Proximity is not intent.
-   ⭐ So the link is only ever made when the operator has SAID they are scanning a
-   unit out of that specific case: armed by a button, consumed by exactly one
-   scan, and expiring on the same clock as the collection itself. */
-let unitScanFor=null;
 /* ⛔⛔ A MONOTONIC ROW NUMBER. `n` used to be `rows.length+1`, which was
    collision-free ONLY because rows were never removed — and the 2026-08-26
    Discard escape hatch splices them out. After a discard the counter reissues
@@ -760,60 +736,84 @@ async function handleScan(raw){
   }
   if(!upc){ reject("UNREADABLE", v, "");
     const tries = failedBefore(v);
-    /* ⛔ The `collecting` hint ("scan any OTHER barcode on this case") was
-       REMOVED with the old prompt, not orphaned: `askDate` now offers "Scan a
-       unit from inside the case" as an explicit action, which is the same advice
-       as a button instead of a paragraph. The multi-code collection itself still
-       happens — `unresolved.codes` keeps appending — it is simply no longer
-       explained in prose nobody read. ⛔ Do not reinstate the text without
-       removing the button, or the prompt says the same thing twice. */
-    /* ⭐ A 14-DIGIT SCAN AND A 12-DIGIT SCAN ARE DIFFERENT PROBLEMS and need
-       different instructions (measured 2026-09-03 over the whole reject log: 76
-       case GTINs vs 37 plain retail UPCs).
-         a CASE code  → the unit inside it is very likely one we carry: SCAN A
-                        UNIT and the pairing is learned automatically.
-         a UNIT code  → we scanned the actual retail barcode and still do not
-                        know it, so the product's UPC is missing from our system.
-                        ⛔ That is a Finale/BigCommerce data fix, and no amount of
-                        rescanning will change it. Say so, by name. */
-    const rawDigits = (v||"").replace(/\D/g,"");
-    const looksCase = rawDigits.length===14 || !!gtin;
-    /* ⭐ START THE DATE LADDER NOW. The reject row is already written above, so
-       the code is recorded either way; this makes the DATE the default outcome
-       rather than an option nobody taps. `askDate` renders the identification
-       choices on its own prompt, so nothing is taken away. */
-    pending = {upc: upc || "", prod: {sku: "!PENDING_ID",
-                 name: "UNIDENTIFIED — " + (v || upc || "no code"),
-                 cls: "Refrigerated", pack: null},
-               gtin: gtin || "", lot: ais["10"]||"", best: null,
-               source: (isAudit()?"audit_":"") + "pending_identification",
-               pendingCodes: (unresolved.codes||[]).slice(0,6).join(" ")};
-    /* ⭐ A date that WAS encoded on the label still wins — no reason to make
-       someone key what the barcode already said. */
-    if(unresolved.bb){
-      const d0 = parseGs1Date(unresolved.bb);
-      if(d0 && plausibleBB(d0)) pending.best = d0;
-    }
-    if(!looksCase && tries<=1){
-      /* a plain retail code: say the Finale instruction ONCE, then get the date */
-      prompt_("stop","This product's UPC is missing from our system",
-        `<span class="num">${upc}</span> is the unit's own barcode, so no case code is
-         hiding it. <strong>Confirm UPC ${upc} is learned in Finale before completing
-         receiving.</strong><br><br>Recording the date next — it is attached
-         automatically once Finale knows the code.
-         <br><br><button class="primary" id="pendGo">Enter the date</button>
-         ${noDateBtn()}
-         <button id="pendSkip">Skip this carton</button>`);
-      return;
-    }
-    return next();
+    return prompt_("stop", tries>1 ? `That code is not a product code — ${tries} tries`
+                                   : "Unrecognised code",
+      tries>1
+      ? `<span class="num">${esc(v.slice(0,44))}</span> is a <strong>lot or date code, not a
+         product code</strong> — scanning it again will never work.
+         <br><br>Scan the <strong>UPC barcode on the case</strong>. If the date is on its own
+         barcode, scan that before or after the item — either way it will be held.
+         <br><br>${photoBtn()}`
+      : `No GTIN or UPC in <span class="num">${esc(v.slice(0,44))}</span>. If this is the yellow
+         KEHE pick label, scan the manufacturer label instead — its date is not the best-by.
+         ${photoBtn()}`);
   }
-  /* ⛔ The old unknown-code prompt lived here and has been REMOVED, not parked
-     behind a flag: it gated on IDENTIFICATION and made the date an optional
-     button, which is the defect fixed above. Its useful parts — the case-vs-unit
-     guidance, the code-collection hint, the Finale instruction and the
-     identification options — all moved onto `askDate`, which now runs first. */
 
+  /* ⛔ LOOK THE CASE CODE UP DIRECTLY, NOT ONLY ITS DERIVED UPC (found 2026-08-18).
+     Learned aliases are stored under the code as SCANNED — a 14-digit case GTIN,
+     or a bare code that reduces to nothing — but this only ever read
+     CATALOG[<derived consumer upc>]. Every alias the receipt ledger had taught
+     was unreachable, so the whole learning loop was inert (86 of them). */
+  const rawDigits = v.replace(/\D/g,"");
+  const look = () => CATALOG[upc] || (gtin ? CATALOG[gtin] : null) || CATALOG[rawDigits] || null;
+  let prod = look();
+  /* ⭐ KEEP IT CURRENT AT THE POINT OF FAILURE (Jack, 2026-08-18). The catalog is
+     rebuilt on a schedule, but "we added it in BigCommerce ten minutes ago" is
+     exactly the case that fails — and a tablet holds its copy for the whole
+     session. Before declaring a code unknown, re-fetch ONCE per cooldown and
+     look again. One small request, on a path that was already a dead end. */
+  if(!prod && Date.now()-lastCatalogFetch > CATALOG_REFETCH_MS){
+    lastCatalogFetch = Date.now();
+    try{
+      const fresh = await (await fetch("catalog.json",{cache:"no-store"})).json();
+      if(fresh && Object.keys(fresh).length){ CATALOG = fresh; prod = look(); }
+    }catch(_){ /* offline or Pages mid-deploy — fall through to the normal path */ }
+  }
+  if(!prod){ reject("UNKNOWN_UPC", v, upc);
+    /* ⛔ KEEP THE DATE. The label often encodes a perfectly good best-by beside a
+       GTIN we simply do not have on file; discarding it here forces the operator
+       to key a date the barcode already told us. */
+    /* ⭐ COLLECT EVERY CODE ON THE CASE (Jack, 2026-08-18). One unknown code is a
+       dead end; two codes off the SAME case are a permanent alias the moment the
+       operator names the product — and the retail UPC is very often on the case
+       right beside a manufacturer GTIN we have never seen. So a second unknown
+       scan APPENDS rather than starting over. */
+    /* ⛔ AND IT EXPIRES, like `heldDate`. Two codes only belong together if they
+       came off the same box within a plausible handling window; an hour-old
+       collection is a different carton. */
+    if(unresolved && (Date.now() - (unresolved.t || 0)) > UNRESOLVED_MS) unresolved = null;
+    if(unresolved) { if(!unresolved.codes.includes(v)) unresolved.codes.push(v); }
+    else unresolved = {gtin: gtin || "", upc, raw: v, codes: [v], t: Date.now(),
+                       bb: ais["17"]||ais["15"]||""};
+    if(!unresolved.bb) unresolved.bb = ais["17"]||ais["15"]||"";
+    /* ⭐ Not a dead end. The case may well be a product we DO carry whose UPC
+       is missing or different in BigCommerce — 29% of BC products carry no UPC
+       at all, so a code that fails to resolve says little about whether we
+       stock it. Offer the name search right here. */
+    const tries = failedBefore(v);
+    const n = unresolved.codes.length;
+    /* ⛔ TWO DIFFERENT COUNTERS, and conflating them hid the collection hint.
+       `tries` counts how often THIS code failed — it drives "stop rescanning".
+       `n` counts how many DIFFERENT codes we hold off this CASE — it drives
+       "keep going, you are building the link". A second, NEW barcode is not a
+       retry and must never be told to stop. */
+    const collecting =
+      `<strong>Scan any OTHER barcode on this case</strong> — the retail UPC, a second
+       label, anything. Two codes off the same box let us tie them together
+       permanently, so it scans first time from now on.` +
+      (n>1 ? `<br><span class="hint">${n} codes collected from this case so far.</span>` : "");
+    return prompt_("stop",
+      tries>1 ? `Scanning it again will not help — ${tries} tries` : "Unknown code",
+      (tries>1
+        ? `<span class="num">${upc}</span> is <strong>not in the catalog, and scanning the
+           same code again cannot change that</strong>. It is recorded either way.<br><br>`
+        : `<span class="num">${upc}</span> is not in the catalog — recorded, so nobody needs
+           to write it down.<br><br>`)
+      + collecting
+      + `<br><br><button class="primary" id="unkFind">Find it by name</button>${photoBtn()}`
+      + `<br><span class="hint">If none of that works, set the case aside and carry on —
+         nothing is lost, we have the codes.</span>`);
+  }
   /* source answers "how often did the label do the work for us?" without
      anyone tallying it (Jack, 2026-08-13):
        gs1              → date came encoded in the barcode, zero typing
@@ -845,38 +845,6 @@ async function handleScan(raw){
      — reached here with no operator error at all.
      ⭐ Clearing on the next successful scan is the honest boundary: whatever the
      operator is doing now, it is not that case. */
-  /* ⭐⭐ CONSUME AN ARMED UNIT SCAN — this is where the case code is learned.
-     The operator said "I am scanning a unit out of that carton", and this scan
-     resolved to a product we carry, so every code collected off that case is
-     written as an ALIAS to this SKU. `case_aliases()` folds them into
-     catalog.json at the next refresh and the carton scans clean for ever after.
-     ⛔ This is the ONLY path that links a case code to a product without a human
-     re-confirming it later, and it is safe for exactly one reason: it was ARMED
-     BY AN EXPLICIT TAP on that case's own prompt, it is consumed by ONE scan,
-     and it expires on the same clock as the collection.
-     ⛔ Measured 2026-09-03: the same unknown codes had been rescanned up to SEVEN
-     times because a resolving scan discarded the pairing — the operator was
-     already doing the right thing and we threw the answer away. */
-  let unitAlias = null;
-  if(unitScanFor){
-    const fresh = (Date.now() - (unitScanFor.t||0)) <= UNRESOLVED_MS;
-    if(fresh){
-      unitAlias = unitScanFor;
-      /* ⛔ Only the CASE's codes, never this unit's own barcode — aliasing a
-         product's real UPC to itself is noise at best, and if the unit scan was
-         a different size of the same brand it would be a wrong alias. */
-      const own = new Set([v, upc, gtin].filter(Boolean).map(x=>String(x)));
-      const codes = (unitAlias.codes||[]).filter(c => !own.has(String(c)));
-      for(const code of codes) reject("ALIAS", `${code} -> ${prod.sku}`, upc);
-      /* ⭐ And carry the CASE's best-by if the unit did not bring one — the date
-         was often printed on the carton, not on the unit. */
-      if(!best && unitAlias.bb){
-        const d = parseGs1Date(unitAlias.bb);
-        if(d && plausibleBB(d)){ best = d; how = "keyed_casecode"; }
-      }
-    }
-    unitScanFor = null;        // ⛔ single-shot, whether it was fresh or stale
-  }
   if(unresolved) unresolved = null;
   pending={upc,prod,gtin:gtin||"",lot:ais["10"]||"",best,
            /* ⛔ A held date came off a DIFFERENT barcode than the item, so nothing
@@ -908,7 +876,7 @@ function next(){
      ⭐ `askQty` still TEACHES `packs[sku]`, so the pack is PRE-FILLED on every
      later case — the learning is kept, the silence is not. */
   /* already established that this product carries no date — do not ask again */
-  if(!pending.best && noDateFor(pending.prod.sku) && !pending.noDate){
+  if(!pending.best && noDateSkus[pending.prod.sku] && !pending.noDate){
     pending.noDate = true;
     pending.source = (isAudit()?"audit_":"") + "no_date_on_package";
   }
@@ -1012,76 +980,9 @@ function renderFind(q){
      </div>`).join("");
 }
 
-/* ⭐⭐ "THIS ITEM HAS NO DATE" MUST BE ONE TAP WHEREVER A DATE IS ASKED OR
-   FORCED (ruling: Jack, 2026-09-03). It used to live only on `askDate`, so an
-   operator standing at the plausibility challenge or the missing-UPC notice had
-   to walk BACK to the date prompt to say the thing that was true. ⛔ A forced
-   prompt whose honest answer is two taps away is how a wrong date gets keyed —
-   the operator picks whatever clears the screen.
-   ⚠️ The label changes for an UNNAMED carton, because "this product" is a claim
-   we cannot make when we do not know what the product is. */
-function noDateBtn(){
-  const unnamed = String(((pending||{}).prod||{}).sku||"").startsWith("!");
-  return `<button id="noDate">${unnamed ? "This item has no printed date"
-                                        : "No date printed on this product"}</button>`;
-}
-/* ⭐ Preset reasons, because a free-text box on a tablet in a cold room is a box
-   nobody fills in. ⛔ Every option is ONE TAP and one of them is "too busy", so
-   the prompt is never a trap the operator has to lie their way out of. */
-const SKIP_REASONS = [
-  "Date is unreadable",
-  "Carton sealed — cannot reach a unit",
-  "Too busy — coming back to it",
-  "Damaged or short shipped",
-  "Not our product / wrong delivery",
-];
-function askSkipReason(){
-  prompt_("stop", "Why are you skipping it?",
-    `One tap. ⭐ This is the only thing that tells us whether to fix the label, the
-     process or the delivery — a skip with no reason is just a gap.`,
-    SKIP_REASONS.map(r =>
-      `<button data-skip="${esc(r)}" style="display:block;width:100%;text-align:left;
-         margin:0 0 7px;padding:11px 13px;min-height:0;font-size:15px">${esc(r)}</button>`
-    ).join("") +
-    `<div style="margin-bottom:9px">${photoBtn()}
-       <span class="hint" style="display:inline;margin-left:8px">⭐ a photo of the label
-         is the only evidence left once the carton is put away — it is how the last
-         three code classes were diagnosed</span></div>
-     <div class="dateRow" style="margin-top:9px">
-       <input id="skipWhy" type="text" placeholder="something else — type it"
-              aria-label="Other reason"
-              style="flex:1;font-size:15px;padding:10px;border:1px solid var(--line);
-                     border-radius:4px;background:var(--ground);color:var(--ink)">
-       <button data-skip="other">Save</button>
-     </div>`);
-  setTimeout(()=>{
-    const el=$("skipWhy");
-    if(el) el.addEventListener("keydown",ev=>{
-      if(ev.key==="Enter"){ const b=document.querySelector('[data-skip="other"]'); if(b) b.click(); }
-    });
-  },30);
-}
 function askDate(){
-  /* ⭐⭐ AN UNNAMED CARTON IS ASKED FOR ITS DATE FIRST, NOT LAST (ruling: Jack,
-     2026-09-03). Until now the unknown-code prompt gated on IDENTIFICATION and
-     put the date behind an optional button, so an operator who tapped nothing
-     left us a bare code — no date, no quantity. ⛔ That is backwards: identity
-     can be recovered later from Finale, the catalog or a unit scan, but a date
-     nobody wrote down is gone the moment the pallet is put away.
-     ⭐ So the ladder now runs immediately for a `!PENDING_ID` row and the
-     identification options ride along ON this prompt — the operator can still
-     take either of them, and nothing has been lost if they do, because a
-     resolved product is asked for its date anyway. */
-  const unnamed = String((pending.prod||{}).sku||"").startsWith("!");
-  const rawCode = (pending.pendingCodes||"").split(" ")[0] || pending.upc || "";
-  prompt_("", unnamed ? "We do not know this code — what is the best-by?"
-                      : "No date on the label — enter it",
-    (unnamed
-      ? `<span class="num">${esc(rawCode)}</span> is not in the catalog.
-         <strong>The date is worth more than the code</strong> — record it here and we
-         will attach it to the product once the UPC is known.`
-      : `<strong>${esc(pending.prod.name)}</strong>`) +
-    ` — tap for a calendar, or type six digits MMDDYY.`,
+  prompt_("", "No date on the label — enter it",
+    `<strong>${esc(pending.prod.name)}</strong> — tap for a calendar, or type six digits MMDDYY.`,
     `<div class="dateRow">
        <input id="pick" type="date" aria-label="Pick best by date">
        <span class="or">or</span>
@@ -1090,23 +991,10 @@ function askDate(){
        <button class="primary" id="dok">Save</button>
      </div>
      <div style="margin-top:11px">
-       ${noDateBtn()}
+       <button id="noDate">No date printed on this product</button>
        <span class="hint" style="display:inline;margin-left:9px">
          soap, paper goods, cleaning supplies — many carry none</span>
-     </div>` +
-    (unnamed
-      /* ⛔ AND AN HONEST WAY OUT. Without "Skip this carton" the only exits from
-         a forced prompt are a made-up date or "no date printed" — a FALSE answer
-         that would then be learned centrally and stop us ever asking again. A
-         skipped carton is a known gap; a fabricated one is a wrong fact. */
-      ? `<div style="margin-top:13px;border-top:1px solid var(--line);padding-top:11px">
-           <button id="unkUnit">Scan a unit from inside the case</button>
-           <button id="unkFind">Find it by name</button>
-           <button id="pendSkip">Skip this carton</button>
-           <div class="hint">Either identification option keeps everything — a named
-             product is asked for its date next anyway.</div>
-         </div>`
-      : ``));
+     </div>`);
   setTimeout(()=>{
     const el=$("typed"), pick=$("pick");
     if(el){ el.focus();
@@ -1186,8 +1074,7 @@ function commit(){
        in the past or implausibly far out. If the case really is expired, set it
        aside. If it was mistyped, re-enter it.`,
       `<button class="primary" id="bbRedo">Re-enter the date</button>
-       <button id="bbKeep">It really is ${esc(bad)} — record it</button>
-       ${noDateBtn()}`);
+       <button id="bbKeep">It really is ${esc(bad)} — record it</button>`);
   }
   commit_();
 }
@@ -1312,11 +1199,7 @@ async function save(row){
   /* ⭐ When the date arrived on its own barcode there is no case GTIN to store,
      so the raw date scan goes in its place, tagged. `case_aliases()` only reads
      14-digit values, so this can never be mistaken for a case code. */
-  /* ⭐ For a pending-identification row the CODES are the only handle the drain
-     has to resolve it later, so they go in `gtin14` where `case_aliases()` and
-     the resolver both already look. */
-  const g14 = row.pendingCodes || row.gtin
-              || (row.heldRaw ? ("RAW:"+String(row.heldRaw).slice(0,40)) : "");
+  const g14 = row.gtin || (row.heldRaw ? ("RAW:"+String(row.heldRaw).slice(0,40)) : "");
   const v={ upc:row.upc, sku:row.prod.sku, gtin14:g14, best_by:row.best || "",
             lot:row.lot||"", units:row.units ?? 0, source:row.source,
             operator:account, po_ref:ref, device };
@@ -1682,27 +1565,6 @@ function prompt_(kind,title,body,actions){
    that SKU with no date and never asked again, and the SKU also drops off the
    scan worklist so nobody notices. `packs` is deliberately session-scoped for
    exactly this reason; this had the same hazard and no reset. */
-/* ⭐⭐ THE NO-DATE FLAG IS NOW CENTRAL, NOT PER-TABLET (ruling: Jack, 2026-09-03).
-   ⛔ THE OLD HAZARD: `noDateSkus` lived only in this device's localStorage, so
-   the same product was re-asked on every other tablet, and one mis-tap blinded
-   THIS tablet for ever with no way to reset it from anywhere.
-   ⭐ The catalog now carries `nd: 1` per SKU, derived by
-   `build_receiving_catalog.no_date_skus()` from the RECEIPT LEDGER — a SKU is
-   flagged only while it has at least one `no_date_on_package` receipt AND ZERO
-   receipts carrying a real best-by.
-   ⭐ SO IT CORRECTS ITSELF, EVERYWHERE: the moment any receipt for that SKU
-   records a real date — a full case scan, another tablet, a tap-correction on
-   the history — the flag stops being emitted at the next catalog refresh
-   (05:50/11:50/17:50) and every device starts asking again. ⛔ No per-device
-   reset to remember, because there is no per-device truth any more.
-   ⚠️ The local map is still honoured so the answer holds for the rest of THIS
-   session before the next refresh, and `clearNoDate` still clears it locally. */
-function noDateFor(sku){
-  if(!sku || String(sku).startsWith("!")) return false;   // ⛔ never a sentinel
-  if(noDateSkus[sku]) return true;
-  const p = CATALOG_BY_SKU[sku];
-  return !!(p && (p.nd===1 || p.nd===true));
-}
 function clearNoDate(sku){
   if(!sku || !noDateSkus[sku]) return false;
   delete noDateSkus[sku];
@@ -1755,22 +1617,8 @@ document.addEventListener("click", e=>{
      button and cannot be forgotten. */
   if(e.target && e.target.id==="noDate"){
     if(!pending) return clearPrompt();
-    /* ⛔⛔ NEVER LEARN A NO-DATE FLAG FOR A SENTINEL SKU (bug found + fixed
-       2026-09-03, introduced the same day with `!PENDING_ID`). `!PENDING_ID` is
-       not a product — it is "we could not name this carton" — so writing it here
-       set the flag for the SENTINEL, and the ladder in `next()` then skipped the
-       date prompt for EVERY future unidentified carton on this tablet, silently
-       recording each as "no date printed". That is the exact opposite of what
-       the pending-identification row exists to do, and nothing would have
-       looked wrong. */
-    if(!String(pending.prod.sku||"").startsWith("!")){
-      noDateSkus[pending.prod.sku]=1;
-      try{ localStorage.setItem("noDateSkus", JSON.stringify(noDateSkus)); }catch(_){}
-    }
-    /* ⛔ CLEAR whatever date got us here. Reached from the plausibility
-       challenge, `pending.best` holds the implausible value the operator has
-       just disowned — committing with it set would record the very date they
-       said does not exist. */
+    noDateSkus[pending.prod.sku]=1;
+    try{ localStorage.setItem("noDateSkus", JSON.stringify(noDateSkus)); }catch(_){}
     pending.best = null;
     pending.noDate = true;
     pending.source = (isAudit()?"audit_":"") + "no_date_on_package";
@@ -1819,74 +1667,7 @@ function clearPrompt(){
 
 document.addEventListener("click",e=>{
   if(e.target.closest("#cantScan")) return askFind();
-  /* ⭐ ARM the unit scan for THIS case, then get out of the way. Single-shot and
-     time-boxed; the very next resolving scan consumes it. */
-  if(e.target.closest("#pendGo") && pending) { clearPrompt(); return next(); }
-  /* ⛔ AN HONEST SKIP. The alternative exits from a forced date prompt are a
-     guessed date or a false "no date printed" — and that lie would be learned
-     CENTRALLY by `no_date_skus()` and stop us ever asking for that product
-     again. A recorded gap beats a wrong fact. */
-  /* ⭐⭐ A SKIP IS DATA, SO ASK WHY (ruling: Jack, 2026-09-03). ⛔ "The operator
-     gave up" is not a finding — it is the ABSENCE of one, and it is what left
-     98 cartons in `abandoned_scans.csv` with no explanation anyone could act on.
-     ⭐ The reason is the whole value: "carton sealed" says the unit-scan path
-     cannot work here, "unreadable" is a supplier print-quality complaint,
-     "too busy" is a staffing or flow problem, "not our product" is a delivery
-     error. Those are four different fixes that look identical without the why. */
-  if(e.target.closest("#pendSkip")) return askSkipReason();
-  const sk = e.target.closest("[data-skip]");
-  if(sk){
-    const why = sk.dataset.skip === "other"
-      /* ⛔ CAP IT. `reject()` truncates the whole string to 60 chars for the
-         SharePoint write, and the code + " :: " already spends ~18 — a longer
-         note would be chopped mid-word and read as a different reason. */
-      ? ((($("skipWhy")||{}).value||"").trim().slice(0,38) || "other — no detail given")
-      : sk.dataset.skip;
-    /* ⛔ Record BEFORE discarding, and record against the CODE — the reject row
-       for this scan already exists, so this row is the explanation beside it. */
-    const code = (pending && pending.pendingCodes ? pending.pendingCodes.split(" ")[0] : "")
-                 || ((unresolved||{}).raw) || ((pending||{}).upc) || "";
-    reject("SKIPPED", `${code} :: ${why}`, (pending||{}).upc || "");
-    pending = null; unresolved = null; unitScanFor = null;
-    return prompt_("", "Carton skipped — reason recorded",
-      `<strong>${esc(why)}</strong><br><br>⛔ Set the carton aside so somebody can come
-       back to it: the date is not recoverable once it is put away. The reason is on
-       the receiving report, so a pattern gets fixed rather than repeated.`);
-  }
-  if(e.target.closest("#unkUnit")){
-    /* ⛔ Drop the half-built sentinel row FIRST. Leaving it set would mean the
-       unit scan overwrites `pending` mid-flight, and a partially answered
-       ladder for a DIFFERENT identity is how a date lands on the wrong SKU. */
-    pending = null;
-    if(!unresolved) return clearPrompt();
-    unitScanFor = {...unresolved, t: Date.now()};
-    return prompt_("go","Now scan one unit from inside the case",
-      `Open the carton and scan a single retail unit. We will record the date and
-       quantity against it, and remember that
-       <span class="num">${esc(unitScanFor.raw||unitScanFor.upc||"")}</span> means that
-       product from now on.<br><br>
-       <span class="hint">⛔ It must be a unit from THIS carton. If you have moved on,
-       scan the case again first.</span>`);
-  }
-  /* ⭐⭐ RECORD THE DATE WITHOUT AN IDENTITY (ruling: Jack, 2026-09-03).
-     ⛔ THE HOLE THIS CLOSES: a carton whose product is in neither the catalog nor
-     Finale had NO path to record its best-by at all — `REJECT_COLS` carries no
-     `best_by`, and find-by-name dead-ends at "set the case aside". So on the
-     FIRST handling of a genuinely new or re-numbered item the date was lost, and
-     that is exactly the item whose date we most need: nobody has a history for
-     it.
-     ⭐ So we take the date and quantity against a SENTINEL sku. `receiving_drain`
-     keeps these out of `receipts.csv` (they would corrupt shelf life — no SKU to
-     attribute them to) and re-checks them every run; the moment the code becomes
-     resolvable — normally because a human learned the UPC in Finale and
-     `finale-data-refresh` picked it up — the row is promoted to a real receipt
-     with its ORIGINAL scan date intact.
-     ⛔ The sentinel must never look like stock: sku `!PENDING_ID`, and the
-     drain's own sentinel guard already refuses to fold a `!`-prefixed sku. */
-  /* ⛔ `#unkDate` ("Record the date anyway") was REMOVED 2026-09-03 — the date
-     ladder now runs automatically for an unknown code, so an optional button
-     asking for the same thing could only be a second, colder path. */
-  if(e.target.closest("#unkFind")){ pending = null; return askFind(); }
+  if(e.target.closest("#unkFind")) return askFind();
   if(e.target.closest("#bbRedo") && pending){ pending.best=null; return askDate(); }
   if(e.target.closest("#bbKeep") && pending){ return commit_(); }
   /* ⛔ "COULDN'T FIND IT HERE" IS NOT "OUT OF STOCK" (Jack, 2026-08-20:
