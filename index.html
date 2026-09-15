@@ -1091,11 +1091,22 @@ function renderFind(q){
    prompt whose honest answer is two taps away is how a wrong date gets keyed —
    the operator picks whatever clears the screen.
    ⚠️ The label changes for an UNNAMED carton, because "this product" is a claim
-   we cannot make when we do not know what the product is. */
+   we cannot make when we do not know what the product is.
+
+   ⛔⛔ THE LABEL MUST NAME THE CONSEQUENCE, NOT THE CARTON (ruling: Jack,
+   2026-09-15). "No date printed on this product" reads as a remark about the box
+   in your hands; what it actually does is stop the tool asking about that SKU on
+   every tablet, for ever. ⭐ Four different people tapped it on four products
+   that DO carry dates, and none of them could have known — the button never said
+   so. The wording now states the permanence, which is the single cheapest guard
+   against a mis-tap: the operator decides knowing what they are deciding.
+   ⛔ AND THE UNNAMED VARIANT MUST NOT MAKE THAT PROMISE. A `!PENDING_ID` sentinel
+   deliberately NEVER teaches the flag, so "don't ask again" would be a straight
+   lie to the operator — it describes this carton and nothing more. */
 function noDateBtn(){
   const unnamed = String(((pending||{}).prod||{}).sku||"").startsWith("!");
-  return `<button id="noDate">${unnamed ? "This item has no printed date"
-                                        : "No date printed on this product"}</button>`;
+  return `<button id="noDate">${unnamed ? "This carton has no printed date"
+                                        : "This item never has a best-by date \u2014 don\u2019t ask again"}</button>`;
 }
 /* ⭐ Preset reasons, because a free-text box on a tablet in a cold room is a box
    nobody fills in. ⛔ Every option is ONE TAP and one of them is "too busy", so
