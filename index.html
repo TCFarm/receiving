@@ -960,9 +960,28 @@ function next(){
      and then go back and tap the history cell, which is too slow on a shelf.
      ⭐ `askQty` still TEACHES `packs[sku]`, so the pack is PRE-FILLED on every
      later case — the learning is kept, the silence is not. */
+  /* ⭐⭐ A DATE ON THE LABEL SETTLES IT — NO ONE HAS TO TAP ANYTHING (ruling:
+     Jack, 2026-09-15). If this scan brought a real date and the SKU was flagged
+     "never has a printed date", the flag is simply WRONG and is cleared here.
+     ⛔ The receipt makes it durable: `no_date_skus()` un-flags a SKU the moment
+     one dated receipt exists, so the next catalog refresh fixes every tablet.
+     This clause fixes the CURRENT session, which the refresh cannot reach.
+     ⚠️ Deliberately BEFORE the skip below, and it does not depend on which mode
+     we are in — a case scanned in receiving is the strongest evidence we get,
+     but an audit scan that read a date off the shelf is evidence too. */
+  if(pending.best && isRealDate(pending.best) && noDateFor(pending.prod.sku)){
+    if(clearNoDate(pending.prod.sku))
+      console.info("no-date flag cleared by a dated scan:", pending.prod.sku,
+                   pending.best);
+  }
   /* already established that this product carries no date — do not ask again */
   if(!pending.best && noDateFor(pending.prod.sku) && !pending.noDate){
     pending.noDate = true;
+    /* ⛔ KEEP WHAT THE SCAN ACTUALLY WAS. The operator may say on the next
+       screen that the item DOES carry a date, and the row then has to go back to
+       being an ordinary keyed scan — without this it would stay labelled
+       `no_date_on_package` for ever, which is the very row that sets the flag. */
+    pending.preNoDateSource = pending.source;
     pending.source = (isAudit()?"audit_":"") + "no_date_on_package";
   }
   if(!pending.best && !pending.noDate) return askDate();
@@ -1183,7 +1202,31 @@ function askQty(){
   const loose = isAudit() && COUNT === "units";
   const pk = packFor(p.prod.sku, p.prod.pack);
   const dflt = loose ? 1 : (pk > 0 ? pk : null);
+  /* ⭐⭐ NEVER SKIP THE DATE QUESTION SILENTLY (ruling: Jack, 2026-09-15).
+     A SKU flagged "no printed date" jumped straight here, and to the operator
+     that is indistinguishable from the tool being broken — Julia hit it on the
+     goat cheddar, which had been mis-flagged by a single tap on 2026-09-09 and
+     demonstrably DOES carry a date (a GS1 scan had already read one on 08-14).
+     ⛔ It is a NOTICE ON THIS SCREEN, not a extra prompt before it: the flag is
+     usually RIGHT (paper goods, soap, deodorant), and charging every one of
+     those an extra tap is how a warning gets tapped through without reading.
+     The correction is one tap for the person who can see a date on the label,
+     and costs nothing for the person who cannot. */
+  /* ⛔ `prompt_` drops `body` inside a <p>, so this must be a block-level SPAN,
+     never a <div> — a <div> auto-closes the paragraph and the rest of the
+     question renders outside the prompt card. ⭐ Card background against the
+     prompt's amber, so it reads as a distinct notice rather than more body. */
+  const ndNote = p.noDate
+    ? `<span style="display:block;margin:0 0 13px;padding:11px 14px;background:var(--card);
+             border-left:5px solid var(--wait);border-radius:0 4px 4px 0;color:var(--ink)">
+         This SKU is set up to <strong>never have a best-by date</strong>.
+         If there is one printed on this ${loose ? "package" : "case"},
+         <button id="hasDate" style="margin:7px 0 0;padding:9px 14px;min-height:0">
+           click here to change that and pick the best-by date</button>
+       </span>`
+    : "";
   prompt_("", loose ? "How many units at this date?" : "How many units in this case?",
+    ndNote +
     `<strong>${esc(p.prod.name)}</strong> &mdash; best by
      <strong>${p.best || "no date"}</strong>.<br><br>` +
     (loose
@@ -1755,11 +1798,24 @@ function noDateFor(sku){
   const p = CATALOG_BY_SKU[sku];
   return !!(p && (p.nd===1 || p.nd===true));
 }
+/* ⛔⛔ THIS CLEARED ONLY HALF THE FLAG (found 2026-09-15, Julia). `noDateFor`
+   answers from the local map OR the catalog's `nd:1`, but this deleted only the
+   local entry — so on a SKU flagged CENTRALLY (which, since 2026-09-03, is all
+   of them) a date correction changed nothing: the operator fixed the row, the
+   very next case jumped straight to quantity again, and the tool read as
+   un-fixable. ⭐ Clearing the in-memory catalog copy makes the correction hold
+   for the rest of THIS session on THIS tablet; the ledger does the durable half
+   at the next refresh, once a dated receipt or audit exists. */
 function clearNoDate(sku){
-  if(!sku || !noDateSkus[sku]) return false;
-  delete noDateSkus[sku];
-  try{ localStorage.setItem("noDateSkus", JSON.stringify(noDateSkus)); }catch(_){}
-  return true;
+  if(!sku || String(sku).startsWith("!")) return false;
+  let had = false;
+  if(noDateSkus[sku]){
+    had = true; delete noDateSkus[sku];
+    try{ localStorage.setItem("noDateSkus", JSON.stringify(noDateSkus)); }catch(_){}
+  }
+  const p = CATALOG_BY_SKU[sku];
+  if(p && (p.nd===1 || p.nd===true)){ had = true; p.nd = 0; }
+  return had;
 }
 
 function photoBtn(){
@@ -1832,6 +1888,21 @@ document.addEventListener("click", e=>{
        and never offered the quantity step. Every path into a row must go
        through `next()`; that is the entire reason the ladder exists. */
     clearPrompt(); return next();
+  }
+  /* ⭐ "It DOES have a date" — the operator is looking at the label, so their
+     answer outranks anything the ledger inferred. Clears the flag (locally and
+     in the in-memory catalog) and puts the row back on the normal date path.
+     ⛔ The SOURCE must be restored too, or the row saves as `no_date_on_package`
+     while carrying a date — a self-contradicting receipt, and it is exactly the
+     source that sets the flag for everyone else. */
+  if(e.target && e.target.id==="hasDate"){
+    if(!pending) return clearPrompt();
+    clearNoDate(pending.prod.sku);
+    pending.noDate = false;
+    pending.source = pending.preNoDateSource
+                     || ((isAudit()?"audit_":"") + "keyed_bare");
+    delete pending.preNoDateSource;
+    clearPrompt(); return askDate();
   }
   if(e.target && e.target.id==="dropHeld"){ heldDate=null; renderHeld(); clearPrompt(); return; }
   if(e.target && e.target.id==="heldYes"){
