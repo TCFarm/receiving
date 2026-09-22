@@ -1181,12 +1181,33 @@ function askDate(){
          a forced prompt are a made-up date or "no date printed" — a FALSE answer
          that would then be learned centrally and stop us ever asking again. A
          skipped carton is a known gap; a fabricated one is a wrong fact. */
+      /* ⛔⛔ THE PAIRING IS NOW THE LEAD ASK, AND IT IS A MEASURED FIX, NOT A
+         PREFERENCE (Jack, 2026-09-22: *"can we prompt the user to scan a UPC
+         code if the GS1 case barcode is not resolved instantly in the app? that
+         way we can match together at the point of scanning"* and *"make sure
+         they understand that it won't be useful if they skip"*).
+         ⭐ The capability was already here and WORKS — `#unkUnit` arms
+         `unitScanFor`, the next resolving scan writes an ALIAS for every code
+         collected off the case, and `case_aliases()` folds it into
+         `catalog.json` so that carton never asks again.
+         ⛔ IT HAD NEVER ONCE BEEN TAPPED. Measured 2026-09-22 over the whole
+         reject log: 186 UNKNOWN_UPC scans, and the only 2 ALIAS rows in history
+         are Jack's own manual entries from photographs. The reason is this
+         block: it sat below the date row, below the rule, after "no date
+         printed", as a plain button, under a hint that said taking it changes
+         nothing. The operator's shortest path was always type-date-and-go.
+         ⭐ So: primary styling, first position, and a line saying what NOT
+         taking it costs. ⛔ The date row above is untouched — the 2026-09-03
+         ruling that the date outranks identification still holds, and this
+         deliberately does not reverse it. */
       ? `<div style="margin-top:13px;border-top:1px solid var(--line);padding-top:11px">
-           <button id="unkUnit">Scan a unit from inside the case</button>
+           <button class="primary" id="unkUnit">Scan a unit from inside the case</button>
            <button id="unkFind">Find it by name</button>
            <button id="pendSkip">Skip this carton</button>
-           <div class="hint">Either identification option keeps everything — a named
-             product is asked for its date next anyway.</div>
+           <div class="hint">⛔ Without one of the first two we have the DATE but not
+             the PRODUCT, so it attaches to nothing and waits in the Purchasing app
+             for somebody to match by hand. ⭐ Scanning a unit is the one that also
+             teaches this carton's barcode, so it never has to be asked again.</div>
          </div>`
       : ``));
   setTimeout(()=>{
