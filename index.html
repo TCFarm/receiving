@@ -132,6 +132,8 @@
   <div id="app" style="display:none">
     <div id="bannerArea"></div>
   <div id="heldArea"></div>
+  <!-- B3 (2026-09-23): standing "unit scan armed" indicator, see renderArmed() -->
+  <div id="armedArea"></div>
   <div id="pendingArea"></div>
 
     <div class="scanbox" id="scanbox" style="border-color:var(--line)">
@@ -672,6 +674,14 @@ async function handle(raw){
 }
 async function handleScan(raw){
   const v=(raw||"").trim(); if(!v) return;
+  /* ⛔⛔ B3 (2026-09-23): AN ARMED UNIT SCAN IS CONSUMED BY THE VERY NEXT SCAN,
+     WHATEVER IT IS. It used to be consumed only by a scan that RESOLVED, so an
+     unknown code, a bad read or a date barcode left it armed and the next known
+     product — often a different carton — was paired with the case for good
+     (`10099999999997 -> RDair0761OgV`, reproduced 2026-09-22). Take it here, before
+     any branch can return; only the resolved-product path below may USE it. */
+  const armedUnit = unitScanFor;
+  if(unitScanFor){ unitScanFor = null; renderArmed(); }
 
   /* ⭐ A location label sets WHERE we are counting — it is never a product.
      ⚠️ Only in AUDIT mode: in receiving the same field carries the PO, and a
@@ -800,16 +810,22 @@ async function handleScan(raw){
     /* ⭐ COLLECT EVERY CODE ON THE CASE (Jack, 2026-08-18). One unknown code is a
        dead end; two codes off the SAME case are a permanent alias the moment the
        operator names the product — and the retail UPC is very often on the case
-       right beside a manufacturer GTIN we have never seen. So a second unknown
-       scan APPENDS rather than starting over. */
-    /* ⛔ AND IT EXPIRES, like `heldDate`. Two codes only belong together if they
-       came off the same box within a plausible handling window; an hour-old
-       collection is a different carton. */
-    if(unresolved && (Date.now() - (unresolved.t || 0)) > UNRESOLVED_MS) unresolved = null;
-    if(unresolved) { if(!unresolved.codes.includes(v)) unresolved.codes.push(v); }
-    else unresolved = {gtin: gtin || "", upc, raw: v, codes: [v], t: Date.now(),
-                       bb: ais["17"]||ais["15"]||""};
-    if(!unresolved.bb) unresolved.bb = ais["17"]||ais["15"]||"";
+       right beside a manufacturer GTIN we have never seen. ⛔ A second unknown
+       scan USED to append rather than start over — RETIRED 2026-09-23 (B2),
+       see below. */
+    /* ⛔ It used to EXPIRE after UNRESOLVED_MS instead — not enough: two cartons a
+       minute apart are still two cartons. */
+    /* ⛔⛔ B2 (2026-09-23): EVERY UNKNOWN SCAN STARTS A FRESH LIST. The append
+       above was implicit — nothing told us two scans were the same carton — and
+       it was cleared only by a success or the 4-minute clock, so back-to-back
+       unknown cartons each carried every EARLIER carton's codes (27 of 75 pending
+       rows on 2026-09-22). The drain resolved on the first code, so different
+       cartons would promote as one SKU, and the same stale list fed the date
+       prompt, the skip record, find-by-name and the unit-scan alias.
+       ⛔ There is no "another barcode on this same carton" control, so there is
+       no append. Proximity is not intent (same lesson as `unitScanFor`). */
+    unresolved = {gtin: gtin || "", upc, raw: v, codes: [v], t: Date.now(),
+                  bb: ais["17"]||ais["15"]||""};
     /* ⭐ Not a dead end. The case may well be a product we DO carry whose UPC
        is missing or different in BigCommerce — 29% of BC products carry no UPC
        at all, so a code that fails to resolve says little about whether we
@@ -911,10 +927,10 @@ async function handleScan(raw){
      times because a resolving scan discarded the pairing — the operator was
      already doing the right thing and we threw the answer away. */
   let unitAlias = null;
-  if(unitScanFor){
-    const fresh = (Date.now() - (unitScanFor.t||0)) <= UNRESOLVED_MS;
+  if(armedUnit){
+    const fresh = (Date.now() - (armedUnit.t||0)) <= UNRESOLVED_MS;
     if(fresh){
-      unitAlias = unitScanFor;
+      unitAlias = armedUnit;
       /* ⛔ Only the CASE's codes, never this unit's own barcode — aliasing a
          product's real UPC to itself is noise at best, and if the unit scan was
          a different size of the same brand it would be a wrong alias. */
@@ -928,7 +944,7 @@ async function handleScan(raw){
         if(d && plausibleBB(d)){ best = d; how = "keyed_casecode"; }
       }
     }
-    unitScanFor = null;        // ⛔ single-shot, whether it was fresh or stale
+    /* ⛔ single-shot, fresh or stale — already disarmed at the top of handleScan */
   }
   if(unresolved) unresolved = null;
   pending={upc,prod,gtin:gtin||"",lot:ais["10"]||"",best,
@@ -1280,6 +1296,44 @@ function askQty(){
   },30);
 }
 
+/* ⛔⛔ B1 (2026-09-23): A QUANTITY THIS BIG MUST BE SAID BACK BEFORE IT IS KEPT.
+   17 receipts since 9/1 carried 1,100–85,407 units — the first five digits of the
+   NEXT carton's barcode, scanned into this box — and nothing questioned them.
+   The burst guard below stops the scanner typing here; this catches the number
+   however it got in. ⛔ It is a CONFIRM, never a cap (hard rule: no hard-coded
+   maximums): the operator may say yes and the number stands.
+   Threshold: more than 5× the pack in force, or more than 500 when no pack is known. */
+function qtyLooksWrong(n, pk){ return (pk > 0) ? n > 5*pk : n > 500; }
+function askQtyConfirm(n, pk){
+  pending.qtyCheck = n;
+  return prompt_("stop", `You entered ${n} units — is that right?`,
+    `<strong>${esc(pending.prod.name)}</strong> &mdash; ` +
+    (pk > 0 ? `the pack on file is <strong>${pk}</strong>, so ${n} is more than five cases' worth.`
+            : `that is more than 500 units in one scan.`) +
+    `<br><br>⛔ A barcode scanned into the quantity box looks exactly like this.`,
+    `<div style="display:flex;gap:9px;flex-wrap:wrap;margin-top:12px">
+       <button id="qYes">Yes — ${n} is right</button>
+       <button class="primary" id="qRedo">No — re-enter it</button>
+     </div>`);
+}
+function takeQty(n){
+  pending.qty=n; pending.qtyUnknown=false; delete pending.qtyCheck;
+  /* ⭐ LEARN THE PACK ONLY WHEN WE HAD NONE (fixed in review, 2026-09-01).
+     ⛔ Writing `packs[sku]` on EVERY case answer poisons the pre-fill: receive
+     one PART case of 5 from a 12-pack and every later case of that SKU
+     pre-fills 5 — and the pre-fill is accepted with a single Enter, which is
+     precisely the silent-default hazard this step exists to remove. A pack
+     already on file (catalog or earlier answer) is evidence; a typed number
+     that differs from it is a part case, true of THIS case only.
+     ⛔ A LOOSE-UNIT count teaches nothing either way: "3 on the shelf" is not
+     a case pack. ⭐ The history tap-correction still overwrites the pack —
+     that one IS the operator saying the pack on file is wrong. */
+  if(!(isAudit() && COUNT==="units") && !(packFor(pending.prod.sku, pending.prod.pack) > 0)){
+    packs[pending.prod.sku]=n;
+  }
+  return next();
+}
+
 /* ⛔ A best-by already in the past is either expired stock on the shelf or a
    keying slip, and BOTH need a human. Accepted silently on 2026-08-18:
    DIngd5167SmO went in with best_by 2026-07-28, twenty-one days gone. */
@@ -1349,6 +1403,10 @@ function commit_(){
   /* ⛔ Capture the PO / shelf area ON THE ROW. A recovered scan is sent later,
      possibly after someone has moved to another shelf — reading the live field
      at send time would file it to the wrong location. */
+  /* ⛔ B2 (2026-09-23): a committed row FINISHES its carton. An unknown carton
+     committed with a date left `unresolved` set, so a later "Can't scan it?" →
+     find-by-name wrote THAT carton's code as an alias of whatever was picked. */
+  unresolved = null;
   const row={ ...p, cls, unknownCls, soft: cls==="Frozen" && flags[p.prod.sku]===false,
               units: dflt, audit: isAudit(), _po: poVal(),
               saved:"queued", id:null, n:nextRowN() };
@@ -1787,6 +1845,7 @@ function prompt_(kind,title,body,actions){
      referred to it, the next scan overwrote it, and the case was never recorded:
      no row, so `beforeunload` did not warn either. Silent loss of a scan. */
   if(promptTimer){ clearTimeout(promptTimer); promptTimer = null; }
+  disarmUnit();       // ⛔ B3: a new prompt ends any armed unit scan (re-armed by #unkUnit after)
   $("promptArea").innerHTML=`<div class="prompt ${kind}"><h2>${title}</h2><p>${body}</p>${actions||""}</div>`;
   $("scan").blur();
   /* ⛔⛔ A PROMPT CONTAINING A CONTROL MUST NOT AUTO-DISMISS. This used to key
@@ -1969,11 +2028,28 @@ document.addEventListener("change", async e=>{
   }
 });
 
+/* ⭐ B3 (2026-09-23): the standing "armed" indicator. Shown the whole time a unit
+   scan is armed, like the held-date banner, so it can never be armed invisibly. */
+function renderArmed(){
+  const el=$("armedArea"); if(!el) return;
+  el.innerHTML = unitScanFor
+    ? `<div class="banner"><strong>Waiting for ONE unit scan</strong> for case
+       <span class="num">${esc(unitScanFor.raw||unitScanFor.upc||"")}</span> — the next
+       scan is taken as the unit. <button class="unitCancel" style="margin-left:8px">Cancel</button></div>`
+    : "";
+}
+/* ⛔ Any other prompt, or clearing the prompt, means the operator has moved on:
+   an armed unit scan must never outlive the prompt that armed it. */
+function disarmUnit(){ if(unitScanFor){ unitScanFor = null; } renderArmed(); }
 function clearPrompt(){
+  disarmUnit();
   if(promptTimer){ clearTimeout(promptTimer); promptTimer = null; } $("promptArea").innerHTML=""; $("scan").value=""; $("scan").focus(); }
 
 document.addEventListener("click",e=>{
-  if(e.target.closest("#cantScan")) return askFind();
+  /* ⛔ B2 (2026-09-23): "Can't scan it?" is a NEW carton with no scanned code, so
+     it must not inherit an earlier carton's codes (a wrong permanent alias).
+     The unknown carton's own "Find it by name" (#unkFind) keeps its codes. */
+  if(e.target.closest("#cantScan")){ unresolved = null; return askFind(); }
   /* ⭐ ARM the unit scan for THIS case, then get out of the way. Single-shot and
      time-boxed; the very next resolving scan consumes it. */
   if(e.target.closest("#pendGo") && pending) { clearPrompt(); return next(); }
@@ -2008,16 +2084,36 @@ document.addEventListener("click",e=>{
     /* ⛔ Drop the half-built sentinel row FIRST. Leaving it set would mean the
        unit scan overwrites `pending` mid-flight, and a partially answered
        ladder for a DIFFERENT identity is how a date lands on the wrong SKU. */
+    /* ⛔⛔ B3 (2026-09-23): THE PROMPT STAYS UNTIL IT IS ANSWERED. It used to be a
+       plain notice, so it vanished after 2.8 s while the flag stayed armed for
+       4 minutes and paired the case with whatever was scanned next. Now it has a
+       Cancel button (so `prompt_` never auto-dismisses it), a standing banner
+       (`renderArmed`), and it is consumed by exactly ONE scan (`handleScan`).
+       ⭐ Cancel goes back to this carton's own date prompt (`back`), so choosing
+       not to scan a unit never costs the date. */
+    const back = pending;
     pending = null;
     if(!unresolved) return clearPrompt();
-    unitScanFor = {...unresolved, t: Date.now()};
-    return prompt_("go","Now scan one unit from inside the case",
+    const caseCode = unresolved.raw||unresolved.upc||"";
+    prompt_("go","Now scan one unit from inside the case",
       `Open the carton and scan a single retail unit. We will record the date and
        quantity against it, and remember that
-       <span class="num">${esc(unitScanFor.raw||unitScanFor.upc||"")}</span> means that
+       <span class="num">${esc(caseCode)}</span> means that
        product from now on.<br><br>
-       <span class="hint">⛔ It must be a unit from THIS carton. If you have moved on,
-       scan the case again first.</span>`);
+       <strong>The very next thing you scan is taken as the unit</strong> — once, whether
+       it matches or not.
+       <span class="hint">⛔ It must be a unit from THIS carton.</span>`,
+      `<button class="unitCancel" id="unitCancel">Cancel — I can&rsquo;t get a unit</button>`);
+    unitScanFor = {...unresolved, t: Date.now(), back};
+    renderArmed();
+    $("scan").focus();     // ⭐ the unit scan has to land in the scan box
+    return;
+  }
+  if(e.target.closest(".unitCancel")){
+    const back = unitScanFor && unitScanFor.back;
+    disarmUnit();
+    if(back){ pending = back; return next(); }   // ⭐ back to this carton's date
+    return clearPrompt();
   }
   /* ⭐⭐ RECORD THE DATE WITHOUT AN IDENTITY (ruling: Jack, 2026-09-03).
      ⛔ THE HOLE THIS CLOSES: a carton whose product is in neither the catalog nor
@@ -2188,6 +2284,9 @@ document.addEventListener("click",e=>{
     const val=window.prompt(`Units in this case of ${row.prod.name}?`, row.units ?? "");
     if(val===null) return;
     const n=parseInt(val,10);
+    /* ⛔ B1 (2026-09-23): the same say-it-back as the scan-time quantity step. */
+    if(!isNaN(n) && n>0 && qtyLooksWrong(n, packFor(row.prod.sku, row.prod.pack))
+       && !confirm(`You entered ${n} units — is that right?`)) return;
     if(!isNaN(n) && n>0){
       row.units=n;
       /* ⭐ A tap-correction TEACHES the session (Jack, 2026-08-16): fixing case 1
@@ -2212,22 +2311,14 @@ document.addEventListener("click",e=>{
   if(e.target.id==="qok" && pending){
     const n=parseInt((($("qty")||{}).value||"").trim(),10);
     if(isNaN(n) || n<=0){ const el=$("qty"); if(el) el.style.borderColor="var(--stop)"; return; }
-    pending.qty=n; pending.qtyUnknown=false;
-    /* ⭐ LEARN THE PACK ONLY WHEN WE HAD NONE (fixed in review, 2026-09-01).
-       ⛔ Writing `packs[sku]` on EVERY case answer poisons the pre-fill: receive
-       one PART case of 5 from a 12-pack and every later case of that SKU
-       pre-fills 5 — and the pre-fill is accepted with a single Enter, which is
-       precisely the silent-default hazard this step exists to remove. A pack
-       already on file (catalog or earlier answer) is evidence; a typed number
-       that differs from it is a part case, true of THIS case only.
-       ⛔ A LOOSE-UNIT count teaches nothing either way: "3 on the shelf" is not
-       a case pack. ⭐ The history tap-correction still overwrites the pack —
-       that one IS the operator saying the pack on file is wrong. */
-    if(!(isAudit() && COUNT==="units") && !(packFor(pending.prod.sku, pending.prod.pack) > 0)){
-      packs[pending.prod.sku]=n;
-    }
-    return next();
+    /* ⛔ B1: say a suspicious number back first (see `qtyLooksWrong`). The pack
+       learning that used to live here moved, unchanged, into `takeQty`. */
+    const pk = packFor(pending.prod.sku, pending.prod.pack);
+    if(qtyLooksWrong(n, pk)) return askQtyConfirm(n, pk);
+    return takeQty(n);
   }
+  if(e.target.id==="qYes" && pending && pending.qtyCheck != null){ return takeQty(pending.qtyCheck); }
+  if(e.target.id==="qRedo" && pending){ delete pending.qtyCheck; return askQty(); }
   if(e.target.id==="qskip" && pending){
     pending.qtyUnknown=true; return next();
   }
@@ -2363,9 +2454,82 @@ $("mReceive").addEventListener("click", ()=>setMode("receive"));
 $("mAudit").addEventListener("click",   ()=>setMode("audit"));
 $("cCases").addEventListener("click",   ()=>setCount("cases"));
 $("cUnits").addEventListener("click",   ()=>setCount("units"));
+/* ⛔⛔ B1 (2026-09-23): A SCAN MUST NEVER BE TYPED INTO A PROMPT.
+   The scan gun is a keyboard. While a prompt is up the scan box is blurred, so
+   scanning the NEXT carton typed its barcode into whatever had focus: at the
+   quantity box the first 5 digits became units (17 receipts, 461,772 units,
+   since 9/1); at the date box `042927…` became 2027-04-29 with no challenge;
+   on a buttons-only prompt the keys went nowhere and the carton was simply lost.
+   ⭐ A scanner is told apart from a person by SPEED: it delivers a run of real
+   key events a few ms apart. A run of BURST_MIN_CHARS keys each within
+   BURST_GAP_MS (or a fast run ending in Enter) is REFUSED: the box is put back
+   to what it held before the run, the rest of the run and its Enter are
+   swallowed (so no Save and no button fires), and the operator is told to
+   finish this item and scan that carton again — never silently.
+   ⭐ A person typing "12" or a date is ~100 ms+ per key and is untouched.
+   ⛔ The scan box itself is exempt (it is where scans belong), and so are
+   soft-keyboard events (`key` of "Unidentified") so swipe-typing a product
+   name in find-by-name is never mistaken for a scanner. */
+const BURST_GAP_MS = 40, BURST_MIN_CHARS = 5, BURST_END_MS = 150;
+let kRun = null;          // {el, before, chars, last, refused}
+function showBurstRefusal(code){
+  const card = $("promptArea").querySelector(".prompt"); if(!card) return;
+  /* a notice that would auto-dismiss must stay long enough to be read */
+  if(promptTimer){ clearTimeout(promptTimer); promptTimer = null; }
+  let m = $("burstMsg");
+  if(!m){ m = document.createElement("div"); m.id = "burstMsg"; m.setAttribute("role","alert");
+    m.style.cssText = "margin:0 0 12px;padding:11px 14px;background:var(--card);"+
+      "border-left:5px solid var(--stop);border-radius:0 4px 4px 0;color:var(--ink)";
+    card.insertBefore(m, card.firstChild); }
+  const shown = esc(String(code||"").slice(0,24));
+  m.innerHTML = (pending
+      ? `<strong>Finish this item first — tap Save, then scan the next carton.</strong><br>`
+      : `<strong>That scan was not recorded.</strong> Close this message first.<br>`) +
+    `⛔ The barcode you just scanned${shown ? ` (<span class="num">${shown}</span>)` : ""} was
+     <strong>NOT recorded</strong> and nothing was typed into the box. Scan it again afterwards.` +
+    (pending ? "" : ` <button id="burstOk" style="margin-left:8px">OK</button>`);
+}
+document.addEventListener("keydown", e=>{
+  const area = $("promptArea");
+  if(!area || !area.innerHTML || e.target === $("scan")){ kRun = null; return; }
+  const now = performance.now();
+  const printable = typeof e.key === "string" && e.key.length === 1
+                    && !e.ctrlKey && !e.metaKey && !e.altKey;
+  const gap = kRun ? now - kRun.last : Infinity;
+  const refuse = () => {
+    e.preventDefault(); e.stopImmediatePropagation();
+    if(kRun.before !== null && kRun.el && "value" in kRun.el){
+      kRun.el.value = kRun.before;
+      kRun.el.dispatchEvent(new Event("input", {bubbles:true}));   // e.g. re-run find-by-name
+    }
+    kRun.refused = true; kRun.last = now;
+    showBurstRefusal(kRun.chars);
+  };
+  /* the rest of a refused burst, including its Enter/Tab suffix, goes nowhere */
+  if(kRun && kRun.refused && gap <= BURST_END_MS){
+    if(printable) kRun.chars += e.key;
+    kRun.last = now; e.preventDefault(); e.stopImmediatePropagation();
+    if(!printable) showBurstRefusal(kRun.chars);    // the whole code is known by its Enter
+    return;
+  }
+  if(e.key === "Enter"){
+    if(kRun && !kRun.refused && gap <= BURST_GAP_MS && kRun.chars.length >= BURST_MIN_CHARS-1)
+      return refuse();
+    kRun = null; return;
+  }
+  if(!printable){ kRun = null; return; }
+  if(!kRun || kRun.refused || gap > BURST_GAP_MS){
+    const t = e.target;
+    kRun = {el:t, before: (t && "value" in t && typeof t.value === "string") ? t.value : null,
+            chars:"", last:now, refused:false};
+  }
+  kRun.chars += e.key; kRun.last = now;
+  if(kRun.chars.length >= BURST_MIN_CHARS) refuse();
+}, true);
+document.addEventListener("click", e=>{ if(e.target && e.target.id==="burstOk") clearPrompt(); });
 $("scan").addEventListener("keydown",e=>{
   if(e.key==="Enter"){ e.preventDefault(); const v=$("scan").value; $("scan").value=""; handle(v); }});
-document.addEventListener("click",()=>{ if(!$("promptArea").innerHTML && $("app").style.display!=="none") $("scan").focus(); });
+document.addEventListener("click",()=>{ if((!$("promptArea").innerHTML || unitScanFor) && $("app").style.display!=="none") $("scan").focus(); });
 window.addEventListener("beforeunload",e=>{
   if(rows.some(r=>r.saved!=="saved")){ e.preventDefault(); e.returnValue=""; }});
 
