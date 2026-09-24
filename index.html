@@ -1576,16 +1576,41 @@ function plausibleBB(d){
   }catch(_){ return true; }
 }
 
+/* ⭐ How many days ago a best-by was (0 or less ⇒ not in the past). */
+function daysPast(d){
+  try{
+    const t=new Date(); t.setHours(0,0,0,0);
+    return Math.round((t-new Date(d+"T00:00:00"))/86400000);
+  }catch(_){ return 0; }
+}
+function longDate(d){
+  try{ return new Date(d+"T00:00:00").toLocaleDateString(undefined,
+         {month:"long", day:"numeric", year:"numeric"}); }catch(_){ return d; }
+}
+/* ⛔ A PAST date gets its OWN plain question (ruling: Jack, 2026-09-23 — *"we just
+   want to call out that it is past the best buy date now and to confirm if that is
+   accurate. If they think it is fine, they'll leave it in stock — if not, they
+   will remove it."*). ⛔ Deliberately NO "still good frozen" answer and no
+   recorded reason: we would do nothing with it. The old shared wording ("in the
+   past or implausibly far out") was tapped through on all 21 past-dated rows. */
+function bbQuestion(d){
+  const n=daysPast(d);
+  return n>1
+    ? `This best-by date — <span class="num">${esc(longDate(d))}</span> — has already
+       passed (${n} days ago). Check the package: is that date right?`
+    : `<span class="num">${esc(d)}</span> is more than five years out. Check the
+       package: is that date right?`;
+}
+
 function commit(){
   /* last gate before it becomes a receipt */
   if(pending && pending.best && !plausibleBB(pending.best)){
-    const bad=pending.best; const p=pending;
-    return prompt_("stop","Check that date",
-      `<strong>${esc(p.prod.name)}</strong> — <span class="num">${bad}</span> is
-       in the past or implausibly far out. If the case really is expired, set it
-       aside. If it was mistyped, re-enter it.`,
+    const bad=pending.best; const p=pending; const past=daysPast(bad)>1;
+    return prompt_("stop", past ? "This date has already passed" : "Check that date",
+      `<strong>${esc(p.prod.name)}</strong> — ${bbQuestion(bad)}
+       If it was mistyped, re-enter it.`,
       `<button class="primary" id="bbRedo">Re-enter the date</button>
-       <button id="bbKeep">It really is ${esc(bad)} — record it</button>
+       <button id="bbKeep">${past ? "Yes, the date is right" : "It really is "+esc(bad)} — record it</button>
        ${noDateBtn()}`);
   }
   commit_();
@@ -2713,7 +2738,9 @@ document.addEventListener("click",e=>{
     if(!d) return alert("Could not read that as a date. Try 2029-03-31 or 033129.");
     /* ⛔ The same plausibility gate as a fresh scan — a correction can be a
        mis-key too, and this is the field the whole model runs on. */
-    if(!plausibleBB(d) && !confirm(`${d} is in the past or very far out. Record it anyway?`)) return;
+    if(!plausibleBB(d) && !confirm(daysPast(d)>1
+        ? `This best-by date (${longDate(d)}) has already passed — ${daysPast(d)} days ago. Is that date right?`
+        : `${d} is more than five years out. Is that date right?`)) return;
     row.best=d; render();
     /* ⛔ A FAILED row has NO id, so `patchDate` was a NO-OP on exactly the rows
        that needed fixing — the operator types the missing date and nothing
