@@ -109,6 +109,13 @@
   .seg button.on{background:var(--ink);color:var(--ground)}
   .qty{font-family:var(--mono);font-size:15px;font-weight:700}
   .grp td{border-bottom:1px solid var(--line)}
+  /* PM-2797: year-first, bold read-back of a date + the "is this date correct?" confirm */
+  .bbread{font-family:var(--mono);font-size:30px;margin:6px 0 10px;color:var(--ink)}
+  .bbread strong.yr{font-size:36px;font-weight:800}
+  #dcModal{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px}
+  #dcModal .dcBox{background:var(--card);border-left:5px solid var(--stop);border-radius:5px;padding:18px 20px;max-width:560px;width:100%}
+  #dcModal h2{font-size:18px;margin:0 0 6px}
+  #dcModal .dcBtns{display:flex;gap:11px;flex-wrap:wrap;margin-top:12px}
 </style>
 </head>
 <body>
@@ -636,6 +643,33 @@ async function bootstrap(){
   CATALOG = await loadCatalog();
   rebuildSkuIndex();
   renderCatalogState();
+  /* ⛔ NOT awaited: boot (and the outbox flush that follows it) must never wait on an optional file; a 404 costs two retries. */
+  loadCeilings().catch(()=>{});
+}
+
+/* ⭐ PM-2797 (Jack, 2026-10-18): the longest believable shelf life per SKU, from Procurement & Merchandising's
+   `scripts/build_life_ceilings.py` (which CALLS order_engine.life_ceiling -- the one definition of the rule).
+   Shape: {"v":1,"c":{sku:[ceiling_days, usual_max_days]}}. ⛔ NON-FATAL BY DESIGN: a missing / unreadable file means the screen
+   still shows the year-first read-back and only the life check is off -- it must never stop a scan. ⛔ An empty object is
+   a failure, not "no ceilings" (same lesson as B15). Last good copy is kept on this tablet. */
+const CEIL_CACHE_KEY = "life_ceilings_v1";
+let CEILINGS = {};
+async function loadCeilings(){
+  for(let i=0; i<2; i++){
+    try{
+      const r = await fetch("life_ceilings.json", {cache: i ? "no-store" : "no-cache"});
+      if(!r.ok) throw new Error("HTTP " + r.status);
+      const j = await r.json();
+      if(!j || !j.c || typeof j.c !== "object" || !Object.keys(j.c).length) throw new Error("empty");
+      CEILINGS = j.c;
+      try{ localStorage.setItem(CEIL_CACHE_KEY, JSON.stringify(j.c)); }catch(_){}
+      return;
+    }catch(_){ await new Promise(res=>setTimeout(res, 400)); }
+  }
+  try{
+    const c = JSON.parse(localStorage.getItem(CEIL_CACHE_KEY) || "null");
+    if(c && typeof c === "object") CEILINGS = c;
+  }catch(_){}
 }
 
 /* ⛔⛔ B15 (2026-09-23): A CATALOG THAT FAILED TO LOAD WAS SILENTLY `{}`, so every
@@ -1383,6 +1417,7 @@ function askDate(){
               placeholder="MMDDYY" aria-label="Type best by as MMDDYY">
        <button class="primary" id="dok">Save</button>
      </div>
+     <div id="bbRead" class="bbread" aria-live="polite"></div>
      <div style="margin-top:11px">
        ${noDateBtn()}
        <span class="hint" style="display:inline;margin-left:9px">
@@ -1424,10 +1459,18 @@ function askDate(){
       : ``));
   setTimeout(()=>{
     const el=$("typed"), pick=$("pick");
+    /* ⭐ PM-2797: read the date back, YEAR FIRST AND BOLD, while it is being typed */
+    const rb=$("bbRead");
+    const readBack=()=>{
+      if(!rb) return;
+      const t=(el&&el.value)||"";
+      const d = /^\d{6}$/.test(t) ? parseGs1Date(t.slice(4,6)+t.slice(0,4)) : null;
+      rb.innerHTML = d ? yearFirst(d) : "";
+    };
     if(el){ el.focus();
       el.addEventListener("keydown",e=>{ if(e.key==="Enter") $("dok").click(); });
-      el.addEventListener("input",()=>{ if(pick) pick.value=""; }); }
-    if(pick) pick.addEventListener("change",()=>{ if(el) el.value=""; $("dok").click(); });
+      el.addEventListener("input",()=>{ if(pick) pick.value=""; readBack(); }); }
+    if(pick) pick.addEventListener("change",()=>{ if(rb) rb.innerHTML = pick.value ? yearFirst(pick.value) : ""; if(el) el.value=""; $("dok").click(); });
   },30);
 }
 
@@ -1602,16 +1645,72 @@ function bbQuestion(d){
        package: is that date right?`;
 }
 
+/* ⭐⭐ PM-2797 (ruling: Jack, 2026-10-18): *"prompt the user when they're entering a date that seems incorrect to have them
+   double check ... display in bold starting with the year first ... they clearly just clicked the wrong year."*
+   (2026-09-15: 2027-10-12 keyed for 2026-10-12 on 45 half-gallons of milk.)
+   ⛔ YEAR FIRST AND BOLD, always: the year is the part a wrong tap changes and the part a MM/DD read-back hides. */
+const MON3 = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+function yearFirst(d){
+  const m=/^(\d{4})-(\d{2})-(\d{2})/.exec(String(d||""));
+  if(!m) return esc(String(d||""));
+  return `<strong class="yr">${m[1]}</strong> · ${MON3[+m[2]-1]||m[2]} · ${+m[3]}`;
+}
+function daysAway(d){
+  try{
+    const t=new Date(); t.setHours(0,0,0,0);
+    return Math.round((new Date(d+"T00:00:00")-t)/86400000);
+  }catch(_){ return 0; }
+}
+/* -> null when the date is believable, else {kind:'past'|'far5'|'life', days, ...}. ⛔ Never invents a verdict: no ceiling
+   for the SKU => only the past / five-year checks that always existed. */
+function dateCheck(sku, d){
+  if(!plausibleBB(d)) return {kind: daysPast(d)>1 ? "past" : "far5", days: daysAway(d), n: daysPast(d)};
+  const c = CEILINGS[sku];
+  if(c){
+    const days = daysAway(d);
+    if(days > c[0]) return {kind:"life", days, usual:c[1], ceil:c[0]};
+  }
+  return null;
+}
+/* -> {title, body} for the "Is this date correct?" question. Used by the scan prompt AND the history-correction modal. */
+function dateCheckText(name, d, c){
+  const head = `<strong>${esc(name)}</strong><div class="bbread">${yearFirst(d)}</div>`;
+  if(c.kind==="past")
+    return {title:"This date has already passed",
+      body: head + `That is <strong>${c.n}</strong> days ago. Check the package: is that date right?`};
+  if(c.kind==="life")
+    return {title:"Is this date correct?",
+      body: head + `${esc(name)} usually has up to <strong>${c.usual}</strong> days; this date is
+        <strong>${c.days}</strong> days away. Check the package — is the <strong>year</strong> right?`};
+  return {title:"Is this date correct?",
+    body: head + `That is more than five years out. Check the package: is the <strong>year</strong> right?`};
+}
+function askDateCheck(c){
+  const p=pending, t=dateCheckText(p.prod.name, p.best, c);
+  prompt_("stop", t.title, t.body + ` If it was mistyped, fix it.`,
+    `<button class="primary" id="bbRedo">Fix it</button>
+     <button id="bbKeep">Yes, it's correct</button>`);
+}
+
+/* the history-correction version of the confirm: self-contained overlay, so it can never overwrite the prompt of an item
+   that is mid-scan. Two buttons: "Fix it" (nothing changes) and "Yes, it's correct". */
+function closeDateModal(){ const m=document.getElementById("dcModal"); if(m) m.remove(); }
+function showDateModal(title, bodyHtml, onYes){
+  closeDateModal();
+  const el=document.createElement("div"); el.id="dcModal"; el.setAttribute("role","alertdialog");
+  el.innerHTML=`<div class="dcBox"><h2>${title}</h2><div>${bodyHtml}</div>
+    <div class="dcBtns"><button class="primary" id="dcFix">Fix it</button><button id="dcYes">Yes, it's correct</button></div></div>`;
+  document.body.appendChild(el);
+  document.getElementById("dcFix").addEventListener("click", closeDateModal);
+  document.getElementById("dcYes").addEventListener("click", ()=>{ closeDateModal(); onYes(); });
+  document.getElementById("dcFix").focus();
+}
+
 function commit(){
   /* last gate before it becomes a receipt */
-  if(pending && pending.best && !plausibleBB(pending.best)){
-    const bad=pending.best; const p=pending; const past=daysPast(bad)>1;
-    return prompt_("stop", past ? "This date has already passed" : "Check that date",
-      `<strong>${esc(p.prod.name)}</strong> — ${bbQuestion(bad)}
-       If it was mistyped, re-enter it.`,
-      `<button class="primary" id="bbRedo">Re-enter the date</button>
-       <button id="bbKeep">${past ? "Yes, the date is right" : "It really is "+esc(bad)} — record it</button>
-       ${noDateBtn()}`);
+  if(pending && pending.best && !pending.dateConfirmed){
+    const c = dateCheck(pending.prod.sku, pending.best);
+    if(c) return askDateCheck(c);
   }
   commit_();
 }
@@ -1694,7 +1793,7 @@ function persistPending(){
          ⛔ And `_op` is WHO SCANNED IT: the save used to stamp whoever happened to
          be signed in at retry time, which after a hand-over is somebody else. */
       pendingCodes:r.pendingCodes, alias_for:r.alias_for, _op:r._op, _at:r._at,
-      qtyUnknown:r.qtyUnknown, unknownCls:r.unknownCls, soft:r.soft,
+      qtyUnknown:r.qtyUnknown, unknownCls:r.unknownCls, soft:r.soft, dateConfirmed:r.dateConfirmed,
       id:r.id, saved:r.saved, fix:r.fix }));
     localStorage.setItem(PENDING_KEY, JSON.stringify(out));
   }catch(_){ /* quota or private mode — never let this break a scan */ }
@@ -1807,7 +1906,8 @@ async function save(row){
   const g14 = row.pendingCodes || row.gtin
               || (row.heldRaw ? ("RAW:"+String(row.heldRaw).slice(0,40)) : "");
   const v={ upc:row.upc, sku:row.prod.sku, gtin14:g14, best_by:row.best || "",
-            lot:row.lot||"", units:row.units ?? 0, source:row.source,
+            lot:row.lot||"", units:row.units ?? 0,
+            source: row.dateConfirmed ? String(row.source||"")+"+confirmed" : row.source,
             operator:(row._op || account), po_ref:ref, device };
   const fields={ Title: `${row.audit?"AUDIT ":""}${row.prod.sku} ${row.best||"(no date yet)"}` };
   for(const k of REQUIRED) fields[FIELD[k]] = v[k];
@@ -1859,6 +1959,7 @@ async function save(row){
         const fx = {};
         if(d.best_by) fx.best_by = row.best;
         if(d.units && row.units != null) fx.units = row.units;
+        if(d.source && row.source) fx.source = row.source;
         if(Object.keys(fx).length) patchRow(row, fx);
       }
       persistPending(); renderPending();
@@ -2054,6 +2155,7 @@ async function flushFix(row){
   const f = {};
   if("best_by" in want) f[FIELD.best_by] = want.best_by;
   if("units"   in want) f[FIELD.units]   = want.units;
+  if("source"  in want && FIELD.source) f[FIELD.source] = want.source;      // PM-2797: the +confirmed marker
   let landed = false;
   try{
     await graph(`/sites/${siteId}/lists/${listId}/items/${row.id}/fields`,
@@ -2636,8 +2738,13 @@ document.addEventListener("click",e=>{
   if(e.target.closest("#pendCont") && pending){ pending.idAsked = true; clearPrompt(); return next(); }
   /* ⭐ B4(b): a failed read has no code worth pairing, so this starts clean */
   if(e.target.closest("#failFind")){ pending = null; unresolved = null; return askFind(); }
-  if(e.target.closest("#bbRedo") && pending){ pending.best=null; return askDate(); }
-  if(e.target.closest("#bbKeep") && pending){ return commit_(); }
+  if(e.target.closest("#bbRedo") && pending){ pending.best=null; delete pending.dateConfirmed; return askDate(); }
+  /* PM-2797: "Yes, it's correct" is recorded on the row (`dateConfirmed`) and saved as a `+confirmed` suffix on `source`
+     -- ⛔ a suffix, not a new column: the SharePoint list's columns are fixed and the drain / shelf_life / best_by / cohorts
+     readers all match `source` by PREFIX (the drain already appends `+resolved`). */
+  /* next(), not commit_(): the question is asked straight after the date is keyed (before quantity), and next() is the
+     idempotent ladder that ends in commit() -- which skips the check for a confirmed date. */
+  if(e.target.closest("#bbKeep") && pending){ pending.dateConfirmed=true; clearPrompt(); return next(); }
   /* ⛔ "COULDN'T FIND IT HERE" IS NOT "OUT OF STOCK" (Jack, 2026-08-20:
      "is that something where the item is just backstock?"). It usually IS
      backstock. So this records exactly what the person observed — they looked at
@@ -2736,34 +2843,42 @@ document.addEventListener("click",e=>{
       console.info("cleared no-date flag for", row.prod.sku);
     }
     if(!d) return alert("Could not read that as a date. Try 2029-03-31 or 033129.");
-    /* ⛔ The same plausibility gate as a fresh scan — a correction can be a
-       mis-key too, and this is the field the whole model runs on. */
-    if(!plausibleBB(d) && !confirm(daysPast(d)>1
-        ? `This best-by date (${longDate(d)}) has already passed — ${daysPast(d)} days ago. Is that date right?`
-        : `${d} is more than five years out. Is that date right?`)) return;
-    row.best=d; render();
-    /* ⛔ A FAILED row has NO id, so `patchDate` was a NO-OP on exactly the rows
-       that needed fixing — the operator types the missing date and nothing
-       happens (2026-08-26). ⭐ If it never saved, SAVE it now; the date is
-       usually the very thing that was missing. */
-    if(row.id){ patchDate(row); }
-    /* ⛔ REVIEW FIX: the first save is in flight — send the date as a correction the moment it lands */
-    else if(row.inflight){ row.dirty = {...(row.dirty||{}), best_by:true}; persistPending(); }
-    /* ⛔⛔ ONLY AN EXHAUSTED ROW. The guard was `!== "saved"`, which INCLUDES a
-       row currently inside `save()`'s retry loop (up to ~4.2 s of backoff plus
-       network, longer on the flaky wifi this queue exists for). Tapping the date
-       cell in that window started a SECOND concurrent save of the same row:
-       two SharePoint rows for one scan — one dateless, one dated — so the drain
-       double-counts the units, `row.id` ends as whichever POST replied last so a
-       later `patchDate` corrects the wrong item, and combined with Discard the
-       counter still went negative. ⭐ `inflight` makes it structural, not a
-       timing bet. */
-    else if((row.saved==="FAILED"||row.saved==="UNSAVEABLE") && !row.inflight){
-      /* ⭐ An UNSAVEABLE row becomes saveable the moment the bad value is
-         corrected — a fixed date is the whole point. */
-      row.saved="queued"; row.err=""; queue++;
-      persistPending(); render(); save(row);
+    /* ⭐ PM-2797: the SAME year-first, bold "Is this date correct?" check as a fresh scan (past, > 5 years, or longer than the
+       SKU's believable shelf life) -- in an in-page dialog, because a native confirm() cannot bold anything. "Fix it" changes
+       nothing; "Yes" applies the correction and marks it `+confirmed` on the row's source. */
+    const dchk = dateCheck(row.prod.sku, d);
+    const applyDateFix = (confirmed) => {
+      if(confirmed){ row.dateConfirmed = true; row.source = String(row.source||"").replace(/\+confirmed$/, "") + "+confirmed"; }
+      row.best=d; render();
+      /* ⛔ A FAILED row has NO id, so `patchDate` was a NO-OP on exactly the rows
+         that needed fixing — the operator types the missing date and nothing
+         happens (2026-08-26). ⭐ If it never saved, SAVE it now; the date is
+         usually the very thing that was missing. */
+      if(row.id){ patchRow(row, confirmed ? {best_by: row.best, source: row.source} : {best_by: row.best}); }
+      /* ⛔ REVIEW FIX: the first save is in flight — send the date as a correction the moment it lands */
+      else if(row.inflight){ row.dirty = {...(row.dirty||{}), best_by:true, ...(confirmed ? {source:true} : {})}; persistPending(); }
+      /* ⛔⛔ ONLY AN EXHAUSTED ROW. The guard was `!== "saved"`, which INCLUDES a
+         row currently inside `save()`'s retry loop (up to ~4.2 s of backoff plus
+         network, longer on the flaky wifi this queue exists for). Tapping the date
+         cell in that window started a SECOND concurrent save of the same row:
+         two SharePoint rows for one scan — one dateless, one dated — so the drain
+         double-counts the units, `row.id` ends as whichever POST replied last so a
+         later `patchDate` corrects the wrong item, and combined with Discard the
+         counter still went negative. ⭐ `inflight` makes it structural, not a
+         timing bet. */
+      else if((row.saved==="FAILED"||row.saved==="UNSAVEABLE") && !row.inflight){
+        /* ⭐ An UNSAVEABLE row becomes saveable the moment the bad value is
+           corrected — a fixed date is the whole point. */
+        row.saved="queued"; row.err=""; queue++;
+        persistPending(); render(); save(row);
+      }
+    };
+    if(dchk){
+      const t = dateCheckText(row.prod.name, d, dchk);
+      showDateModal(t.title, t.body, () => applyDateFix(true));
+      return;
     }
+    applyDateFix(false);
     return;
   }
   /* ⭐ DELETE A SCAN FROM THE HISTORY (Jack, 2026-09-01). Date and units were
@@ -2841,7 +2956,12 @@ document.addEventListener("click",e=>{
        needed (keyed_gs1nodate vs keyed_bare); flattening both to "manual"
        throws away the only signal that separates a supplier who does not
        encode dates from a label format that cannot carry one. */
-    pending.best=d; next();
+    pending.best=d; delete pending.dateConfirmed;
+    /* ⭐ PM-2797: ask "is this date correct?" the moment it is keyed, while the package is still in the operator's hand
+       (commit() re-checks as the last gate for any date that arrives another way, e.g. a GS1 label). */
+    const dc0 = dateCheck(pending.prod.sku, d);
+    if(dc0) return askDateCheck(dc0);
+    next();
   }
 });
 
