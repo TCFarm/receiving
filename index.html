@@ -117,6 +117,7 @@
   #dcModal h2{font-size:18px;margin:0 0 6px}
   #dcModal .dcBtns{display:flex;gap:11px;flex-wrap:wrap;margin-top:12px}
 </style>
+<link rel="stylesheet" href="rx/rx.css">
 </head>
 <body>
 <div class="wrap">
@@ -130,6 +131,7 @@
     <span class="who" id="who"></span>
     <button id="signout" style="display:none;font-size:13px;padding:6px 11px;min-height:0">Sign out</button>
   </div>
+  <div id="rxStrip" class="rx-strip" hidden></div>
 
   <div id="gate" class="gate">
     <p id="gateMsg">Sign in with your TC Farm account to start scanning.</p>
@@ -143,6 +145,9 @@
   <!-- B3 (2026-09-23): standing "unit scan armed" indicator, see renderArmed() -->
   <div id="armedArea"></div>
   <div id="pendingArea"></div>
+  <div id="rxBanner"></div>
+  <div id="rxArmed"></div>
+  <div id="rxStart" class="rx-start" hidden></div>
 
     <div class="scanbox" id="scanbox" style="border-color:var(--line)">
       <label class="big" for="po" id="poLabel">Delivery / PO number — optional</label>
@@ -154,6 +159,7 @@
         date and SKU — there is only one delivery a week, so the PO adds nothing.</div>
     </div>
 
+    <div id="rxCols"><div id="rxLeft">
     <div class="scanbox" id="scanbox2">
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:7px">
         <label class="big" for="scan" id="scanLabel" style="margin:0">Scan case label</label>
@@ -166,7 +172,7 @@
              placeholder="ready" aria-label="Scan case label">
       <div class="hint" id="scanHint">Scan the MANUFACTURER label — not the yellow KEHE pick label.</div>
       <div style="margin-top:9px">
-        <button id="cantScan" style="font-size:14px;padding:8px 13px;min-height:0">
+        <button id="cantScan" style="font-size:14px;padding:8px 13px;min-height:48px">
           Can&rsquo;t scan it?</button>
         <span class="hint" style="display:inline;margin-left:9px">barcode too big, too tight, or damaged</span>
       </div>
@@ -174,6 +180,7 @@
 
     <div id="promptArea"></div>
     <div id="lastArea"></div>
+    </div><div id="rxSideCol"><div id="rxTray"></div><aside id="rxSide" class="rx-side"></aside></div></div>
     <div class="stats" id="stats"></div>
 
     <!-- AUDIT: the answer we actually want is units at each best-by date, so the
@@ -188,8 +195,9 @@
       </div>
     </div>
 
+    <div id="rxHistTools" class="rx-histtools"></div>
     <div class="tw">
-      <table>
+      <table id="histTable">
         <thead><tr><th>Product</th><th>Best by</th><th>Units</th><th>Src</th><th>Saved</th><th></th></tr></thead>
         <tbody id="tb"></tbody>
       </table>
@@ -199,6 +207,18 @@
   </div>
 </div>
 
+<div id="rxDrawer" class="rx-overlay" hidden></div>
+<script src="gs1.js"></script>
+<script src="rx/rx-config.js"></script>
+<script src="rx/rx-core.js"></script>
+<script src="rx/receive-pack.js"></script>
+<script src="rx/intents.js"></script>
+<script src="rx/receive-po.js"></script>
+<script src="rx/start.js"></script>
+<script src="rx/po-drawer.js"></script>
+<script src="rx/recommend.js"></script>
+<script src="rx/putaway.js"></script>
+<script src="rx/staging.js"></script>
 <script>
 "use strict";
 /* ============================================================================
@@ -314,6 +334,15 @@ function renderHeld(){
 const LOCATION_RE = /^[A-Z]{2}-\d{1,3}(-[A-Z0-9]{1,4}){1,3}$/i;
 const looksLikeLocation = v => LOCATION_RE.test(String(v||"").trim());
 
+/* ⭐ MASTER-PLAN §9.7: a date that came from the GS1 lot-swallow SPLIT is only PREFILLED (one Enter to confirm) until the
+   replay proves it (window.GS1_SPLIT_AUTOFILL, flag gs1_split_autofill, default false). An AMBIGUOUS split carries no date. */
+function labelDate(ais){
+  /* ⛔ round-2 audit 2026-10-19: a PRINTED (15)/(17) beats a date the lot-swallow split recovered (gs1BestBy) — and only a
+     date that came FROM the split needs the one-Enter confirm. */
+  const b = (typeof gs1BestBy === "function") ? gs1BestBy(ais) : {date: ais["17"]||ais["15"]||"", fromSplit: !!(ais && ais._split)};
+  const sp = b.fromSplit && (typeof gs1SplitNeedsConfirm === "function") && gs1SplitNeedsConfirm(ais);
+  return {date: sp ? "" : b.date, split: sp ? b.date : ""};
+}
 function upcCandidate(v){
   const d=String(v||"").replace(/\D/g,"");
   return d.length===12 || d.length===13 || d.length===14;
@@ -354,144 +383,6 @@ const b64url = buf => btoa(String.fromCharCode(...new Uint8Array(buf)))
   .replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
 async function sha256(s){ return crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)); }
 function rand(n){ const a=new Uint8Array(n); crypto.getRandomValues(a); return b64url(a.buffer); }
-
-/* ---------- GS1 parsing (ported from gs1_case_label.py) ---------- */
-const FIXED={"00":18,"01":14,"02":14,"11":6,"12":6,"13":6,"15":6,"16":6,"17":6,"20":2};
-/* ⛔ MEASUREMENT AIs SIT BETWEEN THE GTIN AND THE DATE ON EVERY VARIABLE-WEIGHT
-   CASE (cheese, deli, meat), and an AI we do not know ABORTS the parse — so the
-   best-by that follows it is silently thrown away. Measured 2026-08-18: a
-   Rumiano case read
-       (01)10811355127062 (3202)000450 (15)261120 (10)0702643
-   and we captured the GTIN, hit 3202, stopped, and made someone type the date
-   that was right there. AI 31nn–36nn are all 4 chars + 6 digits. */
-for(const p of ["31","32","33","34","35","36"])
-  for(let i=0;i<100;i++) FIXED[p+String(i).padStart(2,"0")]=6;
-const VAR={"10":20,"21":20,"30":8,"37":8};
-const GS=String.fromCharCode(29);
-
-function checkDigit(body){
-  let t=0;
-  for(let i=0;i<body.length;i++){ t += (+body[body.length-1-i]) * (i%2===0?3:1); }
-  return String((10-(t%10))%10);
-}
-/* GTIN-14 → the CONSUMER barcode our catalog is keyed on.
-   Returns a 12-digit UPC-A, or a 13-digit EAN-13 for imported goods.
-   ⚠️ EAN-13 is not an edge case here: 5 live products use it (the NA wine
-   range and imported produce). An earlier version returned null for them,
-   which read as "not a real product" and blocked the scan entirely.
-   ⛔ For UPC-A the check digit is RECOMPUTED over the 11-digit body — the
-   GTIN's own check digit belongs to the 14-digit form and reusing it
-   yields a plausible number that matches nothing. */
-function gtin14ToConsumer(g){
-  const d=(g||"").replace(/\D/g,"");
-  if(d.length!==14) return null;
-  const body=d.slice(1);                 // drop the packaging indicator → GTIN-13
-  if(body[0]==="0"){                     // a UPC-A lives inside as 0 + 11 + check
-    const b=body.slice(1,-1);
-    return b+checkDigit(b);
-  }
-  /* ⛔⛔ B14 (2026-09-23): RECOMPUTE THE EAN-13 CHECK TOO. This returned the
-     13 digits after the indicator — whose last digit is the GTIN-14's check, not
-     the EAN-13's. They agree only when the indicator is 0; a case code with
-     indicator 1-8 produced a plausible EAN that matches nothing (34 catalog
-     EANs affected). Same arithmetic as the UPC-A branch above. */
-  const b13 = body.slice(0,-1);
-  return b13 + checkDigit(b13);
-}
-const eom=(y,m)=>new Date(y,m,0).getDate();
-const iso3=(y,m,d)=>`${y}-${String(m).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
-/* ⛔⛔ B11 (2026-09-23): AN IMPOSSIBLE DATE MUST BE REFUSED WHERE IT IS ENTERED.
-   The shape checks below pad digits and never test the day-of-month, so "290231"
-   came back as 2029-02-31: accepted, shown on screen, and then quietly DROPPED
-   at save (SharePoint refuses it) — the operator saw a date that was never
-   recorded. ⭐ Anything that is not a real calendar day is now `null`, so every
-   caller already treats it as "could not read that date" and asks again. */
-function parseGs1Date(v){
-  const d = parseGs1DateShape(v);
-  return (d && isRealDate(d)) ? d : null;
-}
-function parseGs1DateShape(v){
-  const s=String(v||"").trim(); if(!s) return null;
-  /* ⛔ ISO FIRST. A label date barcode reads "2029/03/31"; the M/D/Y branch
-     below parses 2029 as a month, fails, and the whole scan was rejected as
-     UNREADABLE — 4 times in one shift (2026-08-18). */
-  const iso=s.match(/^(\d{4})[\/-](\d{1,2})[\/-](\d{1,2})$/);
-  if(iso){ const yy=+iso[1], mm=+iso[2], dd=+iso[3];
-    if(mm>=1&&mm<=12) return iso3(yy,mm,dd||eom(yy,mm)); }
-  const m=s.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{2,4})$/);
-  if(m){ let mm=+m[1],dd=+m[2],yy=+m[3]; if(yy<100) yy+=2000;
-    if(mm<1||mm>12) return null; return iso3(yy,mm,dd||eom(yy,mm)); }
-  const d=s.replace(/\D/g,""); if(d.length!==6) return null;
-  let yy=2000+ +d.slice(0,2), mm=+d.slice(2,4), dd=+d.slice(4,6);
-  if(mm<1||mm>12) return null;
-  if(yy-new Date().getFullYear()>50) yy-=100;
-  return iso3(yy,mm,dd||eom(yy,mm));      // DD=00 means end of month
-}
-function normalize(a){
-  const o={...a};
-  /* ⛔⛔ B11 (2026-09-23): A DATE AI THAT WILL NOT PARSE IS DROPPED, NOT KEPT RAW.
-     A failed parse used to leave the six raw digits in place, so a label reading
-     (17)290231 handed `best` the string "290231": no date prompt, a nonsense
-     "date" on screen, and SharePoint then refused it at save. ⭐ Without the AI
-     the scan is simply undated, so the operator is asked — the honest outcome. */
-  for(const ai of ["17","15","11","12","13","16"]) if(o[ai]){
-    const p=parseGs1Date(o[ai]);
-    if(p) o[ai]=p; else delete o[ai];
-  }
-  return o;
-}
-/* ⛔⛔ A BARE PRODUCT BARCODE IS NOT AN ELEMENT STRING — DO NOT PARSE IT AS ONE.
-   Found 2026-08-16 in Matt's 2026-08-14 test scans: all three `keyed_bare` rows
-   saved a LOT equal to their own GTIN. A bare ITF-14 case barcode begins with the
-   packaging indicator, and for US UPC-A goods that makes the first two digits
-   "10" — which the element-string walker reads as AI (10) = LOT, then swallows
-   the rest of the barcode as the lot value.
-
-   ⛔ The observed damage was a junk `lot`. The LATENT damage is far worse: an
-   ITF-14 beginning "17" parses as AI (17) = BEST BY. Verified —
-   `17250630123457` yields `{"12":"3457","17":"2025-06-30"}`. The page would
-   accept that FABRICATED date without prompting and stamp it `source='gs1'`,
-   the source we trust most, straight into an append-only ledger.
-   ⚠️ It also breaks the other way: a legitimate UPC-A beginning "01" is read as
-   AI (01), yields a 10-digit GTIN, fails the check digit, and is REJECTED.
-
-   The test cannot be "does it start with a known AI" — that is exactly what
-   misfires. It is "was this ever an element string at all":
-     * bracketed  "(01)..."          → yes
-     * FNC1 / AIM symbology id "]C1" → yes
-     * a GS separator present         → yes
-   Otherwise, an all-digit string of length 12 / 13 / 14 is a bare UPC-A /
-   EAN-13 / GTIN-14 and must bypass this parser completely.
-   ⚠️ Other all-digit lengths still go through: a genuine GS1-128 carrying only
-   fixed-length AIs (e.g. (01)+14 then (17)+6 = 22 digits) arrives with no
-   brackets and no separator, and must still parse. */
-function looksLikeElementString(s){
-  if(/[()]/.test(s) || s.includes(GS) || /\]C1/.test(s)) return true;
-  const digits = /^\d+$/.test(s);
-  if(digits && (s.length===12 || s.length===13 || s.length===14)) return false;
-  return true;
-}
-function parseElementString(scan){
-  let s=(scan||"").trim(); if(!s) return {};
-  if(!looksLikeElementString(s)) return {};
-  s=s.replace(/\]C1/g,"");
-  if(s.includes("(")){
-    const out={}; let m; const re=/\((\d{2,4})\)\s*([^(]*)/g;
-    while((m=re.exec(s))) out[m[1]]=m[2].trim();
-    return normalize(out);
-  }
-  const out={}; let i=0;
-  while(i<s.length){
-    if(s[i]===GS){ i++; continue; }
-    let ai=null;
-    for(const w of [2,3,4]){ const c=s.slice(i,i+w); if(FIXED[c]||VAR[c]){ ai=c; break; } }
-    if(!ai) break;
-    i+=ai.length;
-    if(FIXED[ai]){ out[ai]=s.slice(i,i+FIXED[ai]); i+=FIXED[ai]; }
-    else { let e=s.indexOf(GS,i); if(e<0) e=s.length; out[ai]=s.slice(i,e); i=e; }
-  }
-  return normalize(out);
-}
 
 /* ---------- auth: authorization code + PKCE ---------- */
 const store = sessionStorage;
@@ -849,11 +740,13 @@ function modeGate(){
   }
   /* a tablet idle for MODE_STALE_HOURS asks again, even without a reload */
   if(modeIsStale()){ modeAnswered = false; askMode(true); return true; }
+  if(window.RX && RX.gate()) return true;      // RX: live and no flow chosen yet
   return false;
 }
 async function handleScan(raw){
   const v=(raw||"").trim(); if(!v) return;
   if(modeGate()) return;
+  if(window.RX && await RX.intercept(v)) return;   // RX: a flow step / idle handler consumed the scan
   /* ⛔⛔ REVIEW FIX (2026-09-23): A NEW SCAN MUST NOT OVERWRITE AN ITEM STILL BEING
      ASKED ABOUT. Tapping the scan box and scanning the next carton while the date
      or quantity of this one was still open replaced `pending` — the first item was
@@ -1046,7 +939,7 @@ async function handleScan(raw){
        for display and diagnosis; only `ownCode` is ever matched or learned. */
     const ownCode = gtin || (upcCandidate(v) ? v.replace(/\D/g,"") : v);
     unresolved = {gtin: gtin || "", upc, raw: v, codes: [ownCode], t: Date.now(),
-                  bb: ais["17"]||ais["15"]||"", lot: ais["10"]||""};
+                  bb: labelDate(ais).date, lot: ais["10"]||""};
     /* ⭐ Not a dead end. The case may well be a product we DO carry whose UPC
        is missing or different in BigCommerce — 29% of BC products carry no UPC
        at all, so a code that fails to resolve says little about whether we
@@ -1075,7 +968,7 @@ async function handleScan(raw){
     pending = {looksCase, upc: upc || "", prod: {sku: "!PENDING_ID",
                  name: "UNIDENTIFIED — " + (v || upc || "no code"),
                  cls: "Refrigerated", pack: null},
-               gtin: gtin || "", lot: ais["10"]||"", best: null,
+               gtin: gtin || "", lot: ais["10"]||"", best: null, splitDate: labelDate(ais).split,
                source: (isAudit()?"audit_":"") + "pending_identification",
                pendingCodes: (unresolved.codes||[]).slice(0,6).join(" ")};
     /* ⭐ A date that WAS encoded on the label still wins — no reason to make
@@ -1111,7 +1004,7 @@ async function handleScan(raw){
        keyed_bare       → plain UPC barcode, no element string at all
      The last two are different problems: the first is a supplier not encoding
      dates, the second is a label format we cannot get dates from at all. */
-  const dated = ais["17"]||ais["15"];
+  const dated = labelDate(ais).date;
   const wasGs1 = !!(ais["01"]||ais["02"]);
   /* ⛔ The audit_ prefix is applied HERE, at the single point where source is
      decided, so no later branch can produce an unprefixed audit row. */
@@ -1168,7 +1061,7 @@ async function handleScan(raw){
     /* ⛔ single-shot, fresh or stale — already disarmed at the top of handleScan */
   }
   if(unresolved) unresolved = null;
-  pending={upc,prod,gtin:gtin||"",lot:ais["10"]||"",best,
+  pending={upc,prod,gtin:gtin||"",lot:ais["10"]||"",best,splitDate:labelDate(ais).split,
            /* ⛔ A held date came off a DIFFERENT barcode than the item, so nothing
               proves the two belong to the same case — only the operator can say.
               `fromHeld` forces one confirmation step; `heldRaw` keeps the exact
@@ -1236,7 +1129,7 @@ function next(){
      correct it afterwards in the history is slower than asking, and a default
      nobody was shown is a default nobody checks. */
   if(pending.qty == null && !pending.qtyUnknown) return askQty();
-  commit();
+  if(!(window.RX && RX.beforeCommit(pending))) commit();   // RX runs the shelf/stage step, then calls commit() itself
 }
 /* The pack in force for the pending item: what we were told this session beats
    the catalog, because someone counted it and the catalog is only 57% covered. */
@@ -1402,9 +1295,15 @@ function askDate(){
   /* ⭐ B4: this prompt already offers the pairing choices, so the separate
      askIdentify() step must not ask them again once the date is typed. */
   if(unnamed) pending.idAsked = true;
-  prompt_("", unnamed ? "We do not know this code — what is the best-by?"
-                      : "No date on the label — enter it",
-    (unnamed
+  const splitNote = pending.splitDate
+    ? `<span style="display:block;margin:0 0 10px;padding:9px 12px;background:var(--card);border-left:5px solid var(--wait)">
+         The label's date ran into its lot number, so we <strong>guessed</strong> it:
+         <span class="bbread" style="display:block">${yearFirst(pending.splitDate)}</span>
+         Check it against the label. <strong>Enter</strong> if it is right, or fix it.</span>` : "";
+  prompt_("", pending.splitDate ? "Check this date"
+              : (unnamed ? "We do not know this code — what is the best-by?"
+                      : "No date on the label — enter it"),
+    splitNote + (unnamed
       ? `<span class="num">${esc(rawCode)}</span> is not in the catalog.
          <strong>The date is worth more than the code</strong> — record it here and we
          will attach it to the product once the UPC is known.`
@@ -1467,6 +1366,8 @@ function askDate(){
       const d = /^\d{6}$/.test(t) ? parseGs1Date(t.slice(4,6)+t.slice(0,4)) : null;
       rb.innerHTML = d ? yearFirst(d) : "";
     };
+    if(el && pending && pending.splitDate){ const m=/^(\d{4})-(\d{2})-(\d{2})$/.exec(pending.splitDate);
+      if(m){ el.value = m[2]+m[3]+m[1].slice(2); readBack(); } }
     if(el){ el.focus();
       el.addEventListener("keydown",e=>{ if(e.key==="Enter") $("dok").click(); });
       el.addEventListener("input",()=>{ if(pick) pick.value=""; readBack(); }); }
@@ -1510,7 +1411,9 @@ function askQty(){
   const p = pending;
   const loose = isAudit() && COUNT === "units";
   const pk = packFor(p.prod.sku, p.prod.pack);
-  const dflt = loose ? 1 : (pk > 0 ? pk : null);
+  const dflt0 = loose ? 1 : (pk > 0 ? pk : null);
+  const dflt = window.RX ? RX.prefill(p, dflt0) : (p.qtyShown = dflt0);   // RX: PO / learned case size; records p.qtyShown
+  const rxq = window.RX ? RX.qtyExtras(p) : {body:"", after:""};
   /* ⭐⭐ NEVER SKIP THE DATE QUESTION SILENTLY (ruling: Jack, 2026-09-15).
      A SKU flagged "no printed date" jumped straight here, and to the operator
      that is indistinguishable from the tool being broken — Julia hit it on the
@@ -1535,7 +1438,7 @@ function askQty(){
        </span>`
     : "";
   prompt_("", loose ? "How many units at this date?" : "How many units in this case?",
-    ndNote +
+    ndNote + rxq.body +
     `<strong>${esc(p.prod.name)}</strong> &mdash; best by
      <strong>${p.best || "no date"}</strong>.<br><br>` +
     (loose
@@ -1547,9 +1450,9 @@ function askQty(){
     `<div class="dateRow">
        <input id="qty" type="text" class="num" inputmode="numeric" maxlength="5"
               value="${dflt ?? ""}" placeholder="e.g. 12" aria-label="Quantity">
-       <button class="primary" id="qok">Save</button>
-       <button id="qskip">Don&rsquo;t know</button>
-     </div>`);
+       <button class="primary" id="qok" data-act="qty-save">Save</button>
+       <button id="qskip" data-act="qty-dontknow">Don&rsquo;t know</button>
+     </div>` + rxq.after);
   setTimeout(()=>{
     const el=$("qty");
     if(el){ el.focus(); el.select();
@@ -1706,6 +1609,27 @@ function showDateModal(title, bodyHtml, onYes){
   document.getElementById("dcFix").focus();
 }
 
+/* ⭐⭐ PHASE 0 CASE-QUANTITY LEARNING (MASTER-PLAN §2, D19). A `!PACK` telemetry row is written ONLY for a FULL case whose
+   quantity either differs from the one we showed or had nothing to show — a confirmation of a known pack teaches nothing.
+   ⛔ Never for an unnamed carton, an audit row, an unknown quantity, or a part case. The learner
+   (build_receiving_catalog.case_packs_learned) reads `gtin14 = "<code> -> <sku> = <n>"`. Independent of RX: it must keep
+   working if the rx/ files fail to load. */
+function packEvidence(row){
+  try{
+    if(row.audit || row.qtyUnknown || row.qtyKind !== "full") return;
+    const sku = String((row.prod||{}).sku||""); if(!sku || sku.startsWith("!")) return;
+    const n = row.units; if(!(n > 0)) return;
+    if(row.qtyShown != null && row.qtyShown === n) return;
+    const code = row.gtin || row.upc; if(!code) return;
+    const base = { Title: "! PACK" };
+    base[FIELD.sku] = "!PACK"; base[FIELD.upc] = row.upc || "";
+    base[FIELD.gtin14] = `${code} -> ${sku} = ${n}`.slice(0,60);
+    base[FIELD.lot] = ""; base[FIELD.units] = n; base[FIELD.source] = "pack_learn";
+    base[FIELD.operator] = row._op || account; base[FIELD.po_ref] = row._po || ""; base[FIELD.device] = device;
+    enqueueRecord(base, "PACK");
+  }catch(_){ /* telemetry must never interrupt receiving */ }
+}
+
 function commit(){
   /* last gate before it becomes a receipt */
   if(pending && pending.best && !pending.dateConfirmed){
@@ -1750,7 +1674,7 @@ function commit_(){
      find-by-name wrote THAT carton's code as an alias of whatever was picked. */
   unresolved = null;
   const row={ ...p, cls, unknownCls, soft: cls==="Frozen" && flags[p.prod.sku]===false,
-              units: dflt, audit: isAudit(), _po: poVal(),
+              units: dflt, audit: isAudit(), _po: (window.RX && RX.poRef(p)) || poVal(),
               /* ⛔ B7: the operator is captured WHEN SCANNED, like `_po` and `audit` */
               _op: account, _at: Date.now(),
               saved:"queued", id:null, n:nextRowN() };
@@ -1761,6 +1685,8 @@ function commit_(){
   persistPending();                 // ⭐ on disk BEFORE the network is touched
   clearPrompt(); render(); renderPending(); flash(row);
   save(row);
+  packEvidence(row);
+  if(window.RX) RX.onCommit(row);          // RX: intents, flash card, sound
 }
 
 /* ⛔ A SCAN MUST SURVIVE A DROPPED CONNECTION (2026-08-20).
@@ -1793,6 +1719,7 @@ function persistPending(){
          ⛔ And `_op` is WHO SCANNED IT: the save used to stamp whoever happened to
          be signed in at retry time, which after a hand-over is somebody else. */
       pendingCodes:r.pendingCodes, alias_for:r.alias_for, _op:r._op, _at:r._at,
+      rx:r.rx, qtyKind:r.qtyKind, qtyShown:r.qtyShown,
       qtyUnknown:r.qtyUnknown, unknownCls:r.unknownCls, soft:r.soft, dateConfirmed:r.dateConfirmed,
       id:r.id, saved:r.saved, fix:r.fix }));
     localStorage.setItem(PENDING_KEY, JSON.stringify(out));
@@ -1827,6 +1754,7 @@ async function retryPending(){
     /* ⭐ B10 / B5: held corrections and learning records go out on the same tick. */
     for(const r of rows.filter(x => x.fix && !x.fixDead)){ if(needsSignIn) break; await flushFix(r); }
     if(!needsSignIn) await flushOutbox();
+    if(!needsSignIn && window.RX) await RX.flush();
   } finally { retrying = false; renderPending(); render(); }
 }
 
@@ -1841,7 +1769,7 @@ function renderPending(){
   const n = uns.length;
   const dead = uns.filter(r => r.saved === "UNSAVEABLE").length;
   const fixes = rows.filter(r => r.fix).length;
-  const ob = outbox.length;
+  const lr = outbox.length, pa = (window.RX ? RX.unsentCount() : 0), ob = lr + pa;
   /* ⛔⛔ B9: A SIGN-IN PROBLEM GETS ITS OWN BANNER WITH THE ONE BUTTON THAT FIXES IT.
      "Retrying automatically" was a lie here — nothing could send until a human
      signed in, and nothing on screen said so. Rows are kept on this tablet
@@ -1849,7 +1777,7 @@ function renderPending(){
   if(needsSignIn){
     el.innerHTML = `<div class="banner" role="alert" style="border-left-color:var(--stop)">
       <strong>Your sign-in has expired.</strong> ${n ? `${n} scan${n>1?"s are":" is"}` : "Nothing is"}
-      held safely on this tablet${(fixes||ob) ? ` (plus ${fixes+ob} correction/learning record${fixes+ob>1?"s":""})` : ""}
+      held safely on this tablet (scans and put-aways)${(fixes||ob) ? ` (plus ${fixes+ob} correction${fixes+ob>1?"s":""}, put-away${fixes+ob>1?"s":""} or learning record${fixes+ob>1?"s":""})` : ""}
       and will send the moment you sign back in.
       <button class="primary" id="reSignIn" style="margin-left:8px">Sign in again</button></div>`;
     return;
@@ -1872,7 +1800,9 @@ function renderPending(){
   if(dead) parts.push(`<strong>${dead} scan${dead>1?"s":""} cannot be saved as entered</strong> — `+
     `tap its date or units to fix it (it then saves itself), or delete it.`);
   if(fixes) parts.push(`<strong>${fixes} correction${fixes>1?"s":""} not sent yet</strong> — retrying.`);
-  if(ob) parts.push(`${ob} learning record${ob>1?"s":""} (skips, pairings) waiting to send.`);
+  /* ⭐ UX audit 2026-10-19: put-aways (RX intents) are not "learning records" — name them for what they are. */
+  if(lr) parts.push(`${lr} learning record${lr>1?"s":""} (skips, pairings) waiting to send.`);
+  if(pa) parts.push(`${pa} put-away${pa>1?"s":""} waiting to send to the Finale list.`);
   el.innerHTML = `<div class="banner" style="border-left-color:var(--stop)">${parts.join("<br>")}${recNote}
       Do not clear the browser data. <button id="retryNow" style="margin-left:8px">Retry now</button>
     </div>`;
@@ -2938,6 +2868,9 @@ document.addEventListener("click",e=>{
     /* ⛔ B1: say a suspicious number back first (see `qtyLooksWrong`). The pack
        learning that used to live here moved, unchanged, into `takeQty`. */
     const pk = packFor(pending.prod.sku, pending.prod.pack);
+    /* ⭐ Phase 0 (MASTER-PLAN §2): full-case vs part-case is the learning evidence (default: full when no pack was shown
+       or typed = shown; part otherwise; RX's chips can override) */
+    pending.qtyKind = window.RX ? RX.qtyKind(n) : ((pending.qtyShown == null || pending.qtyShown === n) ? "full" : "part");
     if(qtyLooksWrong(n, pk)) return askQtyConfirm(n, pk);
     return takeQty(n);
   }
@@ -2967,17 +2900,17 @@ document.addEventListener("click",e=>{
 
 function render(){
   $("empty").hidden = rows.length>0;
-  $("tb").innerHTML = rows.map(r=>{
+  $("tb").innerHTML = (window.RX ? RX.histRows(rows) : rows).map(r=>{
     /* ⛔ UNSAVEABLE must read as a FAILURE, not as a neutral state — it is the
        row that will never save without a human. */
     const bad = (r.saved==="FAILED" || r.saved==="UNSAVEABLE");
     const cls = r.saved==="saved"?"t-gs1":(bad?"t-q":"t-man");
-    return `<tr>
+    return `<tr data-act="hist-row" data-n="${r.n}">
       <td>${esc(r.prod.name)}<div class="num" style="font-size:11px;color:var(--ink-3)">${esc(r.prod.sku)} · ${r.upc}</div>
         ${r.audit?'<span class="tag t-man">AUDIT</span>':""}
         ${r.soft?'<span class="tag t-man">soft date</span>':""}
         ${r.unknownCls?'<span class="tag t-q">no storage class — assumed 14d</span>':""}</td>
-      <td class="num"><span class="datecell" data-n="${r.n}"
+      <td class="num"><span class="datecell" data-act="row-fix-date" data-n="${r.n}"
           style="cursor:pointer;border-bottom:1px dashed var(--ink-3)"
           title="tap to correct the best-by">${r.best || "no date"}</span>${
             /* ⛔ A no-date row has best===null and `addDays(null,…)` THREW, taking
@@ -2985,16 +2918,16 @@ function render(){
                mid-shelf. Caught in test 2026-08-20, before deploy. */
             r.best ? `<div style="font-size:11px;color:var(--ink-3)">order by ${addDays(r.best,-6)}</div>` : ""
           }</td>
-      <td class="num"><span class="unitcell" data-n="${r.n}"
+      <td class="num"><span class="unitcell" data-act="row-fix-units" data-n="${r.n}"
           style="cursor:pointer;border-bottom:1px dashed var(--ink-3)"
           title="tap to correct">${r.units ?? "?"}</span></td>
-      <td><span class="tag ${r.source==="gs1"?"t-gs1":"t-man"}">${r.source==="gs1"?"GS1":"keyed"}</span></td>
-      <td><span class="tag ${cls}">${r.saved}</span>${
+      ${(window.RX && RX.shelfCell(r)) || `<td><span class="tag ${r.source==="gs1"?"t-gs1":"t-man"}">${r.source==="gs1"?"GS1":"keyed"}</span></td>`}
+      <td>${(window.RX && RX.chip(r)) || `<span class="tag ${cls}">${r.saved}</span>`}${
           /* ⭐ B10: a held correction is shown — "saved" alone would be a lie */
           r.fix ? ` <span class="tag t-q">${r.fixDead ? "fix refused" : "fix not sent"}</span>` : ""}${
           r.err&&bad?`<div style="font-size:11px;color:var(--stop)">${esc(r.err)}</div>`:""}${
           r.fix&&r.fixErr?`<div style="font-size:11px;color:var(--stop)">${esc(r.fixErr)}</div>`:""}</td>
-      <td class="num"><button class="delcell" data-n="${r.n}" title="delete this scan"
+      <td class="num"><button class="delcell" data-act="row-delete" data-n="${r.n}" title="delete this scan"
           aria-label="Delete this scan"
           style="margin:0;padding:9px 14px;min-height:0;font-size:17px;line-height:1;
                  color:var(--stop);font-weight:700">&times;</button></td>
@@ -3049,6 +2982,7 @@ function render(){
        ["Not read", notRead, false],
        ["No typing", mine.length? Math.round(gs1/mine.length*100)+"%":"—", false]]
   ).map(([l,v,bad])=>`<div class="stat${bad?" bad":""}"><div class="l">${l}</div><div class="v">${v}</div></div>`).join("");
+  if(window.RX) RX.afterRender();
 }
 
 /* ---------- boot ---------- */
@@ -3101,6 +3035,7 @@ async function start(){
     setMode(MODE, {stamp:false});   // paints the banner, labels, PO hint and roll-up — ⛔ B12: NOT an answer
     /* ⛔ After a gap, do NOT inherit the last person's mode silently. */
     if(staleMode){ modeAnswered = false; askMode(); }
+    if(window.RX) RX.boot();
     $("foot").textContent =
       `Writing to “${CFG.listName}” on ${CFG.sitePath}. A row counts as saved only when SharePoint `+
       `returns its id — anything still showing “queued” or “FAILED” did not save. `+
@@ -3194,11 +3129,13 @@ document.addEventListener("keydown", e=>{
 }, true);
 document.addEventListener("click", e=>{ if(e.target && e.target.id==="burstOk") clearPrompt(); });
 $("scan").addEventListener("keydown",e=>{
-  if(e.key==="Enter"){ e.preventDefault(); const v=$("scan").value; $("scan").value=""; handle(v); }});
-document.addEventListener("click",()=>{ if((!$("promptArea").innerHTML || unitScanFor) && $("app").style.display!=="none") $("scan").focus(); });
+  if(e.key==="Enter"){ e.preventDefault(); const v=$("scan").value; $("scan").value="";
+    if(!v.trim() && window.RX && RX.onEmptyEnter()) return;
+    handle(v); }});
+document.addEventListener("click",()=>{ if((!$("promptArea").innerHTML || unitScanFor || (window.RX && RX.keepScan())) && $("app").style.display!=="none") $("scan").focus(); });
 window.addEventListener("beforeunload",e=>{
   if(leavingForSignIn) return;       // ⭐ B9: the sign-in redirect — everything is persisted
-  if(rows.some(r=>r.saved!=="saved" || r.fix) || outbox.length){ e.preventDefault(); e.returnValue=""; }});
+  if(rows.some(r=>r.saved!=="saved" || r.fix) || outbox.length || (window.RX && RX.unsentCount())){ e.preventDefault(); e.returnValue=""; }});
 
 start();
 </script>
