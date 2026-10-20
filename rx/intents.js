@@ -24,7 +24,7 @@
      out through the page's own reject(). A denied row is NOT retried (a retry after the crew received it in Finale
      would double-receive). 401 ⇒ the page's sign-in banner; the row is held and sent after sign-in.
    • PATCH always carries `If-Match: <etag>`. 412 ⇒ re-read; if the poster has already acted (FinState ≠ '') the change
-     is refused: a cancel becomes `CancelTooLate=true`, an edit becomes a `Kind=fix` row for Julia.
+     is refused: a cancel becomes `CancelTooLate=true`, an edit becomes a `Kind=fix` row for the buyer.
    • Polling: every POLL_OPEN while anything is not final, else POLL_IDLE; every read has a time limit; a late answer
      is dropped by a generation guard.
 
@@ -44,14 +44,14 @@
 const RX = window.RX; if(!RX) return;
 const CFG = RX.CFG, I = RX.intents, t = RX.t;
 
-RX.INTENT_FIELDS = ["IntentId","Kind","State","PageMode","ScanDay","ScanAt","ReadyAt","Po","Sku","Upc","Gtin14","Units","Cases","CaseQty","QtyKind","BestBy","Lot","Location","BinSource","Workflow","StagedArea","RecommendedBin","RecReasons","SplitOf","TempConfirmed","FefoOverride","ShortDated","CancelTooLate","DamagedUnits","RejectedUnits","RawScans","Operator","Device","BbItemId","PlacedBy","FixUnits","FixBin","FixNote"];
+RX.INTENT_FIELDS = ["IntentId","Kind","State","PageMode","ScanDay","ScanAt","ReadyAt","Po","Sku","Upc","Gtin14","Units","Cases","CaseQty","QtyKind","BestBy","Lot","Location","BinSource","Workflow","StagedArea","RecommendedBin","RecReasons","SplitOf","TempConfirmed","FefoOverride","ShortDated","CancelTooLate","OverConfirmed","DamagedUnits","RejectedUnits","RawScans","PhotoUrls","Operator","Device","BbItemId","PlacedBy","FixUnits","FixBin","FixNote"];
 RX.INTENT_CHOICES = {"Kind":["intent","fix"],"State":["staged","ready","skipped","cancelled"],"PageMode":["off","shadow","live"],"QtyKind":["full","part"],"BinSource":["scanned","typed","armed"],"Workflow":["direct","staged"]};
 const FIN_FIELDS = ["FinState","FinReason","FinPo","FinShipment","FinBatch","FinAt","FinUnitsPosted","FinUnitsHeld","FinUnitsWould"];
 const NUM = new Set(["Units","Cases","CaseQty","DamagedUnits","RejectedUnits","FixUnits"]);
-const BOOL = new Set(["TempConfirmed","FefoOverride","ShortDated","CancelTooLate"]);
+const BOOL = new Set(["TempConfirmed","FefoOverride","ShortDated","CancelTooLate","OverConfirmed"]);
 const CORE_COLS = ["IntentId","State","PageMode","ScanDay","Sku","Units"];
 const KEY = "rx_intents_v1";
-const PAGE_SEL = RX.INTENT_FIELDS.filter(k => k !== "RawScans").concat(FIN_FIELDS).join(",");
+const PAGE_SEL = RX.INTENT_FIELDS.filter(k => k !== "RawScans" && k !== "PhotoUrls").concat(FIN_FIELDS).join(",");   // the two long note columns are never needed in a list read
 
 I.state = { listErr:"", storeErr:"", resolving:false, deniedAt:0, lastTelemetry:0, lastPollAt:0, lastPollErr:"", polls:0 };
 
@@ -268,8 +268,12 @@ I.baseFields = function(row, f, flow){
     Workflow: staged ? "staged" : "direct",
     StagedArea: f.stagedArea || "", RecommendedBin: f.recommendedBin || "",
     RecReasons: Array.isArray(f.recReasons) ? f.recReasons.join(",") : (f.recReasons || ""),
-    SplitOf: f.splitOf || "", TempConfirmed: !!f.tempConfirmed, FefoOverride: !!f.fefoOverride, ShortDated: !!f.shortDated,
+    SplitOf: f.splitOf || "", TempConfirmed: !!f.tempConfirmed, FefoOverride: !!f.fefoOverride, ShortDated: !!f.shortDated, OverConfirmed: !!f.overConfirmed,
     DamagedUnits: f.damaged || null, RejectedUnits: f.rejected || null,
+    /* ⭐ ROUND 4 (D36): the evidence for the damaged units — the uploaded photos' web links (JSON list) and the crew's one-line
+       "what's wrong" (FixNote is a text column; on an intent row it carries this note, Julia's credit tab reads it). */
+    PhotoUrls: (Array.isArray(f.photoUrls) && f.photoUrls.length) ? JSON.stringify(f.photoUrls) : "",
+    FixNote: f.fixNote ? String(f.fixNote).slice(0, 250) : "",
     RawScans: JSON.stringify(RX.state.scanLog.slice()),
     Operator: op, Device: deviceId(), BbItemId: row.id || "",
     PlacedBy: state === "ready" ? op : "",
@@ -286,6 +290,7 @@ I.createFromRow = function(row){
   const extras = Array.isArray(f.extra) ? f.extra : [];
   for(const ex of extras){
     const g = Object.assign({}, f, ex); delete g.extra;
+    if(!ex.photoUrls) delete g.photoUrls; if(!ex.fixNote) delete g.fixNote;       // the evidence rides on the FIRST portion only (round 4)
     const fl = I.baseFields(row, g, flow);
     fl.IntentId = ex.iid || RX.newId(); fl.SplitOf = rxs.iid; fl.RawScans = "";
     out.push(newRec(fl, {bbN:row.n}));
@@ -512,6 +517,7 @@ async function sendPatches(rec){
            moved on — another tablet placed it. Never written over someone else's placement. */
         const sf = (cur && cur.fields) || {};
         if(p.expect && sf.State && sf.State !== p.expect){ takeP(rec, p); dropPatch(rec, p, "someone else moved it (" + sf.State + ")"); save(); continue; }
+        if(p.tries >= 3 && p.keep){ p.tries = 0; return "net"; }      // ⭐ evidence is never dropped: try again on the next flush
         if(p.tries >= 3){ takeP(rec, p); dropPatch(rec, p, "changed on another tablet"); save(); continue; }
         continue;
       }
@@ -535,7 +541,7 @@ async function tooLate(L, rec, p){
   if(voidSplit(rec, p, "Finale already had the case")) { RX.refresh(); return; }
   const f = p.fields || {};
   /* ⛔ AUDIT (E): an evidence-only patch (the BB row id) after the poster acted is simply dropped — it used to become a
-     fix row for Julia and a "sent to Julia" toast after a perfectly normal put-away (any time the poster marked the intent
+     fix row for the buyer and a "sent to Julia" toast after a perfectly normal put-away (any time the poster marked the intent
      before the BB row's id was known — every shadow intent on a slow BB save). */
   if(evidenceOnly(f)) return;
   if(f.State === "cancelled"){
@@ -644,6 +650,22 @@ I.fix = function(o){
   return I.create(f, {});
 };
 
+/* ⭐ ROUND 4 (D36): the photo links arrive AFTER the intent exists when the upload had to wait for signal (rx/photos.js). PhotoUrls is a
+   page-owned NOTE column the poster never reads, so — unlike a control edit — it is applied EVEN IF the poster already acted on the
+   intent (`tooLateOk`), and a patch that keeps losing its If-Match race is retried, never dropped (`keep`): the evidence must not be
+   lost to a race. -> 'merged' | 'queued' | 'none' */
+I.setPhotoUrls = function(iid, urls){
+  const rec = S.recs[iid]; if(!rec) return "none";
+  const json = JSON.stringify(urls || []);
+  rec.fields.PhotoUrls = json;
+  if(!rec.sent && !rec.tried && !rec.inflight){ save(); I.kick(); return "merged"; }       // still the body of the unsent POST
+  if(rec.denied && !rec.sent){ save(); return "merged"; }
+  const last = rec.patches[rec.patches.length - 1];
+  if(last && last.keep && !last.sending && !last.tries) last.fields.PhotoUrls = json;
+  else rec.patches.push({id:RX.newId(), fields:{PhotoUrls:json}, tries:0, tooLateOk:true, keep:true});
+  save(); I.kick(); return "queued";
+};
+
 /* ───────────────────────── flush ───────────────────────── */
 let flushing = false, flushAgain = false;
 I.kick = () => { setTimeout(() => { I.flush(); }, 0); };
@@ -735,12 +757,12 @@ async function pollPoster(gen){
     const siteId = await resolveSite();
     const j = await G(`/sites/${siteId}/drive/root:/${CFG.poster.path.split("/").map(encodeURIComponent).join("/")}:/content`);
     if(gen !== pollGen) return;
-    if(j && typeof j === "object" && j.at){ ps.data = j; ps.status = "ok"; }
-    else { ps.data = null; ps.status = "bad"; }
+    if(j && typeof j === "object" && j.at){ ps.data = j; ps.status = "ok"; RX.store.set(RX.POSTER_KEY || "rx_poster_v1", {data:j, savedAt:RX.now()}); }
+    else { ps.data = null; ps.status = "bad"; RX.store.del(RX.POSTER_KEY || "rx_poster_v1"); }
   }catch(e){
     if(gen !== pollGen) return;
-    if(e && (e.status === 404)){ ps.data = null; ps.status = "absent"; }
-    else { ps.status = "error"; }                 // keep the last good reading; the page shows its age
+    if(e && (e.status === 404)){ ps.data = null; ps.status = "absent"; RX.store.del(RX.POSTER_KEY || "rx_poster_v1"); }
+    else { ps.status = "error"; }                 // keep the last good reading (in memory AND rx_poster_v1, round 5); the page shows its age
   }
   ps.readAt = RX.now(); RX.emit("poster", ps.data); RX.refresh();
 }
@@ -782,13 +804,13 @@ const heldShort = (fin) => {
     DAMAGED: () => "damaged", STALE: () => "too old — receive in Finale app", TEMP_UNCONFIRMED: () => "temperature not confirmed",
     LOT_FORM_UNPROVEN: () => "lot not proven yet" };
   if(map[code]) return map[code]();
-  return (sentence || code.toLowerCase().replace(/_/g, " ") || "see Julia").slice(0, 40);
+  return (sentence || code.toLowerCase().replace(/_/g, " ") || "see the buyer").slice(0, 40);
 };
 const refusedShort = (fin) => {
   const reason = String(fin.FinReason || ""); const code = (reason.split(":")[0] || "").trim().toUpperCase();
   const sentence = reason.indexOf(":") >= 0 ? reason.slice(reason.indexOf(":")+1).trim() : "";
   const map = { UNKNOWN_BIN: "shelf not recognised", BIN_DISABLED: "shelf switched off", RECEIVING_DISABLED: "shelf switched off", NOT_ON_PO: "not on a PO" };
-  return map[code] || (sentence || code.toLowerCase().replace(/_/g, " ") || "see Julia").slice(0, 40);
+  return map[code] || (sentence || code.toLowerCase().replace(/_/g, " ") || "see the buyer").slice(0, 40);
 };
 function chipOf(rec){
   const f = rec.fields, fin = rec.fin || {}, now = RX.now();
