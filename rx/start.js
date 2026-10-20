@@ -7,7 +7,9 @@
      tag" (session-only, resets at midnight, `rx_practice_v1`). Turning it on offers the tiles Best-by only /
      Put away here / Sort first for one volunteer. ⛔ There is NO per-item Skip (the shelf-step's own
      "Skip — I'll use the Finale app" is WP4b's and appears only if its step registers one).
-   • LIVE (later): two tiles, Put away here / Sort first; no "Best-by only"; the staged list auto-opens (WP4b).
+   • LIVE (round 3, Jack 2026-10-19 — "go live for everyone"): two tiles, Put away here (PRE-SELECTED — RX.flow() defaults to it) /
+     Sort first, plus a small secondary link "Best-by only (no shelf scan)" as the fallback. No practice toggle, no practice
+     banner, no "Nothing is posted to Finale" copy. The staged list auto-opens when staged items exist and nobody has chosen.
    • OFF: nothing here renders and the page is exactly what it was before the upgrade.
    ⛔ A tile is offered only if its flow's LAST step is registered (RX.flowAvailable) — so shipping this file without
    WP4b's flows shows no tiles and no toggle instead of a button that does nothing.
@@ -25,7 +27,7 @@ const $ = (id) => document.getElementById(id);
 const pageAudit = () => { try{ return isAudit(); }catch(_){ return false; } };
 const pageRows = () => { try{ return rows; }catch(_){ return []; } };
 const pend = () => { try{ return pending; }catch(_){ return null; } };
-const flowLabel = (f) => ({bestby:t("tile_bestby"), direct:t("tile_direct"), sort:t("tile_sort"), staged:"Staged items"}[f] || f);
+const flowLabel = (f) => ({bestby: RX.mode() === "live" ? t("link_bestby_live") : t("tile_bestby"), direct:t("tile_direct"), sort:t("tile_sort"), staged:"Staged items"}[f] || f);
 
 /* ───────────────────────── chips, flash, toast ───────────────────────── */
 U.chipHtml = (c, row) => `<span class="rx-chip rx-${esc(c.tone)}" data-chip-n="${esc(row.n)}"${c.title ? ` title="${esc(c.title)}"` : ""}>${esc(c.text)}</span>`;
@@ -136,7 +138,7 @@ U.renderStart = function(){
     return;
   }
   el.classList.remove("rx-mini"); delete el.dataset.h;
-  let h = `<div class="rx-h">${esc(t("start_h"))}${startOpen() && underway() ? ` <button class="rx-link" data-act="start-toggle" aria-expanded="true" style="float:right;margin-top:-14px">${esc(t("btn_hide"))}</button>` : ""}</div>` + poCardHtml();
+  let h = `<div class="rx-h">${esc(t("start_h"))}${startOpen() && underway() ? ` <button class="rx-link" data-act="start-toggle" data-close="3" aria-expanded="true" style="float:right;margin-top:-14px;min-height:48px">${esc(t("btn_hide"))}</button>` : ""}</div>` + poCardHtml();
   const avail = ["direct", "sort"].filter(f => RX.flowAvailable(f));
   if(mode === "shadow"){
     if(!avail.length) h += `<div class="hint">${esc(t("shadow_note"))}</div>`;
@@ -146,7 +148,10 @@ U.renderStart = function(){
       if(practice) h += `<div class="rx-tiles">${tileHtml("bestby", flow === "bestby")}${avail.map(f => tileHtml(f, flow === f)).join("")}</div>`;
     }
   }else if(avail.length){
-    h += `<div class="rx-h" style="margin-top:12px">${esc(t("start_how"))}</div><div class="rx-tiles">${avail.map(f => tileHtml(f, flow === f)).join("")}</div>`;
+    /* ⭐ ROUND 3 (Jack, 2026-10-19): LIVE FOR EVERYONE — two tiles, "Put away here" pre-selected (RX.flow() defaults to it), and a
+       small secondary link as the fallback. No practice toggle, no practice copy. */
+    h += `<div class="rx-h" style="margin-top:12px">${esc(t("start_how"))}</div><div class="rx-tiles">${avail.map(f => tileHtml(f, flow === f)).join("")}</div>
+      <div class="rx-aux"><button class="rx-link" data-act="start-bestby" aria-pressed="${flow === "bestby"}">${esc(t("link_bestby_live"))}</button>${flow === "bestby" ? ` <span class="hint" style="display:inline">${esc(t("bestby_live_on"))}</span>` : ""}</div>`;
   }
   h += `<div class="rx-aux">${esc("Counting a shelf?")} <button class="rx-link" data-act="start-audit">${esc(t("audit_link"))}</button>` +
        (RX.CFG.floorcount_url ? ` · <a class="rx-link" data-act="start-floorcount" href="${esc(RX.CFG.floorcount_url)}" target="_blank" rel="noopener">${esc(t("floorcount_link"))}</a>` : "") + `</div>`;
@@ -237,7 +242,8 @@ function renderMenu(){
   const m = $("rxMenu");
   m.innerHTML = `<button class="rx-menuitem" role="menuitem" data-act="menu-sounds">${esc(RX.soundOn() ? t("menu_sounds_on") : t("menu_sounds_off"))}</button>
     <button class="rx-menuitem" role="menuitem" data-act="menu-refresh-pack">${esc(t("menu_refresh"))}</button>
-    <button class="rx-menuitem" role="menuitem" data-act="menu-signout">${esc(t("menu_signout"))}</button>`;
+    <button class="rx-menuitem" role="menuitem" data-act="menu-signout">${esc(t("menu_signout"))}</button>
+    <button class="rx-menuitem" role="menuitem" data-act="menu-close" data-close="3">${esc(t("menu_close"))}</button>`;
 }
 RX.registerAct("hdr-flow", () => {
   if(pend()){ U.toast(t("finish_first")); return; }
@@ -245,6 +251,7 @@ RX.registerAct("hdr-flow", () => {
   const s = $("rxStart"); if(s){ s.classList.add("rx-pulse"); setTimeout(() => s.classList.remove("rx-pulse"), 1500); s.scrollIntoView({block:"nearest"}); }
 });
 RX.registerAct("hdr-menu", () => { const m = $("rxMenu"); m.hidden = !m.hidden; if(!m.hidden) renderMenu(); return "stop"; });
+RX.registerAct("menu-close", () => { $("rxMenu").hidden = true; const sc = $("scan"); if(sc) sc.focus(); return "stop"; });
 RX.registerAct("menu-sounds", () => { RX.setSound(!RX.soundOn()); renderMenu(); });
 RX.registerAct("menu-refresh-pack", () => { $("rxMenu").hidden = true; RX.pack.load({force:true}); });
 RX.registerAct("menu-signout", () => { $("rxMenu").hidden = true; const b = $("signout"); if(b) b.click(); });
