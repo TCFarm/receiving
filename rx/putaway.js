@@ -12,8 +12,10 @@
      / scanned backstock date is OLDER than this case (`rank().fefo.measured`). An ESTIMATED date (the dated book) is advice
      text in the panel and nothing more. Same date is not older.
    • ⛔ A TEMPERATURE MISMATCH asks (`temp-yes` / `temp-no`); only Yes records it, with TempConfirmed.
-   • ⛔ AN ARMED SHELF IS SINGLE-SHOT AND EXPIRES (BIN_ARM, 4 min): a tag scanned with nothing pending arms the NEXT ONE item;
-     the item consumes it whether or not it is used; a stale one is dropped and D2 asks for a tag. There is no sticky bin.
+   • ⭐ ROUND 4 (D12) SHELF MODE: a tag scanned with nothing pending in Put away here is the STICKY current shelf (banner "Putting away
+     into …", Done / Escape / 10 min idle clear it, a different tag switches); every case goes there with no tag scan, FEFO/temperature
+     still checked per case. (The ONE-SHOT armed shelf of rounds 1-3 survives only in the staged tray, staging.js.)
+   • ⭐ ROUND 4: the `nopo` step (D9 hold) and the exceptions card's "Receive it (we'll ask KeHE for a credit)" (D13).
    • ⛔ NO SKIP. Shadow and live both: the practice toggle (start.js) is how a volunteer opts in; a case that cannot be put
      away is "Cancel this case" (BB row saved, no intent). If the pack never loaded the shelf step cancels with a plain flash
      rather than write an intent with no shelf.
@@ -71,13 +73,15 @@ const COPY_ADD = {
   samesku_diff:    "That case has a different date ({date}), so it cannot be added to this one.",
   samesku_newmsg:  "Scan the shelf for the first case, then scan this one again. That scan was not recorded.",
   samesku_added:   "Added — {n} units · {c} cases.",
+  overadd_undo:    "Undo — take that case off",
+  overadd_undone:  "Took that case back off — {n} units.",
   binpick_title:   "Find the shelf tag",
   binpick_ph:      "Type part of the shelf name",
   binpick_none:    "No matching shelf.",
   binpick_used:    "used before",
   some_title:      "How many go on this shelf?",
   some_hint:       "The rest stays to be put away. You scan the shelf tag next.",
-  cancelrest_q:    "Leave {n} units unreceived? They'll show to Julia as short.",
+  cancelrest_q:    "Leave {n} units unreceived? They'll show to the buyer as short.",
   cancelrest_yes:  "Yes, leave them",
   cancelcase_q:    "Cancel this case? The best-by is still saved; it just won't go into Finale.",
   cancelcase_yes:  "Yes, cancel",
@@ -86,6 +90,7 @@ const COPY_ADD = {
   rec_h:           "Where it goes",
   rec_best:        "BEST",
   rec_more:        "More places ({n})",
+  rec_less:        "Fewer places",
   role_pick:       "Pick shelf",
   role_backstock:  "Backstock",
   role_staging:    "Staging",
@@ -97,13 +102,13 @@ const COPY_ADD = {
   rec_slow:        "slow seller",
   rec_lasthere:    "last here {d}",
   short_title:     "Short date — {days} days left ({cls} needs {need}).",
-  short_body:      "The vendor should have shipped more life than this.",
-  short_keep:      "Receive it",
+  short_body:      "KeHE should have shipped more life than this. Receiving it creates a credit request for KeHE automatically.",
+  short_keep:      "Receive it (we'll ask KeHE for a credit)",
   short_reject:    "Reject — don't put away",
   exp_title:       "It's expired. Receive it anyway?",
   exp_reject:      "Reject — set it aside",
   exp_keep:        "Receive it anyway",
-  reject_flash:    "Not received — recorded for Julia. Set it aside.",
+  reject_flash:    "Not received — recorded for the buyer. Set it aside.",
   nopack_flash:    "Shelf list isn't loaded — saved best-by only. Receive this one in the Finale app.",
   last_split_q:    "How many did you put on {bin}?",
   last_split_bad:  "Enter a number from 1 to {max}.",
@@ -111,6 +116,19 @@ const COPY_ADD = {
   last_split_stage:"Only a put-away can be split.",
   split_done:      "✓ {n} × {name} → {bin} (rest of the case)",
   split_short:     "Saved — {n} units left unreceived (short).",
+  hold_title:      "Not on the KeHE order. Set it aside in the holding area until purchasing adds it.",
+  hold_set:        "Set aside (holding)",
+  hold_hint:       "Optional: scan a hold shelf tag, or type a label, so it can be found again.",
+  hold_ph:         "Hold spot (optional)",
+  hold_flash:      "Set aside in the holding area — waiting for purchasing to add it to the PO.",
+  shelf_banner:    "Putting away into {bin}",
+  shelf_hint:      "scan a different shelf tag to switch",
+  shelf_n:         "{n} cases here",
+  shelf_n1:        "{n} case here",
+  shelf_done:      "Done with this shelf",
+  shelf_switched:  "Now putting away into {bin}.",
+  shelf_expired:   "Shelf {bin} was cleared after {m} idle minutes. Scan a shelf tag to start again.",
+  shelf_cleared:   "Shelf cleared.",
 };
 for(const k of Object.keys(COPY_ADD)) if(!(k in RX.COPY)) RX.COPY[k] = COPY_ADD[k];
 const t = RX.t;
@@ -249,6 +267,45 @@ function renderArmed(){
 RX.on("tick", renderArmed); RX.on("flow", renderArmed); RX.onBoot(renderArmed);
 RX.registerAct("binarmed-discard", () => { PA.armed.clear(); RX.sound("decide"); });
 
+/* ═══ ROUND 4 (D12) — SHELF MODE: a shelf tag scanned with nothing pending is the CURRENT SHELF until a different tag is scanned
+   (switch), "Done with this shelf" / Escape, or SHELF_IDLE (10 min) with no case put away. Every case (scan → date → qty) is placed
+   there with NO tag scan; the FEFO / temperature checks still run per case against it. Replaces the old one-shot armed shelf in
+   Put away here (the one-shot `PA.armed` stays for the staged tray). ═══ */
+const SHELF_KEY = "rx_shelf_v1";
+const shelfIdle = () => RX.CFG.SHELF_IDLE || 10 * 60 * 1000;
+const sameBin = (a, b) => String(a || "").toUpperCase() === String(b || "").toUpperCase();
+PA.shelf = {
+  notice: "",
+  /* ⛔ ROUND 5: the shelf belongs to the person who scanned it. Sign out clears sessionStorage only, so the next person on this
+     tablet (within the idle window) had their first case placed on someone else's shelf with no tag scan. */
+  get(){ const x = RX.store.get(SHELF_KEY, null); if(!(x && x.bin)) return null;
+    if(String(x.who || "") !== String(acct() || "")){ RX.store.del(SHELF_KEY); return null; }
+    return x; },
+  current(){ const x = PA.shelf.get(); if(!x) return null; if(RX.now() - (x.at || 0) > shelfIdle()){ PA.shelf.expire(); return null; } return x; },
+  set(bin){ const x = PA.shelf.get(), same = !!x && sameBin(x.bin, bin);
+    RX.store.set(SHELF_KEY, {bin, at: RX.now(), n: same ? (x.n || 0) : 0, who: acct() || ""}); PA.shelf.notice = ""; renderShelf(); return {had: !!x, same}; },
+  bump(){ const x = PA.shelf.get(); if(!x) return; x.n = (x.n || 0) + 1; x.at = RX.now(); RX.store.set(SHELF_KEY, x); renderShelf(); },
+  touch(){ const x = PA.shelf.get(); if(!x) return; x.at = RX.now(); RX.store.set(SHELF_KEY, x); },
+  clear(){ RX.store.del(SHELF_KEY); renderShelf(); },
+  expire(){ const x = PA.shelf.get(); if(!x) return; RX.store.del(SHELF_KEY);
+    PA.shelf.notice = t("shelf_expired", {bin: x.bin, m: Math.round(shelfIdle() / 60000)}); renderShelf(); try{ RX.toast(PA.shelf.notice); }catch(_){} },
+};
+function renderShelf(){
+  const el = $("rxShelfBar"); if(!el) return;
+  const x = RX.active() && RX.flow() === "direct" ? PA.shelf.get() : null;
+  let h = "";
+  if(x) h = `<div class="banner rx-banner rx-shelfbar" role="status" style="border-left-color:var(--go)"><strong>${esc(t("shelf_banner", {bin: "\u0000"})).replace("\u0000", `<span class="num" id="rxShelfBin">${esc(x.bin)}</span>`)}</strong>
+      <span class="hint" style="display:inline"> · ${esc(t("shelf_hint"))} · <span id="rxShelfN">${esc(t((x.n || 0) === 1 ? "shelf_n1" : "shelf_n", {n: x.n || 0}))}</span></span>
+      <button type="button" class="rx-btn" data-act="shelf-done" data-close="3" style="margin-left:8px">${esc(t("shelf_done"))}</button></div>`;
+  else if(PA.shelf.notice && RX.active() && RX.flow() === "direct") h = `<div class="banner rx-banner" role="status" id="rxShelfNote" style="border-left-color:var(--wait)">${esc(PA.shelf.notice)}</div>`;
+  if(el.dataset.h !== h){ el.innerHTML = h; el.dataset.h = h; }
+}
+RX.on("tick", () => { const x = PA.shelf.get(); if(x && !pend() && RX.now() - (x.at || 0) > shelfIdle()) PA.shelf.expire(); renderShelf(); });
+RX.on("flow", () => { if(RX.flow() !== "direct") RX.store.del(SHELF_KEY); renderShelf(); });
+RX.on("day", () => { RX.store.del(SHELF_KEY); PA.shelf.notice = ""; renderShelf(); });
+RX.onBoot(() => { PA.shelf.current(); renderShelf(); });
+RX.registerAct("shelf-done", () => { PA.shelf.clear(); RX.toast(t("shelf_cleared")); RX.sound("decide"); });
+
 RX.registerIdle("putaway", {
   get keepScan(){ return true; },
   onScan(raw){
@@ -257,7 +314,9 @@ RX.registerIdle("putaway", {
     if(!id.info.active){
       prompt_("stop", esc(t("inactive", {bin: id.info.name})), esc(t("nothing_recorded")), undefined, {keepScan: true}); RX.sound("refused"); return true;
     }
-    PA.armed.set(id.bin); RX.sound("staged"); return true;
+    const r = PA.shelf.set(id.bin);
+    if(r.had && !r.same) RX.toast(t("shelf_switched", {bin: id.bin}));
+    RX.sound("staged"); return true;
   },
 });
 
@@ -280,16 +339,18 @@ RX.registerStep("exceptions", {
     const head = `<strong>${esc(p.prod.name)}</strong><span class="rx-pa-sub">best by ${yf(p.best)}</span>`;
     if(e.kind === "short"){
       prompt_("stop", esc(t("short_title", {days: e.days, cls: e.cls, need: e.need})), head + `<span class="rx-pa-sub">${esc(t("short_body"))}</span>`,
-        `<div class="rx-pa-btns">${btn("short-keep", t("short_keep"), "primary", "data-primary")}${btn("short-reject", t("short_reject"))}</div>`);
+        `<div class="rx-pa-btns">${btn("short-keep", t("short_keep"), "primary", "data-primary")}${btn("short-reject", t("short_reject"))}${btn("step-back", t("btn_back_count"), "", 'data-close="3"')}</div>`);
     }else{
       prompt_("stop", esc(t("exp_title")), head + `<span class="rx-pa-sub">${e.days} day${e.days === 1 ? "" : "s"} past its best-by.</span>`,
-        `<div class="rx-pa-btns">${btn("exp-reject", t("exp_reject"), "primary", "data-primary")}${btn("exp-keep", t("exp_keep"))}</div>`);
+        `<div class="rx-pa-btns">${btn("exp-reject", t("exp_reject"), "primary", "data-primary")}${btn("exp-keep", t("exp_keep"))}${btn("step-back", t("btn_back_count"), "", 'data-close="3"')}</div>`);
     }
     focusPrimary();
   },
   onScan(){ return false; },
 });
 const excCtx = () => { const s = RX.state.step; return s && s.name === "exceptions" ? s.ctx : null; };
+/* ⭐ ROUND 3: Back on a step card = back to the quantity, the item KEPT, nothing recorded (rx-core RX.backToQty) */
+RX.registerAct("step-back", () => { if(RX.state.step) RX.backToQty(); });
 RX.registerAct("short-keep", () => { const c = excCtx(); if(c) c.done({shortDated: true}); });
 RX.registerAct("exp-keep",   () => { const c = excCtx(); if(c) c.done({shortDated: true}); });
 RX.registerAct("short-reject", () => { const c = excCtx(); if(c) PA.rejectCase(c); });
@@ -299,14 +360,50 @@ RX.registerAct("exp-reject",   () => { const c = excCtx(); if(c) PA.rejectCase(c
 PA.rejectCase = function(ctx){
   const p = ctx.p, n = +p.qty || 0;
   const row = {prod: p.prod, upc: p.upc, gtin: p.gtin, best: p.best, lot: p.lot, units: n, qtyKind: null, qtyShown: p.qtyShown, _po: RX.poRef(p), _at: RX.now(), _op: acct(), id: "",
-               rx: {fields: {state: "ready", workflow: "direct", units: 0, rejected: n, shortDated: true}, flow: RX.flow()}};
+               rx: {iid: p.rx && p.rx.iid, ph: p.rx && p.rx.ph,
+                    fields: {state: "ready", workflow: "direct", units: 0, rejected: n, shortDated: true,
+                             damaged: ctx.fields.damaged || null, photoUrls: ctx.fields.photoUrls, fixNote: ctx.fields.fixNote}, flow: RX.flow()}};
   RX.intents.createFromRow(row);
+  RX.emit("committed", row);
   RX.state.step = null; PA.cur = null;
   try{ pending = null; clearPrompt(); }catch(_){}
   RX.side.clear();
   RX.call("ui", "flashText", t("reject_flash"), null);
   RX.sound("decide"); RX.state.scanLog.length = 0; RX.refresh();
 };
+
+/* ═══ ROUND 4 (D9) — NOT ON ANY PO ⇒ HOLD. The case is set aside in the holding area (a staged intent, StagedArea "Hold: not on PO",
+   RecReasons NOT_ON_PO) until purchasing adds the SKU to a PO; rx/staging.js keeps it disabled until the pack shows the line. ═══ */
+PA.HOLD_AREA = "Hold: not on PO";
+const holdCtx = () => { const s = RX.state.step; return s && s.name === "nopo" ? s.ctx : null; };
+function renderHold(ctx, notice){
+  const p = ctx.p, h = ctx.hold;
+  const body = (notice ? `<span class="rx-pa-note" role="alert">${esc(notice)}</span>` : "") + `<strong>${esc(p.prod.name)}</strong>` +
+    `<span class="rx-pa-sub">${esc(t("hold_hint"))}</span>` +
+    `<input id="rxHoldTag" class="rx-pa-search" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="60" placeholder="${esc(t("hold_ph"))}" aria-label="${esc(t("hold_ph"))}" value="${esc(h.tag)}">`;
+  prompt_("stop", esc(t("hold_title")), body,
+    `<div class="rx-pa-btns">${btn("hold-set", t("hold_set"), "primary", "data-primary")}${btn("hold-back", t("btn_back_count"), "", 'data-close="3"')}</div>`, {keepScan: true});
+}
+RX.registerStep("nopo", {
+  get keepScan(){ const a = document.activeElement; return !(a && a.id === "rxHoldTag"); },
+  applies(ctx){ const m = RX.po && RX.po.matchFor ? RX.po.matchFor(ctx.p) : null; return !!(m && m.status === "notpo"); },
+  start(ctx){ ctx.hold = {tag: ""}; renderHold(ctx); RX.sound("decide"); },
+  onEmptyEnter(ctx){ const b = document.querySelector('[data-act="hold-set"]'); if(b){ b.click(); return true; } return false; },
+  onScan(ctx, raw){
+    const id = PA.identify(raw);
+    if(id.kind === "tag"){ ctx.hold.tag = id.bin; renderHold(ctx); RX.sound("staged"); return true; }
+    return false;
+  },
+  abort(){},
+});
+document.addEventListener("input", (e) => { const c = holdCtx(); if(c && e.target && e.target.id === "rxHoldTag") c.hold.tag = e.target.value; });
+RX.registerAct("hold-set", () => {
+  const c = holdCtx(); if(!c) return;
+  const el = document.getElementById("rxHoldTag"); if(el) c.hold.tag = el.value;
+  const tag = String(c.hold.tag || "").trim().slice(0, 60);
+  c.commit({state: "staged", workflow: "staged", stagedArea: PA.HOLD_AREA + (tag ? " · " + tag : ""), recReasons: ["NOT_ON_PO"], flash: t("hold_flash")});
+});
+RX.registerAct("hold-back", () => { if(holdCtx()) RX.backToQty(); });
 
 /* ───────────────────────── the shelf step (D2) ───────────────────────── */
 PA.cur = null;                                   // {ctx, d2}
@@ -340,7 +437,8 @@ function renderMain(ctx, d2){
   if(pl) body += `<span class="rx-pa-po">${esc(t("d2_po", {msg: pl}))}</span>`;
   if(d2.pendingN) body += `<span class="rx-pa-sub"><strong>${esc(t("d2_pending_n", {n: d2.pendingN}))}</strong></span>`;
   const acts = `<div class="rx-pa-btns">${d2.left > 1 ? btn("bin-some", t("btn_some")) : ""}${btn("bin-cant-scan", t("btn_cant"))}` +
-    ((d2.portions.length || d2.late) ? btn("bin-cancel-rest", t("btn_leave_rest")) : btn("bin-cancel", t("btn_cancel_case"))) + `</div>`;
+    ((d2.portions.length || d2.late) ? btn("bin-cancel-rest", t("btn_leave_rest")) : btn("bin-cancel", t("btn_cancel_case"))) +
+    btn("shelf-back", t("btn_back_count"), "", 'data-close="3"') + `</div>`;
   prompt_("go", esc(title), body, acts, {keepScan: true});
   renderPanel(d2, p);
 }
@@ -362,11 +460,17 @@ function renderPanel(d2, p){
   r.cands.slice(0, topN).forEach((c, i) => { h += card(c, i); });
   const more = r.cands.slice(topN, topN + 5);
   if(more.length){
-    if(PA.moreOpen) more.forEach(c => { h += card(c); });
+    if(PA.moreOpen){ more.forEach(c => { h += card(c); }); h += btn("rec-less", t("rec_less"), "", 'data-close="1"'); }
     else h += btn("rec-more", t("rec_more", {n: more.length}));
   }
   RX.side.set(h + `</div>`);
 }
+/* ⭐ ROUND 3: Back on the D2 card. A late "Not all fit?" split ⇒ nothing changes, every unit stays on the first shelf. A normal case ⇒
+   back to the quantity, the item KEPT; portions already placed in memory are forgotten (nothing was written). */
+RX.registerAct("shelf-back", () => { const c = PA.cur; if(!c || c.d2.sub !== "main") return;
+  if(c.d2.late && c.d2.first){ PA.lateAbandoned(); return; }
+  RX.backToQty(); });
+RX.registerAct("rec-less", () => { PA.moreOpen = false; const c = PA.cur; if(c) renderPanel(c.d2, c.ctx.p); });
 RX.registerAct("rec-more", () => { PA.moreOpen = true; const c = PA.cur; if(c) renderPanel(c.d2, c.ctx.p); });
 
 function render(ctx, d2){
@@ -375,39 +479,44 @@ function render(ctx, d2){
     case "some": {
       prompt_("go", esc(t("some_title")), `<strong>${esc(p.prod.name)}</strong><span class="rx-pa-sub">${esc(t("some_hint"))}</span>
         <input id="rxSomeN" class="num rx-pa-num" type="text" inputmode="numeric" maxlength="4" autocomplete="off" aria-label="${esc(t("some_title"))}" value="${d2.left}">`,
-        `<div class="rx-pa-btns">${btn("bin-some-save", t("btn_save"), "primary")}${btn("bin-cancel-back", t("btn_back"))}</div>`);
+        `<div class="rx-pa-btns">${btn("bin-some-save", t("btn_save"), "primary")}${btn("bin-cancel-back", t("btn_back"), "", 'data-close="3"')}</div>`);
       setTimeout(() => { const el = $("rxSomeN"); if(el){ el.focus(); el.select(); el.onkeydown = (ev) => { if(ev.key === "Enter"){ ev.preventDefault(); const b = document.querySelector('[data-act="bin-some-save"]'); if(b) b.click(); } }; } }, 25);
       break; }
     case "bins": {
       prompt_("go", esc(t("binpick_title")), `<strong>${esc(p.prod.name)}</strong>
         <input id="rxBinQ" class="rx-pa-search num" data-act="binpick-search" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="${esc(t("binpick_ph"))}" aria-label="${esc(t("binpick_ph"))}">
         <span id="rxBinRes" class="rx-pa-results" style="display:block"></span>`,
-        `<div class="rx-pa-btns">${btn("bin-cancel-back", t("btn_back"))}</div>`);
+        `<div class="rx-pa-btns">${btn("bin-cancel-back", t("btn_back"), "", 'data-close="3"')}</div>`);
       renderBinResults("");
       setTimeout(() => { const el = $("rxBinQ"); if(el) el.focus(); }, 25);
       break; }
     case "temp": {
       const info = RX.pack.binInfo(d2.cand.bin), it = itemOf(p, d2);
       prompt_("stop", esc(t("temp_title")), `<strong>${esc(PA.tempText(it, info))}</strong>`,
-        `<div class="rx-pa-btns">${btn("temp-no", t("temp_no"), "primary", "data-primary")}${btn("temp-yes", t("temp_yes"))}</div>`);
+        `<div class="rx-pa-btns">${btn("temp-no", t("temp_no"), "primary", "data-primary")}${btn("temp-yes", t("temp_yes"))}${btn("bin-cancel-back", t("btn_back"), "", 'data-close="3"')}</div>`);
       focusPrimary(); break; }
     case "fefo": {
       prompt_("stop", esc(t("fefo_title")), `${esc(PA.fefoText(itemOf(p, d2), d2.rank))}`,
-        `<div class="rx-pa-btns">${btn("fefo-change", t("fefo_change"), "primary", "data-primary")}${btn("fefo-anyway", t("fefo_anyway"))}</div>`);
+        `<div class="rx-pa-btns">${btn("fefo-change", t("fefo_change"), "primary", "data-primary")}${btn("fefo-anyway", t("fefo_anyway"))}${btn("bin-cancel-back", t("btn_back"), "", 'data-close="3"')}</div>`);
       focusPrimary(); break; }
     case "cancel": {
       prompt_("stop", esc(t("btn_cancel_case")), esc(t("cancelcase_q")),
-        `<div class="rx-pa-btns">${btn("bin-cancel-yes", t("cancelcase_yes"), "primary", "data-primary")}${btn("bin-cancel-back", t("btn_back"))}</div>`);
+        `<div class="rx-pa-btns">${btn("bin-cancel-yes", t("cancelcase_yes"), "primary", "data-primary")}${btn("bin-cancel-back", t("btn_back"), "", 'data-close="3"')}</div>`);
       focusPrimary(); break; }
     case "cancelrest": {
       prompt_("stop", esc(t("btn_leave_rest")), esc(t("cancelrest_q", {n: d2.left})),
-        `<div class="rx-pa-btns">${btn("bin-cancel-rest-yes", t("cancelrest_yes"), "primary", "data-primary")}${btn("bin-cancel-back", t("btn_back"))}</div>`);
+        `<div class="rx-pa-btns">${btn("bin-cancel-rest-yes", t("cancelrest_yes"), "primary", "data-primary")}${btn("bin-cancel-back", t("btn_back"), "", 'data-close="3"')}</div>`);
+      focusPrimary(); break; }
+    case "overadd": {       /* ROUND 5: the added case pushed the count past what KeHE shipped (or we ordered) */
+      const o = d2.overAdd.o, fm = (x) => String(Math.round(x * 100) / 100), n = fm(o.n), m = fm(o.cap);
+      prompt_("stop", esc(t("overship_title", {n, item: p.prod.name})), `<span class="rx-pa-sub">${esc(t(o.basis === "shipped" ? "overship_body" : "overship_body_ordered", {n, m}))}</span>`,
+        `<div class="rx-pa-btns">${btn("over-add-yes", t("overship_yes", {n}), "primary", "data-primary")}${btn("over-add-undo", t("overadd_undo"), "", 'data-close="3"')}</div>`);
       focusPrimary(); break; }
     case "samesku": {
       const same = d2.same || {};
       prompt_("stop", esc(t("samesku_title", {name: p.prod.name})),
         same.diff ? `<span class="rx-pa-note">${esc(t("samesku_diff", {date: same.best}))}</span>` : `<span class="rx-pa-sub">${d2.left} units now · +${d2.units0} → ${d2.left + d2.units0}</span>`,
-        `<div class="rx-pa-btns">${same.diff ? "" : btn("samesku-add", t("samesku_add"), "primary", "data-primary")}${btn("samesku-newdate", t("samesku_new"), same.diff ? "primary" : "", same.diff ? "data-primary" : "")}</div>`);
+        `<div class="rx-pa-btns">${same.diff ? "" : btn("samesku-add", t("samesku_add"), "primary", "data-primary")}${btn("samesku-newdate", t("samesku_new"), same.diff ? "primary" : "", same.diff ? "data-primary" : "")}${btn("bin-cancel-back", t("btn_back"), "", 'data-close="3"')}</div>`);
       focusPrimary(); break; }
     default: renderMain(ctx, d2);
   }
@@ -423,9 +532,9 @@ function startShelf(ctx, opts){
   const d2 = rxs.d2 = rxs.d2 || {total, left: total, units0: total, cases: 1, portions: [], sub: "main", notice: "", pendingN: null, cand: null, late: !!opts.late, first: opts.first || null, restUnits: 0};
   PA.cur = {ctx, d2}; PA.moreOpen = false;
   recompute(d2, p);
-  const a = (!d2.late && !opts.noArmed) ? PA.armed.take() : null;
+  const a = (!d2.late && !opts.noArmed && ctx.flow === "direct") ? PA.shelf.current() : null;       // round 4: shelf mode (sticky), not one-shot
   render(ctx, d2);
-  if(a) onTag(ctx, d2, a.bin, "armed");
+  if(a){ PA.shelf.touch(); onTag(ctx, d2, a.bin, "armed"); }
 }
 PA.startShelf = startShelf;
 RX.registerStep("shelf", {
@@ -480,8 +589,9 @@ function finish(ctx, d2){
   if(!ps.length){ PA.cur = null; ctx.cancel({}); return; }
   if(d2.restUnits) ps[ps.length - 1].rejected = d2.restUnits;
   const fields = mk(ps[0]);
-  fields.extra = ps.slice(1).map(x => Object.assign(mk(x), {damaged: null}));
+  fields.extra = ps.slice(1).map(x => Object.assign(mk(x), {damaged: null, photoUrls: null, fixNote: null}));
   const staging = ps.some(x => x.staging);
+  { const sh = ctx.flow === "direct" ? PA.shelf.get() : null; if(sh && ps.some(x => sameBin(x.bin, sh.bin))) PA.shelf.bump(); }
   PA.cur = null;
   ctx.commit(fields);
   if(staging){ const l = document.querySelector("#lastArea .last"); if(l) l.insertAdjacentHTML("beforeend", `<div class="meta">${esc(t("staging_note"))}</div>`); }
@@ -521,9 +631,27 @@ RX.registerAct("samesku-add", () => {
   const c = cs(); if(!c || c.d2.sub !== "samesku" || c.d2.same.diff) return;
   const d2 = c.d2, p = c.ctx.p, add = d2.units0;
   p.qty = (+p.qty || 0) + add; d2.left += add; d2.total += add; d2.cases = (d2.cases || 1) + 1;
+  const kind0 = p.qtyKind;
   p.qtyKind = "part";                                   // ⛔ a summed pile is not evidence of the CASE size (no !PACK row)
   recompute(d2, p);
+  /* ⛔ ROUND 5: the over-shipment question ran ONCE, before the shelf step. An added case could push the count past what KeHE shipped
+     with no question (held for Julia), or stretch an earlier "Yes, 12 is right" to 18 (posted without anyone confirming 18). Ask again. */
+  let o = null; try{ o = RX.po && RX.po.overCap ? RX.po.overCap(p, +p.qty || 0) : null; }catch(_){ o = null; }
+  if(o && o.over){ d2.overAdd = {add, kind: kind0, prev: !!c.ctx.fields.overConfirmed, o}; c.ctx.fields.overConfirmed = false; setSub(c.ctx, d2, "overadd"); RX.sound("decide"); return; }
   noticeMain(c.ctx, d2, esc(t("samesku_added", {n: d2.total, c: d2.cases})), "saved");
+});
+RX.registerAct("over-add-yes", () => {
+  const c = cs(); if(!c || c.d2.sub !== "overadd") return;
+  const d2 = c.d2; c.ctx.fields.overConfirmed = true; d2.overAdd = null;
+  noticeMain(c.ctx, d2, esc(t("samesku_added", {n: d2.total, c: d2.cases})), "saved");
+});
+RX.registerAct("over-add-undo", () => {        // Escape = this (data-close 3): the add is taken back, nothing recorded
+  const c = cs(); if(!c || c.d2.sub !== "overadd") return;
+  const d2 = c.d2, p = c.ctx.p, x = d2.overAdd;
+  p.qty = (+p.qty || 0) - x.add; d2.left -= x.add; d2.total -= x.add; d2.cases = Math.max(1, (d2.cases || 1) - 1); p.qtyKind = x.kind;
+  c.ctx.fields.overConfirmed = x.prev; d2.overAdd = null;
+  recompute(d2, p);
+  noticeMain(c.ctx, d2, esc(t("overadd_undone", {n: d2.total})), "decide");
 });
 RX.registerAct("samesku-newdate", () => { const c = cs(); if(c && c.d2.sub === "samesku") noticeMain(c.ctx, c.d2, esc(t("samesku_newmsg")), "decide"); });
 
@@ -553,7 +681,7 @@ RX.registerAct("last-split", () => {
   PA.lastSplit = {row, iid: rec.iid, bin: f.Location, units: +f.Units || 0};
   RX.flash(`<div class="last rx-last" role="group"><div class="nm">${esc(t("last_split_q", {bin: f.Location}))}</div>
     <input id="rxLastN" class="num rx-pa-num" type="text" inputmode="numeric" maxlength="4" autocomplete="off" aria-label="${esc(t("last_split_q", {bin: f.Location}))}">
-    <div class="rx-lastbtns">${btn("last-split-save", t("btn_save"), "primary")}${btn("last-split-cancel", t("btn_cancel"))}</div></div>`);
+    <div class="rx-lastbtns">${btn("last-split-save", t("btn_save"), "primary")}${btn("last-split-cancel", t("btn_cancel"), "", 'data-close="3"')}</div></div>`);
   setTimeout(() => { const el = $("rxLastN"); if(el){ el.focus(); el.onkeydown = (ev) => { if(ev.key === "Enter"){ ev.preventDefault(); const b = document.querySelector('[data-act="last-split-save"]'); if(b) b.click(); } }; } }, 25);
 });
 RX.registerAct("last-split-cancel", () => { PA.lastSplit = null; const r = RX.state.lastRow; if(r && r.rx && RX.intents.forRow(r).length) RX.call("ui", "flashPut", r, RX.intents.forRow(r)); else RX.flash(""); });
@@ -593,7 +721,10 @@ function finishLate(ctx, d2){
   const at0 = Date.parse(orig.ScanAt || "");
   const row = first.row, synth = {prod: p.prod, upc: p.upc, gtin: p.gtin, best: p.best, lot: p.lot, units: p.qty, qtyKind: "part", qtyShown: p.qtyShown, _po: RX.poRef(p) || "",
                                   _at: isNaN(at0) ? (row._at || RX.now()) : at0, _op: acct(), id: row.id || ""};
-  const keepMode = (f) => { if(orig.PageMode) f.PageMode = orig.PageMode; if(orig.ScanAt) f.ScanAt = orig.ScanAt; return f; };
+  /* ⛔ ROUND 5: ...and the case's DECISIONS: the crew's over-shipment Yes (else the poster holds the portion OVER_UNCONFIRMED) and
+     short-dated (else the KeHE credit list loses those units). */
+  const keepMode = (f) => { if(orig.PageMode) f.PageMode = orig.PageMode; if(orig.ScanAt) f.ScanAt = orig.ScanAt;
+    if(orig.OverConfirmed === true) f.OverConfirmed = true; if(orig.ShortDated === true) f.ShortDated = true; return f; };
   const rawScans = JSON.stringify(RX.state.scanLog.slice());
   const kids = [];
   if(!ps.length && d2.restUnits){      // nothing more was put away: the rest is recorded as short, on an intent of its own
