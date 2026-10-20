@@ -988,6 +988,15 @@ async function handleScan(raw){
       const d0 = parseGs1Date(unresolved.bb);
       if(d0 && plausibleBB(d0)) pending.best = d0;
     }
+    /* ⭐ PM-2923 (Jack, 2026-10-20): a code we KNOW is a product still being set up in the Listing Studio gets told so —
+       what it is, its status, who to ask — instead of "not in our system". The learn/find options are hidden for it (it is
+       not an existing product); the date path is unchanged, and the date attaches once the product exists. */
+    const known = window.RXLearn ? await RXLearn.pendingFor([upc, gtin, rawDigits]) : null;
+    if(known){
+      pending.known = known; pending.idAsked = true;
+      pending.prod.name = ("BEING SET UP — " + (known.name || known.sku || v)).slice(0, 120);
+      return RXLearn.showPending(known);
+    }
     if(!looksCase && tries<=1){
       /* a plain retail code: say the Finale instruction ONCE, then get the date */
       prompt_("stop","This barcode is not in our system",
@@ -1313,9 +1322,13 @@ function askDate(){
          <span class="bbread" style="display:block">${yearFirst(pending.splitDate)}</span>
          Check it against the label. <strong>Enter</strong> if it is right, or fix it.</span>` : "";
   prompt_("", pending.splitDate ? "Check this date"
-              : (unnamed ? "We do not know this code — what is the best-by?"
+              : (unnamed && pending.known ? "Being set up — what is the best-by?"
+              : unnamed ? "We do not know this code — what is the best-by?"
                       : "No date on the label — enter it"),
-    splitNote + (unnamed
+    splitNote + (unnamed && pending.known
+      ? `<strong>${esc(pending.known.name || pending.known.sku || rawCode)}</strong> is still being set up. The date
+         attaches to it automatically once it exists — hold the case.`
+      : unnamed
       ? `<span class="num">${esc(rawCode)}</span> is not in the catalog.
          <strong>The date is worth more than the code</strong> — record it here and we
          will attach it to the product once the UPC is known.`
@@ -1334,7 +1347,9 @@ function askDate(){
        <span class="hint" style="display:inline;margin-left:9px">
          soap, paper goods, cleaning supplies — many carry none</span>
      </div>` +
-    (unnamed
+    (unnamed && pending.known
+      ? `<div style="margin-top:13px"><button id="pendSkip">Skip this carton</button></div>`
+      : unnamed
       /* ⛔ AND AN HONEST WAY OUT. Without "Skip this carton" the only exits from
          a forced prompt are a made-up date or "no date printed" — a FALSE answer
          that would then be learned centrally and stop us ever asking again. A
