@@ -51,6 +51,8 @@
   .prompt.stop{border-left-color:var(--stop);background:var(--stop-soft)}
   .prompt h2{font-size:18px;margin:0 0 6px;font-weight:700}
   .prompt p{margin:0 0 11px;font-size:14.5px;color:var(--ink-2)}
+  .pcloseRow{margin-top:12px}
+  button.pclose{min-height:52px;min-width:120px}
   .dateRow{display:flex;gap:11px;flex-wrap:wrap;align-items:center}
   .dateRow input{font-family:var(--mono);font-size:22px;padding:11px 13px;border:1px solid var(--line);
                  border-radius:4px;background:var(--card);color:var(--ink);min-height:52px}
@@ -147,6 +149,7 @@
   <div id="pendingArea"></div>
   <div id="rxBanner"></div>
   <div id="rxArmed"></div>
+  <div id="rxShelfBar"></div>
   <div id="rxStart" class="rx-start" hidden></div>
 
     <div class="scanbox" id="scanbox" style="border-color:var(--line)">
@@ -219,6 +222,7 @@
 <script src="rx/recommend.js"></script>
 <script src="rx/putaway.js"></script>
 <script src="rx/staging.js"></script>
+<script src="rx/photos.js"></script>
 <script>
 "use strict";
 /* ============================================================================
@@ -734,7 +738,7 @@ function modeGate(){
       `once the mode has changed.`,
       /* ⛔ REVIEW FIX: offline, the switch can wait indefinitely — so it must be cancellable,
          or every scan is refused until the network returns. */
-      `<button id="burstOk">OK</button>
+      `<button id="burstOk" data-act="burst-ok" data-close="3">OK</button>
        <button id="cancelSwitch">Stay in ${isAudit()?"AUDIT":"RECEIVING"} instead</button>`);
     return true;
   }
@@ -1602,7 +1606,7 @@ function showDateModal(title, bodyHtml, onYes){
   closeDateModal();
   const el=document.createElement("div"); el.id="dcModal"; el.setAttribute("role","alertdialog");
   el.innerHTML=`<div class="dcBox"><h2>${title}</h2><div>${bodyHtml}</div>
-    <div class="dcBtns"><button class="primary" id="dcFix">Fix it</button><button id="dcYes">Yes, it's correct</button></div></div>`;
+    <div class="dcBtns"><button class="primary" id="dcFix" data-act="date-fix" data-close="3">Fix it</button><button id="dcYes">Yes, it's correct</button></div></div>`;
   document.body.appendChild(el);
   document.getElementById("dcFix").addEventListener("click", closeDateModal);
   document.getElementById("dcYes").addEventListener("click", ()=>{ closeDateModal(); onYes(); });
@@ -2330,6 +2334,17 @@ function prompt_(kind,title,body,actions,opts={}){
   if(promptTimer){ clearTimeout(promptTimer); promptTimer = null; }
   disarmUnit();       // ⛔ B3: a new prompt ends any armed unit scan (re-armed by #unkUnit after)
   $("promptArea").innerHTML=`<div class="prompt ${kind}"><h2>${title}</h2><p>${body}</p>${actions||""}</div>`;
+  /* ⭐⭐ ROUND 3 (Jack, 2026-10-19): EVERY PANEL HAS A WAY OUT. "Can't scan it?" opened "Find the product by name" with no
+     way to close it. A prompt that holds a control and has no Close/Back/Cancel of its own (`[data-close]`) gets the standard
+     one here, so a call site can never forget it. Escape clicks the same control (`closeTopPanel`). The label says what it
+     does: with an item open it ABANDONS that item (nothing recorded, scan it again); otherwise it just closes. */
+  if(!opts.noClose){
+    const card=$("promptArea").querySelector(".prompt");
+    if(card && card.querySelector("button,input,select,textarea,label[for]") && !card.querySelector("[data-close]")){
+      card.insertAdjacentHTML("beforeend",
+        `<div class="pcloseRow"><button type="button" class="pclose" id="promptClose" data-act="prompt-close" data-close="3">${pending ? "Cancel \u2014 scan it again" : "Close"}</button></div>`);
+    }
+  }
   /* ⭐ B4(b): a FAILED READ has nothing pending, and the obvious next move is to
      scan again — so the scan box keeps focus and the next scan goes straight in
      (the B1 burst guard only ever polices OTHER boxes). */
@@ -2344,7 +2359,7 @@ function prompt_(kind,title,body,actions,opts={}){
      ⭐ Detect a control ANYWHERE in the rendered prompt instead of trusting the
      call site to have used the right argument. */
   const interactive = !!actions ||
-        !!$("promptArea").querySelector("button,input,select,textarea,label[for]");
+        !!$("promptArea").querySelector("button:not(.pclose),input,select,textarea,label[for]");
   if(!interactive) promptTimer = setTimeout(clearPrompt, 2800);
 }
 /* One button, reused by every failure prompt. `capture=environment` opens the
@@ -2576,6 +2591,89 @@ function clearPrompt(){
   disarmUnit();
   if(promptTimer){ clearTimeout(promptTimer); promptTimer = null; } $("promptArea").innerHTML=""; $("scan").value=""; $("scan").focus(); }
 
+/* ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+   ⭐⭐ ROUND 3 (Jack, 2026-10-19): EVERY PANEL THE PAGE CAN OPEN HAS A WAY OUT, AND ESCAPE DOES THE SAME THING.
+   The contract: a panel's Close / Back / Cancel control carries `data-close="N"` (N = depth: 1 innermost … 3 the panel
+   itself). Escape clicks the shallowest visible one in the top-most area — so Escape and the button can never drift apart.
+   ⛔ Closing NEVER records anything. The full list of panels and what Close does for each is in the header of
+   rx/rx-core.js ("CLOSING EVERY PANEL"). A prompt that has no control of its own gets the standard footer in `prompt_`;
+   its default is `closePromptDefault` (below): with an item open it ABANDONS that item — no row, no queue entry, the held
+   date (if the item took one) goes back to being held — otherwise it just closes. The scan box ends up focused.
+   ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════ */
+function shownEl(el){ return !!(el && !el.closest("[hidden]") && el.getClientRects().length); }
+function closeControlIn(root){
+  if(!root) return null;
+  let best=null, bestN=99;
+  for(const el of root.querySelectorAll("[data-close]")){
+    if(!shownEl(el) || el.disabled) continue;
+    const n=parseInt(el.getAttribute("data-close"),10)||3;
+    if(n<bestN){ best=el; bestN=n; }
+  }
+  return best;
+}
+function pageToast(msg){
+  if(window.RX && RX.toast){ RX.toast(msg); return; }
+  let el=$("pgToast");
+  if(!el){ el=document.createElement("div"); el.id="pgToast"; el.setAttribute("role","status");
+    el.style.cssText="position:fixed;left:50%;bottom:20px;transform:translateX(-50%);background:var(--ink);color:var(--ground);padding:12px 18px;border-radius:6px;z-index:9998";
+    document.body.appendChild(el); }
+  el.textContent=msg; el.hidden=false; setTimeout(()=>{ el.hidden=true; },4000);
+}
+function abandonPending(){
+  const had=!!pending;
+  /* a date this item took from the held-date banner goes back to being held — the operator did not discard it */
+  if(pending && pending.fromHeld && pending.best && pending.heldRaw){
+    heldDate={date:pending.best, at:Date.now(), raw:pending.heldRaw}; renderHeld(); }
+  if(window.RX && RX.abandon){ try{ RX.abandon(); }catch(_){} }     // an open shelf / stage card ends with it
+  pending=null; unresolved=null; unitScanFor=null; renderArmed();
+  return had;
+}
+function closePromptDefault(src){
+  const card=$("promptArea").querySelector(".prompt"); if(!card) return false;
+  const had=abandonPending();
+  clearPrompt();
+  if(had) pageToast("Cancelled \u2014 nothing was recorded. Scan the case again.");
+  return true;
+}
+function closeTopPanel(src){
+  if(document.getElementById("dcModal")){ closeDateModal(); return true; }      // "Fix it": nothing changes
+  let closed=false;
+  /* the modal-ish overlays first (drawer, menu) ... */
+  for(const sel of ["#rxDrawer","#rxMenu"]){
+    const c=closeControlIn(document.querySelector(sel));
+    if(c){ c.click(); closed=true; break; }
+  }
+  /* ... then the inline areas: the SHALLOWEST control across them wins (a sub-panel — the qty card's "Some damaged" box, a
+     staged row's "Not put away?", "More places" — closes before the panel it sits in); a tie goes to the earlier area */
+  if(!closed){
+    let best=null, bestN=99;
+    for(const sel of ["#promptArea","#rxSide","#lastArea","#rxTray","#rxStart","#rxShelfBar"]){
+      const c=closeControlIn(document.querySelector(sel)); if(!c) continue;
+      const n=parseInt(c.getAttribute("data-close"),10)||3;
+      if(n<bestN){ best=c; bestN=n; }
+    }
+    if(best){ best.click(); closed=true; }
+    else{
+      const pa=document.querySelector("#promptArea");
+      if(pa && pa.querySelector(".prompt")) closed=closePromptDefault(src);    // a notice with no control of its own
+    }
+  }
+  if(!closed){ const tt=$("rxToast"); if(tt && !tt.hidden){ tt.hidden=true; closed=true; } }
+  if(closed) setTimeout(()=>{ const a=document.activeElement;
+    if(!$("promptArea").innerHTML && $("app").style.display!=="none" && (!a || a===document.body)) $("scan").focus(); },0);
+  return closed;
+}
+document.addEventListener("keydown", e=>{
+  if(e.key!=="Escape" || e.defaultPrevented || e.isComposing) return;
+  if(closeTopPanel("escape")) e.preventDefault();
+});
+document.addEventListener("click", e=>{
+  if(e.target && e.target.closest && e.target.closest("#promptClose")){
+    if(window.RX && RX.hasAct && RX.hasAct("prompt-close")) return;          // the RX router already handled it
+    closePromptDefault("button");
+  }
+});
+
 document.addEventListener("click",e=>{
   /* ⛔ B2 (2026-09-23): "Can't scan it?" is a NEW carton with no scanned code, so
      it must not inherit an earlier carton's codes (a wrong permanent alias).
@@ -2634,7 +2732,7 @@ document.addEventListener("click",e=>{
        <strong>The very next thing you scan is taken as the unit</strong> — once, whether
        it matches or not.
        <span class="hint">⛔ It must be a unit from THIS carton.</span>`,
-      `<button class="unitCancel" id="unitCancel">Cancel — I can&rsquo;t get a unit</button>`);
+      `<button class="unitCancel" id="unitCancel" data-act="unit-cancel" data-close="3" style="min-height:48px">Cancel — I can&rsquo;t get a unit</button>`);
     unitScanFor = {...unresolved, t: Date.now(), back};
     renderArmed();
     $("scan").focus();     // ⭐ the unit scan has to land in the scan box
@@ -3088,7 +3186,7 @@ function showBurstRefusal(code){
       : `<strong>That scan was not recorded.</strong> Close this message first.<br>`) +
     `⛔ The barcode you just scanned${shown ? ` (<span class="num">${shown}</span>)` : ""} was
      <strong>NOT recorded</strong> and nothing was typed into the box. Scan it again afterwards.` +
-    (pending ? "" : ` <button id="burstOk" style="margin-left:8px">OK</button>`);
+    ` <button id="burstOk" data-act="burst-ok" data-close="1" style="margin-left:8px;min-height:48px">${pending ? "Got it" : "OK"}</button>`;
 }
 document.addEventListener("keydown", e=>{
   const area = $("promptArea");
@@ -3127,7 +3225,12 @@ document.addEventListener("keydown", e=>{
   kRun.chars += e.key; kRun.last = now;
   if(kRun.chars.length >= BURST_MIN_CHARS) refuse();
 }, true);
-document.addEventListener("click", e=>{ if(e.target && e.target.id==="burstOk") clearPrompt(); });
+document.addEventListener("click", e=>{
+  if(!(e.target && e.target.id==="burstOk")) return;
+  /* with an item open the message is just removed (the item's own question stays); otherwise the whole notice closes */
+  if(pending){ const m=$("burstMsg"); if(m) m.remove(); const f=$("qty")||$("typed")||document.querySelector("#promptArea [data-primary]")||$("scan"); if(f) f.focus(); }
+  else clearPrompt();
+});
 $("scan").addEventListener("keydown",e=>{
   if(e.key==="Enter"){ e.preventDefault(); const v=$("scan").value; $("scan").value="";
     if(!v.trim() && window.RX && RX.onEmptyEnter()) return;
