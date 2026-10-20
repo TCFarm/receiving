@@ -230,6 +230,48 @@ function cancelFlow(){
   if(typeof clearPrompt === "function") clearPrompt();
 }
 
+/* ── PM-2923 (Jack, 2026-10-20): "we know what this product is, it needs to be finalized in the product listing, please ask
+   whoever is working on that to finish it". The mini publishes Receiving/pending_products.json (lib/pending_products.py) on the
+   ClaudeAgents drive; a code the catalog cannot resolve is looked up there BEFORE it is called unknown. ── */
+const PEND_PATH = "Receiving/pending_products.json", KEY_P = "pending_products_v1", PEND_MS = 60000;
+S.pend = ls.get(KEY_P, null);
+S.pendAt = 0;
+const pkey = (c) => String(c == null ? "" : c).replace(/\D/g, "").replace(/^0+/, "");
+async function loadPending(force){
+  if(typeof graph !== "function") return;
+  if(!force && Date.now() - S.pendAt < PEND_MS) return;
+  S.pendAt = Date.now();
+  try{
+    await ids();
+    const j = await G(`/sites/${S.siteId}/drive/root:/${PEND_PATH.split("/").map(encodeURIComponent).join("/")}:/content`);
+    if(j && j.items && typeof j.items === "object"){ S.pend = j; ls.set(KEY_P, j); }
+  }catch(_){ /* keep the last copy; its `built` time is shown */ }
+}
+async function pendingFor(codes){
+  await loadPending(false);
+  const items = (S.pend && S.pend.items) || {};
+  for(const c of codes || []){ const k = pkey(c); if(k && items[k]) return Object.assign({_built: S.pend.built || "", _code: String(c)}, items[k]); }
+  return null;
+}
+function builtText(iso){
+  const ms = Date.parse(iso || ""); if(isNaN(ms)) return "";
+  const d = new Date(ms); return d.toLocaleString([], {month:"numeric", day:"numeric", hour:"numeric", minute:"2-digit"});
+}
+function showPending(it){
+  try{ if(typeof reject === "function") reject("PENDING_PRODUCT", `${it._code} :: ${it.status} ${it.sku || ""}`.slice(0, 60), it._code); }catch(_){}
+  prompt_("stop", "We know this product — it's still being set up",
+    `<strong>${e_(it.brand ? it.brand + " " : "")}${e_(it.name || it.sku || "")}</strong>${it.storage ? ` · ${e_(it.storage)}` : ""}
+     <br>Barcode <span class="num">${e_(it._code)}</span>${it.sku ? ` · SKU <span class="num">${e_(it.sku)}</span>` : ""}
+     <br><br>${e_(it.says)}<br><strong>${e_(it.ask)}</strong>
+     <br>Once it is finished in the Listing Studio it can be received in Finale and published.
+     <br><span class="hint">Listing Studio status as of ${e_(builtText(it._built) || "unknown")}.</span>`,
+    `<div style="margin-top:6px"><button class="primary" id="pendGo">Enter the date and hold the case</button>
+       <button id="pendSkip">Skip this carton</button>
+       <div class="hint">Put the case in the HOLDING area. The date attaches to the product automatically once it is set up —
+         nobody has to match it by hand.</div></div>`);
+}
+setTimeout(() => { loadPending(true); }, 3500);
+
 /* Clicks go through the core router (RX.registerAct) so the coverage gate sees a handler for every learn-* button. */
 const ACTS = { "learn-start": () => start(), "learn-cancel": () => cancelFlow(), "learn-next1": () => { if(S.unitTicked) find(); },
                "learn-pick": (a) => confirm_(a.el.getAttribute("data-sku")), "learn-back": () => find(),
@@ -249,5 +291,5 @@ document.addEventListener("change", (e) => {
 
 setTimeout(() => { refresh(true); flush(); }, 3000);
 setInterval(() => { refresh(false); flush(); }, REFRESH_MS);
-window.RXLearn = { setCandidate, start, apply, refresh, flush, learnBtn, validCheck, sizeOf, state: S };
+window.RXLearn = { setCandidate, start, apply, refresh, flush, learnBtn, validCheck, sizeOf, pendingFor, showPending, loadPending, state: S };
 })();
