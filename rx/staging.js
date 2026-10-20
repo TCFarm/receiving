@@ -49,6 +49,7 @@ const COPY_ADD = {
   stage_enter:     "ENTER",
   stage_only:      "Only some",
   stage_back:      "Back",
+  dec_back_toast:  "Nothing was moved.",
   stage_anyspot:   "any spot — no history yet",
   stage_older:     "older dates there",
   stage_choose:    "Choose the cart",
@@ -62,7 +63,7 @@ const COPY_ADD = {
   staged_by:       "staged {at} by {who}",
   staged_you:      "you",
   staged_cancel:   "Not put away — take it off the list",
-  staged_cancel_q: "It was never received. Julia will see it as not received.",
+  staged_cancel_q: "It was never received. The buyer will see it as not received.",
   staged_cancel_yes:"Yes, take it off",
   staged_cancel_no:"Keep it",
   tray_h:          "In hand (tray)",
@@ -89,8 +90,11 @@ const COPY_ADD = {
   placing:         "Placing…",
   leftovers:       "{n} staged items not put away (oldest {age})",
   leftovers_open:  "Put away now",
-  inactive_card:   "{bin} is switched off in Finale. Use another shelf, or tell Julia.",
+  inactive_card:   "{bin} is switched off in Finale. Use another shelf, or tell the buyer.",
   tray_cd_note:    "Still there?",
+  hold_wait:       "Waiting for purchasing to add it to the PO",
+  hold_wait_card:  "{name} is on hold — waiting for purchasing to add it to the PO.",
+  hold_wait_close: "Close",
 };
 for(const k of Object.keys(COPY_ADD)) if(!(k in RX.COPY)) RX.COPY[k] = COPY_ADD[k];
 const t = RX.t;
@@ -134,6 +138,21 @@ const pollEvery = () => RX.CFG.STAGED_POLL || 60 * 1000;
 const catOf = (sku) => { try{ return (CATALOG_BY_SKU && CATALOG_BY_SKU[sku]) || {}; }catch(_){ return {}; } };
 const nameOf = (sku) => { const si = RX.pack.skuInfo(sku); return (si && si.name) || catOf(sku).name || sku; };
 const nice = (op) => { const s = String(op || "").split("@")[0].replace(/[._]+/g, " ").trim(); return s ? s.replace(/\b\w/g, c => c.toUpperCase()) : "someone"; };
+/* ⭐ ROUND 4 (D9): a "Hold: not on PO" record is NOT put-away-able until the current pack shows its SKU on an open PO line */
+const isHold = (r) => String(r.area || "").indexOf(PA.HOLD_AREA || "Hold: not on PO") === 0;
+/* ⛔ ROUND 5: the SAME rule as the portal's Hold tab (kehe-orders/receiving.js openLineFor): a pack PO line for the SKU with OPEN units
+   (open_units, else ordered − received). A line that is already fully received is not a place to receive the held case into. */
+const numOf = (v) => (typeof v === "number" ? (isFinite(v) ? v : null) : (typeof v === "string" && /^\s*-?\d+(\.\d+)?\s*$/.test(v) ? +v : null));
+const openLine = (sku) => {
+  if(!RX.pack.data) return null;
+  for(const x of RX.pack.poLinesBySku(sku)){ const l = x.line || {};
+    const o = numOf(l.open_units) != null ? numOf(l.open_units) : (numOf(l.ordered_units) != null && numOf(l.received_units) != null ? numOf(l.ordered_units) - numOf(l.received_units) : null);
+    if(o != null && o > 0) return x; }
+  return null;
+};
+const holdReady = (r) => { try{ return !!openLine(r.sku); }catch(_){ return false; } };
+const holdWaiting = (r) => isHold(r) && !holdReady(r);
+const groupOf = (r) => holdWaiting(r) ? (PA.HOLD_AREA || "Hold: not on PO") : (isHold(r) ? (RX.pack.areaOf(r.bin) || t("staged_noarea")) : (r.area || t("staged_noarea")));
 const whoText = (r) => (r.by && r.by === acct()) ? t("staged_you") : nice(r.by);
 
 ST.state = {list: [], listAt: 0, loading: false, startedAt: 0, err: "", gen: 0, area: null, expanded: null, confirm: null, hidden: new Set(),
@@ -170,7 +189,7 @@ const nowLate = () => {
   const d = new Date(RX.now()), hm = String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
   return hm >= leftoverAt();
 };
-ST.late = () => ST.records().length > 0 && nowLate();
+ST.late = () => ST.records().filter(r => !holdWaiting(r)).length > 0 && nowLate();
 
 /* ───────────────────────── reading the list (limit + generation guard) ───────────────────────── */
 const shouldPoll = () => RX.active() && (RX.mode() === "live" || RX.flowActive());
@@ -190,7 +209,7 @@ ST.refresh = async function(){
   }finally{
     if(gen === S.gen){
       S.loading = false;
-      if(!S.err && RX.mode() === "live" && !S.autoOpened && RX.flow() === null && !pend() && ST.records().length){ S.autoOpened = true; RX.setFlow("staged"); }
+      if(!S.err && RX.mode() === "live" && !S.autoOpened && !RX.flowChosen() && !pend() && ST.records().length){ S.autoOpened = true; RX.setFlow("staged"); }
       ST.render(); RX.refresh();
     }
   }
@@ -201,10 +220,10 @@ RX.registerAct("staged-retry", () => ST.refresh());
 const trayItems = () => S.tray.items.map(x => ({x, r: byIid(x.iid)})).filter(y => y.r);
 function chipsHtml(all){
   const groups = new Map();
-  for(const r of all){ const k = r.area || t("staged_noarea"); groups.set(k, (groups.get(k) || 0) + 1); }
+  for(const r of all){ const k = groupOf(r); groups.set(k, (groups.get(k) || 0) + 1); }
   let sel = S.area;
   if(sel == null){
-    const mine = new Map(); for(const r of all) if(r.by === acct()){ const k = r.area || t("staged_noarea"); mine.set(k, (mine.get(k) || 0) + 1); }
+    const mine = new Map(); for(const r of all) if(r.by === acct()){ const k = groupOf(r); mine.set(k, (mine.get(k) || 0) + 1); }
     let best = null, n = 0; for(const [k, v] of mine) if(v > n){ best = k; n = v; }
     sel = best || "all";
   }
@@ -224,7 +243,7 @@ function trayBar(){
       const u = x.take || r.units;
       h += `<div class="rx-st-tline" data-iid="${esc(r.iid)}"><span>${esc(nameOf(r.sku))}</span><span class="num">${u}${x.take && x.take < r.units ? " of " + r.units : ""} u</span>
         ${S.some && S.some.iid === r.iid
-          ? `<input id="rxTrayN" class="num rx-st-n" type="text" inputmode="numeric" maxlength="4" autocomplete="off" aria-label="${esc(t("tray_some_q"))}" placeholder="${esc(t("tray_some_q"))}">${btn("tray-some-save", t("tray_some_save"), "primary", `data-iid="${esc(r.iid)}"`)}${btn("tray-some-cancel", t("btn_cancel"))}`
+          ? `<input id="rxTrayN" class="num rx-st-n" type="text" inputmode="numeric" maxlength="4" autocomplete="off" aria-label="${esc(t("tray_some_q"))}" placeholder="${esc(t("tray_some_q"))}">${btn("tray-some-save", t("tray_some_save"), "primary", `data-iid="${esc(r.iid)}"`)}${btn("tray-some-cancel", t("btn_cancel"), "", 'data-close="1"')}`
           : (r.units > 1 ? btn("tray-some", t("tray_some"), "", `data-iid="${esc(r.iid)}"`) : "")}
         ${btn("tray-remove", "✕", "", `data-iid="${esc(r.iid)}" aria-label="${esc(t("tray_remove"))} ${esc(nameOf(r.sku))}"`)}</div>`;
     }
@@ -237,15 +256,16 @@ function rowsHtml(all){
   let h = "";
   for(const r of all){
     if(inTray(r.iid)) continue;
-    if(sel !== "all" && (r.area || t("staged_noarea")) !== sel) continue;
+    if(sel !== "all" && groupOf(r) !== sel) continue;
     const open = S.expanded === r.iid;
     h += `<div class="rx-st-row" data-iid="${esc(r.iid)}"><button type="button" class="rx-st-rowbtn" data-act="staged-row" data-iid="${esc(r.iid)}" aria-expanded="${open}">
       <span class="bin">${esc(r.bin || r.area || "—")}</span><span class="nm">${esc(nameOf(r.sku))}</span><span class="num">${r.units} u</span><span class="bb">${r.best ? yf(r.best) : "no date"}</span>
-      <span class="by">${esc(t("staged_by", {at: r.at ? RX.hhmm(r.at) : "", who: whoText(r)}))}${r.device && r.by !== acct() ? " (" + esc(String(r.device).slice(0, 4)) + ")" : ""}</span></button>`;
+      <span class="by">${esc(t("staged_by", {at: r.at ? RX.hhmm(r.at) : "", who: whoText(r)}))}${r.device && r.by !== acct() ? " (" + esc(String(r.device).slice(0, 4)) + ")" : ""}</span>${holdWaiting(r) ? `<span class="by rx-holdwait" style="flex-basis:100%;font-weight:700;color:var(--ink)">${esc(t("hold_wait"))}</span>` : ""}</button>`;
     if(open){
       h += `<div class="rx-st-x">${r.po ? "PO " + esc(r.po) + " · " : ""}${r.reasons ? esc(String(r.reasons)) + " · " : ""}${esc(r.area || "")}`;
-      if(S.confirm === r.iid) h += `<div class="rx-st-note"><strong>${esc(t("staged_cancel_q"))}</strong> ${btn("staged-cancel-yes", t("staged_cancel_yes"), "primary", `data-iid="${esc(r.iid)}"`)}${btn("staged-cancel-no", t("staged_cancel_no"))}</div>`;
+      if(S.confirm === r.iid) h += `<div class="rx-st-note"><strong>${esc(t("staged_cancel_q"))}</strong> ${btn("staged-cancel-yes", t("staged_cancel_yes"), "primary", `data-iid="${esc(r.iid)}"`)}${btn("staged-cancel-no", t("staged_cancel_no"), "", 'data-close="1"')}</div>`;
       else h += `<div>${btn("staged-cancel", t("staged_cancel"), "", `data-iid="${esc(r.iid)}"`)}</div>`;
+      h += `<div>${btn("staged-row-close", t("btn_close"), "", 'data-close="2"')}</div>`;     // round 3: the row's details close too (while the confirm is open, Escape closes the confirm first)
       h += `</div>`;
     }
     h += `</div>`;
@@ -254,7 +274,7 @@ function rowsHtml(all){
 }
 function stagedView(){
   const all = ST.records();
-  let h = `<div class="rx-st-wrap" id="rxStaged"><div class="rx-st-head"><div class="rx-h" style="margin:0">${esc(t("staged_h"))}</div>${chipsHtml(all)}</div>`;
+  let h = `<div class="rx-st-wrap" id="rxStaged"><div class="rx-st-head"><div class="rx-h" style="margin:0">${esc(t("staged_h"))}</div>${chipsHtml(all)}${btn("staged-close", t("btn_close"), "", 'data-close="3" style="margin-left:auto"')}</div>`;
   if(S.notice) h += `<div class="rx-st-note" role="status">${S.notice}</div>`;
   if(S.loading){ h += `<div class="rx-sub" aria-live="polite">${esc(t("staged_loading"))} <span class="rx-tick" aria-hidden="true" data-from="${S.startedAt}">${RX.clock(RX.now() - S.startedAt)}</span></div>`; }
   else if(S.err){ h += `<div class="rx-note rx-red" role="alert">${esc(t("staged_err", {why: S.err}))} ${btn("staged-retry", t("staged_retry"))}</div>`; }
@@ -297,7 +317,7 @@ function addToTray(r, take){
 RX.registerAct("tray-clear", () => { clearTray(""); RX.sound("decide"); });
 RX.registerAct("tray-remove", ({el}) => { S.tray.items = S.tray.items.filter(x => x.iid !== el.getAttribute("data-iid")); S.some = null; trayTouch(); ST.render(); });
 RX.registerAct("tray-some", ({el}) => { S.some = {iid: el.getAttribute("data-iid")}; trayTouch(); ST.render(); setTimeout(() => { const i = $("rxTrayN"); if(i){ i.focus(); i.onkeydown = (ev) => { if(ev.key === "Enter"){ ev.preventDefault(); const b = document.querySelector('[data-act="tray-some-save"]'); if(b) b.click(); } }; } }, 25); });
-RX.registerAct("tray-some-cancel", () => { S.some = null; ST.render(); });
+RX.registerAct("tray-some-cancel", () => { S.some = null; const a = document.activeElement; if(a && a.blur && a.id === "rxTrayN") a.blur(); ST.render(); });     // ⭐ Escape leaves focus in the box, and render() never re-renders under a typing finger
 RX.registerAct("tray-some-save", ({el}) => {
   const iid = el.getAttribute("data-iid"), r = byIid(iid), inp = $("rxTrayN"), n = parseInt(((inp && inp.value) || "").trim(), 10);
   if(!r || isNaN(n) || n < 1 || n > r.units){ if(inp) inp.style.borderColor = "var(--stop)"; return; }
@@ -380,7 +400,7 @@ ST.claim = async function(r, f, expect, opts){
 /* ───────────────────────── placing ───────────────────────── */
 function copyFields(r, take, f){
   const g = {}; for(const k of RX.INTENT_FIELDS) if(r.fields[k] !== undefined && r.fields[k] !== null && r.fields[k] !== "") g[k] = r.fields[k];
-  for(const k of ["IntentId", "ScanAt", "ScanDay", "Operator", "Device", "State", "ReadyAt", "RawScans", "CancelTooLate", "BbItemId", "PageMode"]) delete g[k];
+  for(const k of ["IntentId", "ScanAt", "ScanDay", "Operator", "Device", "State", "ReadyAt", "RawScans", "CancelTooLate", "BbItemId", "PageMode", "DamagedUnits", "PhotoUrls", "FixNote"]) delete g[k];   // round 4: damage evidence stays on the original
   g.Units = take; if(r.caseQty > 0) g.Cases = Math.round(take / r.caseQty * 100) / 100;
   /* ⛔ AUDIT 2026-10-19 (J, M3): the portion is part of the SAME scanned case — it keeps the original ScanAt and PageMode.
      A fresh ScanAt/PageMode let a case scanned in SHADOW (and received in the Finale app) pass the poster's live checks
@@ -390,6 +410,7 @@ function copyFields(r, take, f){
 }
 async function placeOne(r, take, info, source){
   const f = {State: "ready", Location: info.name, BinSource: source, PlacedBy: acct(), ReadyAt: RX.iso()};
+  if(isHold(r)){ if(holdWaiting(r)) return {ok: false, gone: true}; try{ const ol = openLine(r.sku); if(ol && ol.po) f.Po = String(ol.po.order_id); }catch(_){} }   // a released hold now has its PO (the line with open units)
   if(take && take < r.units){
     /* ⛔ round-2 (1): the shrink carries the ACK (SplitOf = its own id); the portion exists only after it landed, or GATED on it */
     const rest = r.units - take, upd = {Units: rest, SplitOf: r.iid}; if(r.caseQty > 0) upd.Cases = Math.round(rest / r.caseQty * 100) / 100;
@@ -444,14 +465,16 @@ function showDecCard(){
   const c = S.dec.card, info = S.dec.info;
   if(c.kind === "temp"){
     prompt_("stop", esc(t("temp_title")), `<strong>${esc(PA.tempText(c.item, info))}</strong>`,
-      `<div class="rx-pa-btns">${btn("temp-no", t("temp_no"), "primary", "data-primary")}${btn("temp-yes", t("temp_yes"))}</div>`);
+      `<div class="rx-pa-btns">${btn("temp-no", t("temp_no"), "primary", "data-primary")}${btn("temp-yes", t("temp_yes"))}${btn("dec-back", t("btn_back"), "", 'data-close="3"')}</div>`);
   }else{
     prompt_("stop", esc(t("fefo_title")), esc(PA.fefoText(c.item, c.rank)),
-      `<div class="rx-pa-btns">${btn("fefo-change", t("fefo_change"), "primary", "data-primary")}${btn("fefo-anyway", t("fefo_anyway"))}</div>`);
+      `<div class="rx-pa-btns">${btn("fefo-change", t("fefo_change"), "primary", "data-primary")}${btn("fefo-anyway", t("fefo_anyway"))}${btn("dec-back", t("btn_back"), "", 'data-close="3"')}</div>`);
   }
   setTimeout(() => { const b = document.querySelector("#promptArea [data-primary]"); if(b) b.focus(); }, 30);
   RX.sound("decide");
 }
+/* ⭐ ROUND 3: Back on a tray decision card — NOTHING is moved: the placement is dropped, the tray and the staged list stay as they were */
+RX.registerAct("dec-back", () => { if(!S.dec) return; S.dec = null; S.placing = false; try{ clearPrompt(); }catch(_){} RX.toast(t("dec_back_toast")); RX.refresh(); });
 PA.decisionHook = function(name){
   const dec = S.dec; if(!dec || !dec.card) return;
   const q = dec.queue[dec.idx];
@@ -495,11 +518,16 @@ function onTagScan(id){
   PA.armed.set(info.name); RX.sound("staged"); return true;                         // tag first: arms ONE item
 }
 async function onItemScan(id, raw){
-  const all = ST.records().filter(r => r.sku === id.sku && !inTray(r.iid));
+  const mineAll = ST.records().filter(r => r.sku === id.sku && !inTray(r.iid));
+  const all = mineAll.filter(r => !holdWaiting(r));
   const armed = PA.armed.take();                                                      // ⛔ single-shot: this item consumes it
+  if(!all.length && mineAll.length){                                                  // round 4: on hold — put-away is disabled until the PO line exists
+    prompt_("stop", esc(t("hold_wait_card", {name: id.prod.name})), "", `<div class="rx-pa-btns">${btn("hold-wait-close", t("hold_wait_close"), "primary", 'data-close="3"')}</div>`, {keepScan: true});
+    RX.sound("refused"); return true;
+  }
   if(!all.length){
     S.notstaged = {raw, name: id.prod.name, armed: armed ? armed.bin : null};
-    prompt_("stop", esc(t("notstaged", {name: id.prod.name})), "", `<div class="rx-pa-btns">${btn("notstaged-receive", t("notstaged_receive"), "primary", "data-primary")}${btn("notstaged-cancel", t("notstaged_cancel"))}</div>`);
+    prompt_("stop", esc(t("notstaged", {name: id.prod.name})), "", `<div class="rx-pa-btns">${btn("notstaged-receive", t("notstaged_receive"), "primary", "data-primary")}${btn("notstaged-cancel", t("notstaged_cancel"), "", 'data-close="3"')}</div>`);
     setTimeout(() => { const b = document.querySelector("#promptArea [data-primary]"); if(b) b.focus(); }, 30);
     RX.sound("decide"); return true;
   }
@@ -518,9 +546,13 @@ function openLotPick(all, armed){
   const byLot = new Map(); for(const r of oldestFirst(all)) if(!byLot.has(r.best || "")) byLot.set(r.best || "", r);
   S.lot = {lots: [...byLot.values()], armed};
   const btns = S.lot.lots.map((r, i) => `<button type="button" class="rx-btn rx-st-lot${i === 0 ? " primary" : ""}" data-act="lot-pick" data-iid="${esc(r.iid)}"${i === 0 ? " data-primary" : ""}>${r.best ? yf(r.best) : "no date"} · ${r.units} u · ${esc(t("staged_by", {at: r.at ? RX.hhmm(r.at) : "", who: whoText(r)}))}</button>`).join("");
-  prompt_("go", esc(t("lot_h")), `<strong>${esc(nameOf(all[0].sku))}</strong>`, `<div>${btns}</div>`, {keepScan: true});
+  prompt_("go", esc(t("lot_h")), `<strong>${esc(nameOf(all[0].sku))}</strong>`, `<div>${btns}</div><div class="rx-pa-btns">${btn("lot-close", t("btn_close"), "", 'data-close="3"')}</div>`, {keepScan: true});
   RX.sound("decide");
 }
+RX.registerAct("hold-wait-close", () => { try{ clearPrompt(); }catch(_){} });
+RX.registerAct("lot-close", () => { S.lot = null; try{ clearPrompt(); }catch(_){} });
+RX.registerAct("staged-close", () => { if(pend()){ RX.toast(t("finish_first")); return; } const prev = RX.state.prevFlow; RX.state.prevFlow = null; if(RX.setFlow(prev && prev !== "staged" ? prev : "direct")) RX.refresh(); });
+RX.registerAct("staged-row-close", () => { S.expanded = null; S.confirm = null; ST.render(); });
 RX.registerAct("lot-pick", ({el}) => {
   const lot = S.lot; if(!lot) return;
   const r = lot.lots.find(x => x.iid === el.getAttribute("data-iid")); S.lot = null; try{ clearPrompt(); }catch(_){}
@@ -612,11 +644,11 @@ function renderStage(ctx, notice){
   let acts = "";
   if(st.sub === "other"){
     acts += `<div class="rx-pa-sub"><strong>${esc(t("stage_choose"))}</strong></div>` + st.areas.map(a => `<button type="button" class="rx-st-pick" data-act="stage-area" data-area="${esc(a)}"><span class="area">${esc(a)}</span></button>`).join("") +
-            `<div class="rx-pa-btns">${btn("stage-back", t("stage_back"))}</div>`;
+            `<div class="rx-pa-btns">${btn("stage-back", t("stage_back"), "", 'data-close="3"')}</div>`;
   }else{
     acts += st.rows.map((r, i) => `<button type="button" class="rx-st-pick${i === 0 ? " top" : ""}" data-act="stage-pick" data-i="${i}">
       <span class="area">${i === 0 ? `<span class="rx-st-key">${esc(t("stage_enter"))}</span>` : ""}${esc(String(r.area).toUpperCase())}</span><span class="bin">${esc(r.bin)}</span><span class="info">${esc(r.info)}</span></button>`).join("");
-    acts += `<div class="rx-pa-btns">${btn("stage-other", t("stage_other"))}${btn("stage-direct", t("stage_direct"))}${btn("stage-cancel", t("btn_cancel_case"))}</div>`;
+    acts += `<div class="rx-pa-btns">${btn("stage-other", t("stage_other"))}${btn("stage-direct", t("stage_direct"))}${btn("stage-cancel", t("btn_cancel_case"))}${btn("stage-close", t("btn_back_count"), "", 'data-close="3"')}</div>`;
   }
   prompt_("go", esc(t("stage_title")), body, acts, {keepScan: true});
   RX.side.clear();
@@ -663,5 +695,6 @@ RX.registerAct("stage-other", () => { const c = stageCtx(); if(!c) return; const
 RX.registerAct("stage-back", () => { const c = stageCtx(); if(!c) return; c.p.rx.stage.sub = "main"; renderStage(c); });
 RX.registerAct("stage-area", ({el}) => { const c = stageCtx(); if(c) commitStage(c, {area: el.getAttribute("data-area"), bin: ""}); });
 RX.registerAct("stage-direct", () => { const c = stageCtx(); if(c) toShelf(c, null); });
+RX.registerAct("stage-close", () => { if(stageCtx()) RX.backToQty(); });
 RX.registerAct("stage-cancel", () => { const c = stageCtx(); if(c){ ST.cur = null; c.cancel({}); } });
 })();
