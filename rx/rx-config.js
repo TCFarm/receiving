@@ -32,7 +32,7 @@ const CFG = {
   WAIT_SAVED:      15*1000,         // an intent younger than this reads "Saved", then "Waiting for Finale m:ss"
   WAIT_USUAL:     120*1000,         // "usually under 2 min" (drill-down text only)
   WAIT_SLOW:      5*60*1000,        // "Waiting 6:12 — slow"
-  WAIT_ALERT:     15*60*1000,       // "Waiting 16:02 — Julia told"
+  WAIT_ALERT:     15*60*1000,       // "Waiting 16:02 — buyer told"
   POSTER_STALE:   5*60*1000,        // ⭐ ONE stale threshold (MASTER-PLAN §9.3 — overrides the UX design's 3 min)
   POLL_OPEN:      20*1000,          // read this tablet's intents while any is not final
   POLL_IDLE:      60*1000,
@@ -63,8 +63,10 @@ const CFG = {
   /* the flows RX knows and the steps each runs between "qty saved" and "commit".
      ⭐ A step with no registered handler is SKIPPED, so a flow whose steps have not shipped degrades to today's
      best-by-only commit instead of breaking. WP4b registers `shelf`, `stage`, `tray` (and may add `exceptions`). */
-  flows: { bestby: [], direct: ["exceptions","shelf"], sort: ["exceptions","stage"], staged: ["tray"] },
+  flows: { bestby: [], direct: ["damage","overship","exceptions","nopo","shelf"], sort: ["damage","overship","exceptions","nopo","stage"], staged: ["damage","overship","nopo","tray"] },
   scan_log_max: 12,
+  PHOTO_WAIT:     10*1000,          // round 5: Continue on the damage-photo card waits this long (twice) for an upload in flight
+  SHELF_IDLE:     10*60*1000,       // round 4 (D12): shelf mode clears after this long with no case put away
 };
 
 /* ═══ COPY — UX design §8 plus the chip / pack / start strings ═══ */
@@ -79,14 +81,14 @@ const COPY = {
   tray_hint:       "Scan items, then the shelf tag. Or tag first, then one item.",
   wrong_product:   "Finish this case first — scan the shelf tag for {name}.",
   unknown_tag:     "That's not a shelf tag we know: {code}.",
-  inactive:        "{bin} is switched off in Finale. Use another shelf, or tell Julia.",
+  inactive:        "{bin} is switched off in Finale. Use another shelf, or tell the buyer.",
   temp:            "This is a {CLASS} shelf. {name} is {CLASS}.",
   fefo:            "Older stock is in backstock. Newer stock goes behind it.",
-  over:            "{k} of {n} {unit} — {over} more than ordered. Put it away; Julia sorts out the extra.",
+  over:            "{k} of {n} {unit} — {over} more than ordered. Put it away; the buyer sorts out the extra.",
   complete:        "this completes the line ({k} of {n} {unit})",
   makes:           "this makes {k} of {n} {unit}",
-  no_po:           "Not on today's PO. Put it away as normal — Julia decides.",
-  no_po_short:     "Not on today's PO.",
+  no_po:           "Not on the KeHE order. You will be asked to set it aside.",
+  no_po_short:     "Not on the KeHE order.",
   poster_down:     "Finale posting is delayed. Your scans are safe — keep going.",
   poster_down_det: "Last check {ago} ago.",
   practice:        "Practice run — also receive these in the Finale app.",
@@ -119,7 +121,7 @@ const COPY = {
   po_many_row:     "{po} · {due} · {left} left",
   po_many_hint:    "Scans match the right one automatically.",
   po_none_h:       "No KeHE delivery is due today.",
-  po_none_b:       "Best-by dates still save. Nothing goes into Finale. If a truck is here, tell Julia.",
+  po_none_b:       "Best-by dates still save. Nothing goes into Finale. If a truck is here, tell the buyer.",
   due_today:       "due today",
   due_tomorrow:    "due tomorrow",
   due_late:        "due {dow} (late)",
@@ -162,22 +164,22 @@ const COPY = {
   chip_saved:      "Saved",
   chip_waiting:    "Waiting for Finale {clock}",
   chip_slow:       "Waiting {clock} — slow",
-  chip_alert:      "Waiting {clock} — Julia told",
+  chip_alert:      "Waiting {clock} — buyer told",
   chip_waiting_t:  "Usually under 2 minutes. Your scan is safe.",
   chip_infinale:   "In Finale ✓",
-  chip_held:       "Held for Julia",
+  chip_held:       "Held for the buyer",
   chip_refused:    "Refused",
   chip_practice:   "Not posted (practice)",
   chip_staged:     "Staged → {area}",
   chip_receive_app:"Receive in Finale app",
-  chip_denied_unsure:"Not confirmed — tell Julia",
-  denied_unsure_detail:"This put-away may already be on Finale's list, but this tablet could not confirm it. Don't receive it again — Julia checks it.",
+  chip_denied_unsure:"Not confirmed — tell the buyer",
+  denied_unsure_detail:"This put-away may already be on Finale's list, but this tablet could not confirm it. Don't receive it again — the buyer checks it.",
   chip_signin:     "Held — sign in again",
   chip_signin_t:   "Kept on this tablet. It sends after you sign in again (the banner at the top).",
   chip_cancelled:  "Cancelled",
   chip_checking:   "Checking with Finale",
   chip_damaged:    "{n} damaged",
-  chip_fixsent:    "fix sent to Julia",
+  chip_fixsent:    "fix sent to the buyer",
   /* history */
   hist_all: "All", hist_waiting: "Waiting", hist_problems: "Problems", hist_staged: "Staged",
   hist_show_all:   "Show all",
@@ -189,17 +191,17 @@ const COPY = {
   drawer_close:    "Close",
   drawer_po:       "PO {po} · line {line} · {k} of {n} {unit}",
   drawer_change_shelf: "Change shelf",
-  drawer_tell_julia:   "Moved it? Tell Julia",
+  drawer_tell_julia:   "Moved it? Tell the buyer",
   drawer_not_all_fit:  "Not all fit?",
   drawer_shelf_prompt: "Scan or type the new shelf tag",
   drawer_shelf_save:   "Save",
   drawer_shelf_unknown:"That's not a shelf tag we know: {code}.",
-  drawer_shelf_off:    "{bin} is switched off in Finale. Use another shelf, or tell Julia.",
-  fix_sent:        "Finale already has this. Julia will fix it there.",
-  cancel_too_late: "This is already in Finale. Julia will reverse it there.",
-  split_refused:   "That split could not be recorded — Finale already had the whole case. Julia will fix it.",
+  drawer_shelf_off:    "{bin} is switched off in Finale. Use another shelf, or tell the buyer.",
+  fix_sent:        "Finale already has this. The buyer will fix it there.",
+  cancel_too_late: "This is already in Finale. The buyer will reverse it there.",
+  split_refused:   "That split could not be recorded — Finale already had the whole case. The buyer will fix it.",
   last_split_kept: "Not split — all {n} units stay on {bin}.",
-  store_full:      "This tablet's storage is full — keep this page open until \"On tablet\" is 0, then tell Julia.",
+  store_full:      "This tablet's storage is full — keep this page open until \"On tablet\" is 0, then tell the buyer.",
   undone:          "Cancelled — nothing was sent to Finale.",
   /* PO drawer */
   po_progress:     "{done} of {total} lines · {pct}%",
@@ -226,13 +228,27 @@ const COPY = {
   dmg_q:           "How many units are damaged?",
   dmg_save:        "Save",
   dmg_cancel:      "Cancel",
-  dmg_all:         "Nothing to put away — recorded as damaged for Julia.",
+  dmg_all:         "Nothing to put away — recorded as damaged for the buyer.",
   notpo_setaside:  "Set it aside",
-  setaside_flash:  "Set aside — tell Julia.",
-  unnamed_flash:   "Saved unnamed — this one goes into Finale by hand (Julia).",
-  noqty_flash:     "Saved without a quantity — Julia sorts it out.",
+  setaside_flash:  "Set aside — tell the buyer.",
+  unnamed_flash:   "Saved unnamed — this one goes into Finale by hand (the buyer).",
+  noqty_flash:     "Saved without a quantity — the buyer sorts it out.",
   btn_undo:        "Undo",
   btn_notallfit:   "Not all fit?",
+  /* round 3 (Jack, 2026-10-19) */
+  link_bestby_live: "Best-by only (no shelf scan)",
+  bestby_live_on:   "On now — change it above.",
+  menu_close:      "Close",
+  overship_title:  "You've now received {n} of {item}.",
+  overship_body:   "KeHE says it shipped {m}. Is {n} right?",
+  overship_body_ordered: "We ordered {m}. Is {n} right?",
+  overship_yes:    "Yes, {n} is right",
+  overship_fix:    "Fix the count",
+  btn_back_count:  "Back to the count",
+  btn_close:       "Close",
+  btn_cancel:      "Cancel",
+  btn_back:        "Back",
+  notput_area:     "Not put away yet",
 };
 
 function t(key, vars){
