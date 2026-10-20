@@ -24,10 +24,11 @@
      RX.mode()                  'off' | 'shadow' | 'live'  — what the page SHOWS (⛔ not what the poster does)
      RX.active()                mode !== 'off' AND the page is in RECEIVING (not audit). false ⇒ page = today
      RX.flow()                  effective flow: 'bestby' | 'direct' | 'sort' | 'staged' | null
-                                (null only in live when nobody has chosen / the choice is 6 h stale)
+                                ⭐ round 3: in LIVE the default is 'direct' (Put away here) when nobody has chosen / the choice is 6 h
+                                stale (null only if the shelf step itself is not registered); RX.flowChosen() says whether a fresh choice stands
      RX.flowActive()            active AND flow ∈ {direct, sort, staged}  (the new flows are on)
      RX.setFlow(f)              refused with "Finish this case first" while an item is open
-     RX.practice.on()/set(b)    the shadow "Practice: also scan the shelf tag" toggle (resets at midnight)
+     RX.practice.on()/set(b)    the shadow "Practice: also scan the shelf tag" toggle (resets at midnight; always false in LIVE)
      RX.now() RX.today() RX.dayKey(ms) RX.iso(ms)   ⭐ ALL time goes through RX.now() (tests fake the clock)
 
    ── 2. HOOKS the page calls (index.html; every one is `window.RX && …`) ──
@@ -111,8 +112,60 @@
         RX.pack.poById(id)  RX.pack.poLinesBySku(sku)→[{po,line}]   RX.pack.binsSorted()→names
         RX.pack.searchBins(text, sku?, limit)→[{name,role,temp,active,cand}]  (candidates for the SKU first)
 
+   ── 8b. CLOSING EVERY PANEL (round 3, Jack 2026-10-19: "Can't scan it?" opened a panel with no way out) ──
+   THE CONTRACT: every panel carries a visible Close / Back / Cancel control (≥ 48 px, plain words) marked `data-close="N"`
+   (N = depth: 1 innermost … 3 the panel itself). ESCAPE clicks the shallowest visible one in the top-most area
+   (index.html `closeTopPanel`: date modal → drawer → menu → promptArea → lastArea → tray → start card → toast), so the key
+   and the button can never drift apart. A prompt with controls and no `data-close` of its own gets the standard footer
+   `data-act="prompt-close"` from `prompt_` (label "Close", or "Cancel — scan it again" when an item is open).
+   ⛔ CLOSING NEVER RECORDS ANYTHING (no BB row, no intent, no queue entry). "ABANDONED" = the open item is dropped; "KEPT" = it
+   stays open exactly as it was.
+     PAGE PROMPTS (index.html)
+       Find the product by name ........ Close (promptClose): closes; scan box focused. Item: none open (Can't scan it? starts a
+                                          new carton) — or ABANDONED if opened from an unknown carton's "Find it by name".
+       Unknown / bad-read / unrecognised code, "UPC missing from our system", "Which kind of scanning?", product list not loaded,
+       dead-rows "cannot be saved", photo prompts ... Close (promptClose) — nothing is pending ⇒ just closes; with an item
+                                          open (UPC-missing, unknown-carton date) the item is ABANDONED and the toast says so.
+       Why are you skipping it? ........ Close ⇒ ABANDONED (nothing is recorded: the skip reason was never chosen).
+       Date / "Check this date" / "No date on the label" ... Close ⇒ ABANDONED. Quantity / "You entered N — right?" ⇒ ABANDONED.
+       "Is this date correct?" / "Is this the same case?" / "Is the date on the package?" ⇒ ABANDONED; a date the item took from
+                                          the held-date banner goes BACK to being held.
+       "Date captured — now scan the item" (held date) ... Close closes the notice, the date stays HELD (banner keeps its own
+                                          Discard).  "Now scan one unit" + the armed banner ... Cancel (unitCancel) ⇒ KEPT: back to
+                                          this carton's own date prompt (or just closes).
+       Burst refusal ................... OK / Got it (burstOk): the message goes; an item that is open stays KEPT.
+       History correction modal ........ Fix it (dcFix): nothing changes. (Row edits use the browser's own Cancel/Escape.)
+     RX CARDS (rx/*.js)
+       Over-shipment card .............. Fix the count ⇒ back to the quantity, item KEPT.   Short-dated / expired card ⇒ Back (KEPT).
+       Shelf step main (D2) ............ Back to the count ⇒ item KEPT, portions placed so far (memory only) are forgotten; a
+                                          "Not all fit?" late split ⇒ nothing changes, every unit stays on the first shelf.
+       Shelf sub-cards: how many / find the tag / temperature / older-stock / same-case / cancel / leave-rest ⇒ Back to the D2 card.
+       Stage card (sort first) ......... Back to the count (KEPT); its "Other cart" list ⇒ Back to the stage card.
+       Tray decision cards (temp/older stock) ⇒ Back: nothing is moved, the tray stays.  Not-on-the-list card ⇒ Cancel.  Lot pick ⇒ Close.
+       Staged list (the tab) ........... Close ⇒ back to the flow it was opened from; a row's details ⇒ Close; "Cancel it?" ⇒ No;
+                                          tray "some" box ⇒ Cancel.
+       Qty-card extras ................. "Case size changed?" ⇒ No; "Some damaged" ⇒ Cancel.  More places (side panel) ⇒ Fewer places.
+       Last-split ("Not all fit?") input ⇒ Cancel.  Row drawer / PO drawer ⇒ Close (backdrop too); row drawer shelf edit ⇒ Cancel.
+       Menu ≡ ⇒ Close.  Start card unfolded ⇒ Hide.  Toasts ⇒ Escape hides.
+     ROUND 4 (2026-10-19): Damage-photo card ......... Back to the count (photo-back) ⇒ item KEPT, the photos taken stay with the item,
+                                          nothing recorded. Hold card (not on a PO) ... Back to the count (hold-back) ⇒ item KEPT, nothing recorded.
+                                          "On hold — waiting for purchasing" card ... Close. Shelf-mode banner ... "Done with this shelf"
+                                          (shelf-done, data-close 3, LAST in Escape's order so any open panel closes first).
+     ROUND 5 (2026-10-19): "Add 1 case — same date" that pushes the count past KeHE's shipped/ordered re-asks the over-shipment question
+                                          on the shelf card: [Yes, n is right] (over-add-yes) · [Undo — take that case off] (over-add-undo,
+                                          data-close 3 = Escape) ⇒ the added case is taken back off, the earlier answer restored, nothing recorded.
+     NOT PANELS (no Close needed): the status strip, banners that are alerts, the flash card (Undo is its control), chips, tiles.
+
+   ── 8c. ROUND 4 (Jack 2026-10-19) ── flows are now direct = [damage, overship, exceptions, nopo, shelf], sort = [damage, overship,
+        exceptions, nopo, stage], staged = [damage, overship, nopo, tray]. `damage` (rx/photos.js): damaged units ⇒ ≥ 1 photo, links in
+        the intent's PhotoUrls, note in FixNote. `exceptions` (putaway.js): short-dated is RECEIVED + ShortDated (credit request).
+        `nopo` (putaway.js): a case on no open PO ⇒ staged intent "Hold: not on PO" (RecReasons NOT_ON_PO). Shelf mode (putaway.js
+        PA.shelf, key rx_shelf_v1) replaces the one-shot armed shelf in Put away here. Best-by only in LIVE writes a staged
+        "Not put away yet" intent (beforeCommit). Events: RX.emit("committed", row) from onCommit; RX.emit("abandon", p) from
+        RX.abandon() unless {keep:true} (backToQty).
+
    ── 9. PERSISTED KEYS (localStorage) ──
-        rx_flow_v1 {flow,at} · rx_practice_v1 {on,day} · rx_pack_v1 {at,etag,pack} · rx_intents_v1 (the outbox +
+        rx_flow_v1 {flow,at} · rx_practice_v1 {on,day} · rx_poster_v1 {data,savedAt} (round 5) · rx_shelf_v1 {bin,at,n,who} · IndexedDB rx_photos_v1 (queued damage photos) · rx_pack_v1 {at,etag,pack} · rx_intents_v1 (the outbox +
         last-known status; ⛔ NEVER prunes an unsent row) · rx_sound_v1 · [WP4b: rx_staged_v1 rx_tray_v1 rx_armed_v1]
    ═══════════════════════════════════════════════════════════════════════════════════════════════════════ */
 (function(){
@@ -149,6 +202,15 @@ RX.store = {
   set(key, val){ try{ localStorage.setItem(key, JSON.stringify(val)); return true; }catch(_){ return false; } },
   del(key){ try{ localStorage.removeItem(key); }catch(_){} },
 };
+/* ⛔ ROUND 5 (2026-10-19): THE LAST GOOD POSTER STATUS SURVIVES A RELOAD. RX.mode() is decided by Receiving/poster_status.json; held
+   only in memory, a tablet that reloaded in a dead spot (or scanned before the first read answered) showed SHADOW in a live week:
+   today's best-by-only flow, no shelf step, intents stamped PageMode=shadow which the poster refuses (PAGE_NOT_LIVE) — a whole
+   delivery silently not received. intents.js pollPoster keeps the reading in `rx_poster_v1` on every good read and clears it on a
+   404 (no status file is a real answer); until a fresh answer arrives the kept one stands (status "cached"). A tablet that has never
+   read one stays in shadow. ⭐ Safe in the other direction: the poster, not the page, decides what posts (its own mode + `since`). */
+RX.POSTER_KEY = "rx_poster_v1";
+(() => { const s = RX.store.get(RX.POSTER_KEY, null);
+  if(s && s.data && typeof s.data === "object" && s.data.at && (RX.now() - (+s.savedAt || 0)) < 14 * 86400000){ RX.poster.data = s.data; RX.poster.status = "cached"; } })();
 RX.call = (ns, fn, ...a) => { try{ const f = RX[ns] && RX[ns][fn]; return typeof f === "function" ? f.apply(RX[ns], a) : undefined; }
                               catch(e){ try{ console.error("rx", ns+"."+fn, e); }catch(_){} } };
 const isAuditNow = () => { try{ return typeof isAudit === "function" && isAudit(); }catch(_){ return false; } };
@@ -184,7 +246,7 @@ RX.mode = function(){
 };
 RX.active = () => !!RX.state.booted && RX.mode() !== "off" && !isAuditNow();
 RX.practice = {
-  on(){ if(!CFG.flags.practice_toggle) return false; const s = RX.store.get(PRACTICE_KEY, null); return !!(s && s.on && s.day === RX.today()); },
+  on(){ if(!CFG.flags.practice_toggle || RX.mode() === "live") return false; const s = RX.store.get(PRACTICE_KEY, null); return !!(s && s.on && s.day === RX.today()); },
   set(b){ RX.store.set(PRACTICE_KEY, {on:!!b, day:RX.today()});
     if(b && !RX.readFlow()) RX.writeFlow("direct");
     RX.emit("flow"); RX.refresh(); },
@@ -200,12 +262,19 @@ RX.flow = function(){
     if(!RX.practice.on()) return "bestby";
     return (fresh && RX.flowAvailable(st.flow)) ? st.flow : (RX.flowAvailable("direct") ? "direct" : "bestby");
   }
-  return (fresh && st.flow !== "bestby" && CFG.flows[st.flow]) ? st.flow : null;       // live: no 'bestby', no default
+  /* ⭐ ROUND 3 (Jack, 2026-10-19): GO LIVE FOR EVERYONE. In live the default is "Put away here" (one tap to change); the
+     operator's own choice (incl. the "Best-by only (no shelf scan)" fallback link) holds for FLOW_STALE. null only when
+     the shelf step itself is not available. */
+  if(fresh && CFG.flows[st.flow] && RX.flowAvailable(st.flow)) return st.flow;
+  return RX.flowAvailable("direct") ? "direct" : null;
 };
+/* ⭐ round 3: has the crew CHOSEN a flow (fresh), as opposed to the live default ("Put away here")? */
+RX.flowChosen = () => { const st = RX.readFlow(); return !!st && (RX.now() - st.at) <= CFG.FLOW_STALE; };
 RX.flowActive = () => { const f = RX.flow(); return f === "direct" || f === "sort" || f === "staged"; };
 RX.setFlow = function(f){
   if(!CFG.flows[f]) return false;
   if(pendingNow()){ RX.toast(RX.t("finish_first")); return false; }
+  if(f === "staged" && RX.flow() !== "staged") RX.state.prevFlow = RX.flow();      // so the staged list's Close can go back
   RX.writeFlow(f); RX.emit("flow"); RX.refresh(); return true;
 };
 RX.flowAvailable = (f) => { if(f === "bestby") return true; const s = CFG.flows[f];
@@ -277,6 +346,35 @@ RX.keepScan = function(){
   return false;
 };
 
+/* ⭐ ROUND 3 — leaving a step WITHOUT recording anything.
+   RX.abandon()      the open item is being dropped (the page's Close on a prompt): the step's abort() runs, the side panel clears.
+   RX.backToQty()    "Back"/"Fix the count" on a step card: the step is torn down, everything the steps decided is forgotten
+                     (damaged units, entered earlier on the qty card, stay), the SAME item is asked its quantity again with
+                     the number it had. ⛔ Nothing is written: no BB row, no intent. */
+RX.abandon = function(opts){
+  const p0 = pendingNow();
+  const st = RX.state.step;
+  if(st){ const h = steps[st.name]; try{ if(h && h.abort) h.abort(st.ctx); }catch(e){ try{ console.error("rx abort", e); }catch(_){} } }
+  RX.state.step = null; RX.side.clear();
+  if(!(opts && opts.keep)) RX.emit("abandon", p0);          // round 4: the item is dropped — rx/photos.js discards its damage photos
+};
+const STEP_KEYS = ["state","bin","binSource","workflow","stagedArea","recommendedBin","recReasons","splitOf","tempConfirmed","fefoOverride",
+                   "shortDated","rejected","extra","overConfirmed","units","flash","noIntent","photoUrls","fixNote"];
+RX.backToQty = function(){
+  const p = pendingNow(); if(!p) return false;
+  RX.abandon({keep:true});
+  const rxs = p.rx || (p.rx = {});
+  rxs.done = false; rxs.i = -1; delete rxs.d2; delete rxs.stage; delete rxs.exc;
+  if(rxs.fields) for(const k of STEP_KEYS) delete rxs.fields[k];
+  try{ clearPrompt(); }catch(_){}
+  const had = p.qty;
+  try{ askQty(); }catch(e){ try{ console.error("rx backToQty", e); }catch(_){} return false; }
+  setTimeout(() => { const el = document.getElementById("qty"); if(el && had != null && !p.qtyUnknown){ el.value = String(had); el.focus(); el.select(); } }, 60);
+  RX.refresh();
+  return true;
+};
+RX.registerAct("prompt-close", () => { try{ closePromptDefault("button"); }catch(e){ try{ console.error("rx prompt-close", e); }catch(_){} } return "stop"; });
+
 /* which steps will run for this pending item */
 RX.stepsFor = function(p, flow){
   const names = CFG.flows[flow] || [];
@@ -300,7 +398,15 @@ RX.beforeCommit = function(p){
     const rxs = p.rx || (p.rx = {});
     if(rxs.done) return false;                                   // already ran (e.g. after the date check)
     const flow = RX.flow();
-    if(!RX.flowActive() || !RX.flowAvailable(flow)){ rxs.done = true; return false; }
+    if(!RX.flowActive() || !RX.flowAvailable(flow)){
+      rxs.done = true;
+      /* ⭐ ROUND 4 (D16): Best-by only in LIVE also writes a STAGED intent ("Not put away yet"): the date is saved, the case is
+         received only when it is later put away from the staged list. No prompt is added — the per-case speed is unchanged. */
+      if(flow === "bestby" && RX.mode() === "live" && !receivable(p)){
+        rxs.flow = "bestby"; rxs.fields = Object.assign({}, rxs.fields, {state:"staged", workflow:"staged", stagedArea:RX.t("notput_area")});
+      }
+      return false;
+    }
     const why = receivable(p);
     if(why){ rxs.done = true; rxs.note = why; return false; }    // unnamed / no quantity: no shelf step, no intent
     /* ⭐ the date check belongs BEFORE the shelf: let commit() ask it, then come back through next() */
@@ -380,6 +486,7 @@ RX.poRef = function(p){
 };
 
 RX.onCommit = function(row){
+  try{ RX.emit("committed", row); }catch(_){}
   try{
     RX.touchFlow();
     RX.state.lastRow = row;
@@ -404,7 +511,7 @@ RX.shelfCell = (r) => RX.call("drawer","shelfCell", r) || null;
 RX.chip = (r) => { const c = RX.call("intents","chipFor", r); return c ? RX.call("ui","chipHtml", c, r) : null; };
 RX.afterRender = () => RX.call("drawer","afterRender");
 RX.flush = async () => { try{ await RX.intents.flush(); }catch(_){} };
-RX.unsentCount = () => { try{ return RX.intents.unsent ? RX.intents.unsent() : 0; }catch(_){ return 0; } };
+RX.unsentCount = () => { try{ return (RX.intents.unsent ? RX.intents.unsent() : 0) + (RX.photos && RX.photos.pending ? RX.photos.pending() : 0); }catch(_){ return 0; } };
 
 /* ───────────────────────── sounds (mutable; the menu toggles AUDIO only) ───────────────────────── */
 const SOUNDS = { saved:{f:[660,880],ms:90,vib:[40]}, staged:{f:[600,600],ms:90,vib:[30]},
