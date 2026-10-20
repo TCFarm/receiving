@@ -125,6 +125,49 @@ PO.summary = function(){
   });
 };
 
+/* ───────────────────────── the over-shipment confirm (round 3, Jack 2026-10-19) ─────────────────────────
+   Before the shelf / stage step, when the units received for this SKU on its matched PO — what Finale held when the pack was built
+   + every intent today (all tablets, the list read) + this tablet's unsent ones (all inside PO.counts) + THIS case — would be MORE
+   than KeHE shipped (the pack line's `shipped_units`) or, when the shipped file is not known (null), more than we ordered, the crew
+   is asked once: "You've now received {n} of {item}. KeHE says it shipped {m}. Is {n} right?"
+   [Yes, {n} is right] (primary; the intent carries OverConfirmed = true) · [Fix the count] (back to the quantity, nothing recorded).
+   ⛔ A CONFIRM, never a cap (hard boundary 6: no hard-coded maximums) and ⛔ never in Best-by-only (that flow runs no steps).
+   ⛔ Not for a SKU that is on no PO (there is nothing to exceed). Enter = the primary; a stray scan is refused (the page's
+   "finish this item first — scan NOT recorded"). */
+PO.overCap = function(p, qty){
+  const m = PO.matchFor(p); if(!m || !m.po || !m.line || !m.counts) return null;
+  const line = m.line, c = m.counts;
+  const sh = line.shipped_units;
+  const known = (typeof sh === "number" && isFinite(sh));
+  const cap = known ? sh : num(c.ordered);
+  if(!(cap > 0) && !known) return null;
+  const n = c.total + num(qty);
+  return {n, cap, basis: known ? "shipped" : "ordered", over: n > cap, match: m};
+};
+RX.registerStep("overship", {
+  keepScan: false,
+  applies(ctx){
+    if(ctx.fields && ctx.fields.overConfirmed) return false;
+    const p = ctx.p, q = num(p.qty); if(!(q > 0)) return false;
+    const o = PO.overCap(p, q); p.rx.over = o;
+    return !!(o && o.over);
+  },
+  start(ctx){
+    const o = ctx.p.rx.over || PO.overCap(ctx.p, num(ctx.p.qty)); if(!o){ ctx.done({}); return; }
+    const n = fmt(o.n), m = fmt(o.cap);
+    const body = `<span class="rx-pa-sub">${RX.esc(t(o.basis === "shipped" ? "overship_body" : "overship_body_ordered", {n, m}))}</span>`;
+    prompt_("stop", RX.esc(t("overship_title", {n, item: ctx.p.prod.name})), body,
+      `<div class="rx-pa-btns"><button type="button" class="rx-btn primary" data-act="over-yes" data-primary>${RX.esc(t("overship_yes", {n}))}</button>` +
+      `<button type="button" class="rx-btn" data-act="over-fix" data-close="3">${RX.esc(t("overship_fix"))}</button></div>`);
+    RX.sound("decide");
+    setTimeout(() => { const b = document.querySelector("#promptArea [data-primary]"); if(b) b.focus(); }, 30);
+  },
+  onScan(){ return false; },
+});
+const overCtx = () => { const s = RX.state.step; return s && s.name === "overship" ? s.ctx : null; };
+RX.registerAct("over-yes", () => { const c = overCtx(); if(c) c.done({overConfirmed: true}); });
+RX.registerAct("over-fix", () => { if(overCtx()) RX.backToQty(); });
+
 /* ───────────────────────── the qty card ───────────────────────── */
 function typedQty(){ const el = document.getElementById("qty"); const n = parseInt(((el && el.value) || "").trim(), 10); return isNaN(n) ? 0 : n; }
 function poLineHtml(p, qty){
@@ -133,8 +176,7 @@ function poLineHtml(p, qty){
   const dflt = "display:block;margin:0 0 9px;padding:8px 12px;border-left:5px solid var(--line);background:var(--card);font-size:14px";
   if(k.status === "notpo"){
     return `<span id="rxPoLine" class="rx-poline rx-notpo" style="${dflt};border-left-color:var(--stop)"><strong>${RX.esc(t("no_po_short"))}</strong>
-      <span class="hint" style="display:inline"> Put it away as normal — Julia decides.</span>
-      <button class="rx-btn" data-act="notpo-setaside" style="margin-left:8px">${RX.esc(t("notpo_setaside"))}</button></span>`;
+      <span class="hint" style="display:inline"> You will be asked to set it aside until purchasing adds it.</span></span>`;
   }
   let msg, col = "var(--line)";
   if(k.status === "over"){ msg = t("over", {k:k.k, n:k.n, unit:k.unit, over:k.over}); col = "var(--wait)"; }
@@ -179,7 +221,7 @@ RX.registerAct("qty-size-changed", () => {
   if(!(n > 0)){ const el = document.getElementById("qty"); if(el) el.style.borderColor = "var(--stop)"; return; }
   ask.innerHTML = `<span style="display:block;margin-top:8px;padding:9px 12px;background:var(--card);border-left:5px solid var(--wait)">${RX.esc(t("qty_size_q", {n}))}
     <button type="button" class="rx-btn primary" data-act="qty-size-yes" style="margin-left:8px">${RX.esc(t("qty_size_yes", {n}))}</button>
-    <button type="button" class="rx-btn" data-act="qty-size-no">${RX.esc(t("qty_size_no"))}</button></span>`;
+    <button type="button" class="rx-btn" data-act="qty-size-no" data-close="1">${RX.esc(t("qty_size_no"))}</button></span>`;
 });
 RX.registerAct("qty-size-yes", () => {
   const n = typedQty(); const p = (() => { try{ return pending; }catch(_){ return null; } })(); if(!p || !(n > 0)) return;
@@ -196,7 +238,7 @@ RX.registerAct("qty-damaged", () => {
   box.innerHTML = `<span style="display:block;margin-top:8px;padding:9px 12px;background:var(--card);border-left:5px solid var(--wait)">${RX.esc(t("dmg_q"))}
     <input id="rxDmgN" type="text" inputmode="numeric" maxlength="4" class="num" style="width:90px;font-size:18px;padding:8px;margin:0 8px;min-height:48px" aria-label="Damaged units">
     <button type="button" class="rx-btn primary" data-act="dmg-save">${RX.esc(t("dmg_save"))}</button>
-    <button type="button" class="rx-btn" data-act="dmg-cancel">${RX.esc(t("dmg_cancel"))}</button></span>`;
+    <button type="button" class="rx-btn" data-act="dmg-cancel" data-close="1">${RX.esc(t("dmg_cancel"))}</button></span>`;
   setTimeout(() => { const el = document.getElementById("rxDmgN"); if(el){ el.focus(); el.addEventListener("keydown", ev => { if(ev.key === "Enter"){ ev.preventDefault(); const b = box.querySelector('[data-act="dmg-save"]'); if(b) b.click(); } }); } }, 20);
 });
 RX.registerAct("dmg-cancel", () => {
@@ -216,21 +258,8 @@ RX.registerAct("dmg-save", () => {
   refreshQtyCard();
 });
 function allDamaged(p, k){
-  /* whole case damaged: nothing to put away and NO BB receipt (a 0-unit receipt would pollute arrival-life); the intent
-     records it for Julia. ⛔ Damaged units are never posted to Finale. */
-  const row = {prod:p.prod, upc:p.upc, gtin:p.gtin, best:p.best, lot:p.lot, units:0, qtyKind:null, _po:RX.poRef(p), _at:RX.now(),
-               _op:(() => { try{ return account; }catch(_){ return ""; } })(), rx:{fields:{damaged:k, state:"ready", damagedAll:true}, flow:RX.flow()}};
-  const recs = RX.intents.createFromRow(row);
-  try{ pending = null; clearPrompt(); }catch(_){}
-  RX.call("ui", "flashText", t("dmg_all"), null);
-  RX.sound("decide"); RX.refresh(); return recs;
+  /* whole case damaged: nothing to put away and NO BB receipt (a 0-unit receipt would pollute arrival-life). ⭐ ROUND 4 (D36): the
+     photos come FIRST (rx/photos.js); the intent is written when they are done. ⛔ Damaged units are never posted to Finale. */
+  return RX.photos.askAll(p, k);
 }
-RX.registerAct("notpo-setaside", () => {
-  const p = (() => { try{ return pending; }catch(_){ return null; } })(); if(!p) return;
-  let n = typedQty(); if(!(n > 0)) n = p.qtyShown || 0;
-  if(!(n > 0)){ const el = document.getElementById("qty"); if(el) el.style.borderColor = "var(--stop)"; return; }
-  p.rx = {done:true, fields:{noIntent:true, flash:t("setaside_flash")}};
-  p.qtyKind = "part";
-  try{ takeQty(n); }catch(e){ try{ console.error(e); }catch(_){} }
-});
 })();
