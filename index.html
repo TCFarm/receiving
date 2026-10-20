@@ -223,6 +223,7 @@
 <script src="rx/putaway.js"></script>
 <script src="rx/staging.js"></script>
 <script src="rx/photos.js"></script>
+<script src="rx/learn.js"></script>
 <script>
 "use strict";
 /* ============================================================================
@@ -609,6 +610,8 @@ function rebuildSkuIndex(){
     const v = CATALOG[k];
     if(v && v.sku && !(v.sku in CATALOG_BY_SKU)) CATALOG_BY_SKU[v.sku] = v;
   }
+  /* ⭐ PM-2919: barcodes the crew LEARNED on any tablet (rx/learn.js) are folded back in after every catalog load */
+  if(window.RXLearn) try{ RXLearn.apply(); }catch(_){}
 }
 function renderCatalogState(){
   const el = $("catalogArea"); if(!el) return;
@@ -914,7 +917,11 @@ async function handleScan(raw){
       }
     }catch(_){ /* offline or Pages mid-deploy — fall through to the normal path */ }
   }
+  /* ⭐ PM-2919: a code learned on ANOTHER tablet in the last minute — read the learnings before calling it unknown */
+  if(!prod && window.RXLearn){ try{ await RXLearn.refresh(false); }catch(_){} prod = look(); }
   if(!prod){ reject("UNKNOWN_UPC", v, upc);
+    /* ⭐ PM-2919 (Jack, 2026-10-20): the code we would LEARN — the retail UPC (derived from a case GTIN when there is one) */
+    if(window.RXLearn) RXLearn.setCandidate({code: upc || v.replace(/\D/g,""), raw: v});
     /* ⛔ KEEP THE DATE. The label often encodes a perfectly good best-by beside a
        GTIN we simply do not have on file; discarding it here forces the operator
        to key a date the barcode already told us. */
@@ -983,14 +990,15 @@ async function handleScan(raw){
     }
     if(!looksCase && tries<=1){
       /* a plain retail code: say the Finale instruction ONCE, then get the date */
-      prompt_("stop","This product's UPC is missing from our system",
+      prompt_("stop","This barcode is not in our system",
         `<span class="num">${upc}</span> is the unit's own barcode, so no case code is
-         hiding it. <strong>Confirm UPC ${upc} is learned in Finale before completing
-         receiving.</strong><br><br>Recording the date next — it is attached
-         automatically once Finale knows the code.
-         <br><br><button class="primary" id="pendGo">Enter the date</button>
+         hiding it. <strong>If it is a product we already carry with a NEW barcode, learn it</strong>
+         (open the case, find the product, confirm it is identical). If it is a new product, set it aside.
+         <br><br>${window.RXLearn ? RXLearn.learnBtn() : ""}
+         <button ${window.RXLearn && RXLearn.state.cand ? "" : 'class="primary" '}id="pendGo">Enter the date (unnamed)</button>
          ${noDateBtn()}
-         <button id="pendSkip">Skip this carton</button>`);
+         <button id="pendSkip">Skip this carton</button>
+         ${photoBtn()}`);
       return;
     }
     return next();
@@ -1353,7 +1361,9 @@ function askDate(){
       ? `<div style="margin-top:13px;border-top:1px solid var(--line);padding-top:11px">
            <button class="primary" id="unkUnit">Scan a unit from inside the case</button>
            <button id="unkFind">Find it by name</button>
+           ${window.RXLearn ? RXLearn.learnBtn().replace('class="primary" ', '') : ""}
            <button id="pendSkip">Skip this carton</button>
+           ${photoBtn()}
            <div class="hint">⛔ Without one of the first two we have the DATE but not
              the PRODUCT, so it attaches to nothing and waits in the Purchasing app
              for somebody to match by hand. ⭐ Scanning a unit is the one that also
@@ -1389,6 +1399,7 @@ function askIdentify(){
     `<div style="margin-top:4px">
        <button class="primary" id="unkUnit">Scan a unit from inside the case</button>
        <button id="unkFind">Find it by name</button>
+       ${window.RXLearn ? RXLearn.learnBtn().replace('class="primary" ', '') : ""}
        <button id="pendCont">Record it unnamed</button>
        <button id="pendSkip">Skip this carton</button>
        <div class="hint">⛔ Unnamed, the date attaches to nothing until somebody matches it by
@@ -1955,10 +1966,11 @@ async function shrink(file, max=1600, quality=0.72){
   return await new Promise(r=>c.toBlob(r,"image/jpeg",quality));
 }
 
-async function uploadPhoto(file, label){
+let photoCount = 0, photoFor = null;
+async function uploadPhoto(file, label, maxPx){
   if(!driveId) throw new Error(
     "no document library resolved on this site, so there is nowhere to put the photo");
-  const blob = await shrink(file);
+  const blob = await shrink(file, maxPx || 1600, maxPx ? 0.82 : 0.72);
   const stamp = new Date().toISOString().replace(/[:.]/g,"-");
   const name = `${stamp}_${(label||"scan").replace(/[^A-Za-z0-9._-]/g,"")}.jpg`;
   const t = await getToken();
@@ -2420,11 +2432,11 @@ function photoBtn(){
   return `<div style="margin-top:11px">
       <label for="failPhoto" style="display:inline-block;padding:10px 16px;border:1px solid var(--line);
              border-radius:4px;background:var(--card);cursor:pointer;font-size:15px">
-        📷 Photograph the label</label>
+        📷 Photograph each side of the box</label>
       <input id="failPhoto" type="file" accept="image/*" capture="environment"
-             style="display:none" aria-label="Photograph the label">
+             style="display:none" aria-label="Photograph each side of the box">
       <span class="hint" id="photoMsg" style="display:inline;margin-left:9px">
-        helps us fix why it will not scan</span>
+        every side and every label, one photo at a time — it shows us how to make these scan</span>
     </div>`;
 }
 
@@ -2563,12 +2575,17 @@ document.addEventListener("change", async e=>{
   const fail = lastFail || {};
   if(msg) msg.textContent="uploading…";
   try{
-    const up = await uploadPhoto(f, (fail.kind||"scan")+"_"+(fail.raw||"").slice(0,20));
+    /* ⭐ Jack, 2026-10-20: "take photos of everything on the outside of the box so that you can later figure out how to get
+       the longer scans to be 100%". One tap per side; the count tells the crew it is working. Kept at 2400px — a long
+       GS1-128 inkjet barcode must still be decodable from the photo later. */
+    photoCount = (photoFor === (fail.raw||"")) ? photoCount + 1 : 1; photoFor = fail.raw || "";
+    const up = await uploadPhoto(f, (fail.kind||"scan")+"_"+(fail.raw||"").slice(0,20)+"_side"+photoCount, 2400);
     /* ⛔ Recorded as a REJECT row, never a receipt — it is evidence about a
        failure, not stock. `raw_scan` carries the filename so the photo and the
        code that failed stay tied together. */
     await reject("PHOTO_"+(fail.kind||"SCAN"), `${fail.raw||""} PHOTO=${up.name}`, fail.upc||"");
-    if(msg) msg.textContent=`saved (${up.kb} KB) — thank you, carry on`;
+    if(msg) msg.textContent=`${photoCount} photo${photoCount>1?"s":""} saved — tap again for the next side, or carry on`;
+    e.target.value = "";
   }catch(err){
     if(msg) msg.textContent="photo did not upload: "+err.message;
   }
