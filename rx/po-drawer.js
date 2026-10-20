@@ -92,7 +92,7 @@ for(const a of ["row-fix-date", "row-fix-units", "row-delete"]) RX.registerAct(a
 function shell(title, body, extra){
   return `<div class="rx-backdrop" data-act="drawer-close"></div>
     <section class="rx-sheet" role="dialog" aria-modal="true" aria-label="${esc(title)}" ${extra || ""}>
-      <header class="rx-sheet-h"><strong>${esc(title)}</strong><button class="rx-btn" data-act="drawer-close" aria-label="${esc(t("drawer_close"))}">${esc(t("drawer_close"))}</button></header>
+      <header class="rx-sheet-h"><strong>${esc(title)}</strong><button class="rx-btn" data-act="drawer-close" data-close="3" aria-label="${esc(t("drawer_close"))}">${esc(t("drawer_close"))}</button></header>
       <div class="rx-sheet-b">${body}</div></section>`;
 }
 D.close = function(){
@@ -203,7 +203,7 @@ function rowHtml(){
     if(H.editing){
       actions += `<div class="rx-edit"><label class="hint" for="rxBinIn">${esc(t("drawer_shelf_prompt"))}</label>
         <input id="rxBinIn" class="num" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="${esc(t("drawer_shelf_prompt"))}">
-        <button class="rx-btn primary" data-act="row-bin-save">${esc(t("drawer_shelf_save"))}</button>${H.err ? `<div class="rx-note rx-red" role="alert">${esc(H.err)}</div>` : ""}</div>`;
+        <button class="rx-btn primary" data-act="row-bin-save">${esc(t("drawer_shelf_save"))}</button><button class="rx-btn" data-act="row-bin-cancel" data-close="1">${esc(t("btn_cancel"))}</button>${H.err ? `<div class="rx-note rx-red" role="alert">${esc(H.err)}</div>` : ""}</div>`;
     }else{
       actions += editable ? `<button class="rx-btn" data-act="row-change-bin">${esc(t("drawer_change_shelf"))}</button>`
                           : `<button class="rx-btn" data-act="row-tell-julia">${esc(t("drawer_tell_julia"))}</button>`;
@@ -216,6 +216,7 @@ function rowHtml(){
 function startEdit(kind){ H.editing = kind; H.err = ""; D.refresh(true); }
 RX.registerAct("row-change-bin", () => startEdit("change"));
 RX.registerAct("row-tell-julia", () => startEdit("tell"));
+RX.registerAct("row-bin-cancel", () => { H.editing = null; H.err = ""; D.refresh(true); });
 RX.registerAct("row-bin-save", () => {
   const row = pageRows().find(r => r.n === H.rowN); if(!row) return;
   const code = ((($("rxBinIn") || {}).value) || "").trim();
