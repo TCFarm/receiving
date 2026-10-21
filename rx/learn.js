@@ -21,6 +21,13 @@
    ⛔ A learned code never REPLACES a code the catalog already maps to a different product (apply skips it), and a code that
       fails its own check digit is never offered (a mis-read would pair junk with a real product).
    ⛔ A Revoked row is ignored everywhere (the person who fixes a wrong learning sets Revoked in the list).
+   ⭐ BUILD WAVE R4 (Jack, 2026-10-21 — an ambiguous code is asked "in BOTH places": the buyer's list AND "the tablet the next time
+   that code is scanned"): the mini publishes `app/receiving/past_scans.json` (Procurement & Merchandising/scripts/receiving_past_scans.py)
+   — per code the crew gave up on, the products sharing its brand prefix, those on that truck first. When an unknown code has
+   candidates the unknown card asks "Is this one of these?"; a tap still goes through OPEN THE CASE and the three ticks (the tablet's
+   rule is unchanged), it only skips the search. A code the buyer already learned in the portal is simply known (refresh()).
+   ⭐ Learn errors are VISIBLE (plan 4b): a learning still waiting to save after 2 minutes, or refused by SharePoint, shows a banner
+   (#lnBanner) until it saves or is dismissed — never silent. "Learned — every tablet knows it within a minute" once it saves.
    API: window.RXLearn = { setCandidate, start, apply, refresh, state } */
 (function(){
 "use strict";
@@ -28,12 +35,15 @@ const SITE = "tcfarm0.sharepoint.com:/sites/ClaudeAgents", LIST = "BarcodeLearni
 const KEY_Q = "learn_outbox_v1", KEY_C = "learn_cache_v1";
 const REFRESH_MS = 60000, MIN_GAP_MS = 20000, READ_LIMIT_MS = 8000;
 const S = { cand: null, learned: {}, siteId: null, listId: null, lastFetch: 0, fetching: null, outbox: [], flushing: false,
-            unitTicked: false, pick: null, err: "" };
+            unitTicked: false, pick: null, err: "", preSku: null, asks: null, asksAt: 0, refused: [] };
+const KEY_A = "learn_asks_v1", KEY_R = "learn_refused_v1", ASK_MS = 30 * 60000, STUCK_MS = 2 * 60000;
 
 const ls = { get(k, d){ try{ const v = JSON.parse(localStorage.getItem(k) || "null"); return v == null ? d : v; }catch(_){ return d; } },
              set(k, v){ try{ localStorage.setItem(k, JSON.stringify(v)); }catch(_){} } };
 S.learned = ls.get(KEY_C, {}) || {};
 S.outbox = (ls.get(KEY_Q, []) || []).filter(x => x && x.fields && x.fields.Code);
+S.asks = ls.get(KEY_A, null);
+S.refused = (ls.get(KEY_R, []) || []).filter(x => x && x.code);
 const e_ = (s) => (typeof esc === "function" ? esc(s) : String(s == null ? "" : s));
 const el = (id) => document.getElementById(id);
 
@@ -81,14 +91,18 @@ async function refresh(force){
     try{
       await ids();
       const map = {};
-      let url = `/sites/${S.siteId}/lists/${S.listId}/items?$expand=${encodeURIComponent("fields($select=Code,Sku,ProductName,Revoked,LearnId)")}&$top=500`;
+      let url = `/sites/${S.siteId}/lists/${S.listId}/items?$expand=${encodeURIComponent("fields($select=Code,Sku,ProductName,Revoked,LearnId,FinState,FinReason)")}&$top=500`;
       let pages = 0;
       while(url && pages < 20){
         const b = await G(url); pages++;
         for(const it of (b && b.value) || []){
           const f = it.fields || {}; const code = String(f.Code || "");
           if(!code || !f.Sku) continue;
-          if(f.Revoked){ map[code] = {sku: f.Sku, name: f.ProductName || "", revoked: true}; continue; }
+          /* review M1: a learning the mini REFUSED or HELD for a person (not one it is still posting) is not applied — Finale says
+             the code is not this product (e.g. CODE_ON_OTHER_PRODUCT), so the tablet must not receive it as one */
+          const dead = f.FinState === "refused" || f.FinState === "failed" || (f.FinState === "held" && !/^(POSTING|UNCERTAIN)/.test(String(f.FinReason || "")));
+          /* review M2: a revoked (or dead) row never hides a live one for the same code, whatever the list order */
+          if(f.Revoked || dead){ if(!map[code]) map[code] = {sku: f.Sku, name: f.ProductName || "", revoked: true}; continue; }
           if(!map[code] || map[code].revoked) map[code] = {sku: f.Sku, name: f.ProductName || ""};
         }
         url = b && b["@odata.nextLink"] ? String(b["@odata.nextLink"]).replace(/^https:\/\/graph\.microsoft\.com\/v1\.0/, "") : null;
@@ -111,13 +125,53 @@ async function flush(){
       try{ await graph(`/sites/${S.siteId}/lists/${S.listId}/items`, {method: "POST", body: JSON.stringify({fields: q.fields})}); }
       catch(e){
         if(e && e.status === 409){ /* duplicate LearnId = already saved */ }
-        else if(e && e.permanent){ console.warn("learning refused by SharePoint, dropped", q.fields, e); }
+        else if(e && e.permanent){ console.warn("learning refused by SharePoint, dropped", q.fields, e);
+          S.refused.push({code: q.fields.Code, sku: q.fields.Sku, why: String((e && e.message) || "refused").slice(0, 160), at: Date.now()}); ls.set(KEY_R, S.refused); }
         else break;                                                   // network / auth: keep it for the next pass
       }
-      S.outbox.shift(); ls.set(KEY_Q, S.outbox);
+      const saved = S.outbox.shift(); ls.set(KEY_Q, S.outbox);
+      if(saved && !S.refused.some(r => r.code === saved.fields.Code && r.at >= saved.at) && typeof RX === "object" && RX.toast) RX.toast(`Learned ${saved.fields.Code} — every tablet knows it within a minute`);
     }
   }catch(_){ /* site lookup failed: retried next pass */ }
-  finally{ S.flushing = false; }
+  finally{ S.flushing = false; banner(); }
+}
+
+/* ── learn errors are VISIBLE: a banner while a learning waits too long to save, or after SharePoint refused one ── */
+function banner(){
+  let b = el("lnBanner");
+  const old = S.outbox.filter(q => Date.now() - (q.at || 0) > STUCK_MS);
+  if(!old.length && !S.refused.length){ if(b) b.remove(); return; }
+  if(!b){ b = document.createElement("div"); b.id = "lnBanner"; b.setAttribute("role", "alert");
+    b.style.cssText = "position:fixed;left:0;right:0;bottom:0;z-index:50;padding:10px max(16px,env(safe-area-inset-left,0px)) calc(10px + env(safe-area-inset-bottom,0px));background:var(--warn-bg,#fff3cd);color:var(--ink,#222);border-top:2px solid var(--warn,#b8860b);font-size:15px";
+    document.body.appendChild(b); }
+  const parts = [];
+  if(old.length) parts.push(`⚠️ <strong>${old.length} new barcode${old.length === 1 ? "" : "s"} not saved to the shared list yet</strong> (${old.map(q => e_(q.fields.Code)).join(", ")}). They are kept on this tablet and retried — keep it online. Other tablets do not know ${old.length === 1 ? "it" : "them"} yet.`);
+  if(S.refused.length) parts.push(`⛔ <strong>SharePoint refused ${S.refused.length === 1 ? "a learned barcode" : S.refused.length + " learned barcodes"}</strong>: ${S.refused.map(r => e_(r.code) + " → " + e_(r.sku)).join(", ")}. Other tablets and Finale do not know it. Tell Jack. <button type="button" data-act="learn-banner-ok" style="margin-left:6px;min-height:0;padding:4px 10px">OK</button>`);
+  b.innerHTML = parts.join("<br>");
+}
+
+/* ── the buyer's list of codes to identify (app/receiving/past_scans.json, read with the signed-in token like the pack) ── */
+const ASK_PATH = "TC Farm/Claude Files/Procurement & Merchandising/app/receiving/past_scans.json";
+async function loadAsks(force){
+  if(typeof graph !== "function") return;
+  if(!force && Date.now() - S.asksAt < ASK_MS) return;
+  S.asksAt = Date.now();
+  try{
+    const drive = window.RX && RX.CFG && RX.CFG.pack && RX.CFG.pack.drive_id; if(!drive) return;
+    const j = await G(`/drives/${drive}/root:/${ASK_PATH.split("/").map(encodeURIComponent).join("/")}:/content`);
+    if(!j || j.kind !== "receiving_past_scans" || !Array.isArray(j.items)) return;
+    const map = {};
+    for(const it of j.items){
+      if(!it || it.status !== "identify" || !Array.isArray(it.candidates) || !it.candidates.length) continue;
+      map[pkey(it.code)] = it.candidates.slice(0, 6).map(c => ({sku: String(c.sku || ""), name: String(c.name || ""), truck: !!c.on_that_truck})).filter(c => c.sku);
+    }
+    S.asks = {built: j.built_utc || "", map}; ls.set(KEY_A, S.asks);
+  }catch(_){ /* keep the last copy: the question is a shortcut, never a gate */ }
+}
+function asksFor(code){
+  const bySku = (typeof CATALOG_BY_SKU === "object" && CATALOG_BY_SKU) || {};
+  const list = (S.asks && S.asks.map && S.asks.map[pkey(code)]) || [];
+  return list.filter(c => bySku[c.sku]).slice(0, 4);                // only products this tablet can show and confirm
 }
 
 /* ── the flow ── */
@@ -126,21 +180,28 @@ function setCandidate(c){
   S.cand = validCheck(code) ? {code, raw: String(c.raw || code)} : null;
   return !!S.cand;
 }
-const learnBtn = () => (S.cand ? `<button class="primary" id="learnStart" data-act="learn-start">Product we carry, new barcode? Learn it</button>` : "");
+const learnBtn = () => {
+  if(!S.cand) return "";
+  const asks = asksFor(S.cand.code);
+  const q = asks.length ? `<div id="lnAsk" style="margin:0 0 10px;padding:10px;border:1px solid var(--line);border-radius:4px">
+      <strong>Is this one of these?</strong> <span class="hint" style="display:inline">The buyer's list suggests them${asks.some(a => a.truck) ? " — the first was on that truck" : ""}. You still open the case and check.</span>
+      <div style="margin-top:8px">${asks.map(a => `<button class="lnask" data-act="learn-ask" data-sku="${e_(a.sku)}" style="display:block;width:100%;text-align:left;margin:0 0 6px">${e_(a.name || a.sku)} <span class="num" style="font-size:12px;color:var(--ink-3)">${e_(a.sku)}${a.truck ? " · on that truck" : ""}</span></button>`).join("")}</div></div>` : "";
+  return q + `<button class="primary" id="learnStart" data-act="learn-start">Product we carry, new barcode? Learn it</button>`;
+};
 function sizeOf(name){ const m = /\s-\s([^-]*\d[^-]*)$/.exec(String(name || "")); return m ? m[1].trim() : ""; }
 function codesFor(sku){ const out = []; for(const k in CATALOG){ if(CATALOG[k] && CATALOG[k].sku === sku && !CATALOG[k].learned) out.push(k); } return out.slice(0, 3); }
 const cancel = `<div class="pcloseRow"><button type="button" class="pclose" data-act="learn-cancel" data-close="3">Cancel — nothing learned</button></div>`;
 
-function start(){
+function start(preSku){
   if(!S.cand) return;
-  S.unitTicked = false; S.pick = null;
+  S.unitTicked = false; S.pick = null; S.preSku = preSku || null;
   prompt_("", "Learn a new barcode — 1 of 3: open the case",
     `New barcode <span class="num">${e_(S.cand.code)}</span>.<br><br>
      <strong>Open the case and take out ONE unit.</strong> Look at the unit's own barcode number.`,
     `<label style="display:flex;gap:10px;align-items:center;margin:8px 0 12px;font-size:16px">
        <input type="checkbox" id="lnUnit" data-act="learn-unit" style="width:24px;height:24px">
        The unit inside shows this same number (${e_(S.cand.code.slice(-6))} at the end)</label>
-     <button class="primary" id="lnNext1" data-act="learn-next1" disabled>Next — find the product</button>${cancel}`, {noClose: true});
+     <button class="primary" id="lnNext1" data-act="learn-next1" disabled>${S.preSku ? "Next — compare it" : "Next — find the product"}</button>${cancel}`, {noClose: true});
 }
 function find(){
   prompt_("", "Learn a new barcode — 2 of 3: find the product",
@@ -200,7 +261,7 @@ function ticksOk(){ return ["lnSame", "lnSize", "lnVar"].every(id => { const x =
 async function commit(){
   if(!S.cand || !S.pick || !ticksOk() || !S.unitTicked) return;
   const code = S.cand.code, p = S.pick, raw = S.cand.raw;
-  const conf = {same_product: true, same_size: true, same_variety: true, unit_opened: true,
+  const conf = {same_product: true, same_size: true, same_variety: true, unit_opened: true, asked: !!S.preSku && S.preSku === p.sku,
                 shown: {name: p.name || "", br: p.br || "", size: sizeOf(p.name), old: codesFor(p.sku)}};
   const fields = {Title: "learn " + code, LearnId: newId(), Code: code, Sku: p.sku, ProductName: String(p.name || "").slice(0, 250),
                   Confirmed: JSON.stringify(conf).slice(0, 4000), Operator: (typeof account === "string" ? account : "") || "",
@@ -210,7 +271,7 @@ async function commit(){
   try{ if(typeof reject === "function") reject("ALIAS", `${code} -> ${p.sku}`, code); }catch(_){}
   if(!CATALOG[code] || CATALOG[code].sku === p.sku) CATALOG[code] = Object.assign({}, p, {learned: true});
   flush();
-  S.cand = null; S.pick = null;
+  S.cand = null; S.pick = null; S.preSku = null;
   try{ pending = null; unresolved = null; }catch(_){}
   if(typeof clearPrompt === "function") clearPrompt();
   if(typeof handleScan === "function") await handleScan(raw);        // the case carries on as the confirmed product
@@ -225,7 +286,7 @@ function different(){
      The skip and its reason are recorded. ⛔ Set the case aside; do not put it away.`);
 }
 function cancelFlow(){
-  S.pick = null;
+  S.pick = null; S.preSku = null;
   try{ pending = null; unresolved = null; }catch(_){}
   if(typeof clearPrompt === "function") clearPrompt();
 }
@@ -273,13 +334,16 @@ function showPending(it){
 setTimeout(() => { loadPending(true); }, 3500);
 
 /* Clicks go through the core router (RX.registerAct) so the coverage gate sees a handler for every learn-* button. */
-const ACTS = { "learn-start": () => start(), "learn-cancel": () => cancelFlow(), "learn-next1": () => { if(S.unitTicked) find(); },
+const ACTS = { "learn-start": () => start(), "learn-cancel": () => cancelFlow(),
+               "learn-next1": () => { if(!S.unitTicked) return; const bySku = (typeof CATALOG_BY_SKU === "object" && CATALOG_BY_SKU) || {}; if(S.preSku && bySku[S.preSku]) confirm_(S.preSku); else find(); },
+               "learn-ask": (a) => start(a.el.getAttribute("data-sku")),
+               "learn-banner-ok": () => { S.refused = []; ls.set(KEY_R, S.refused); banner(); },
                "learn-pick": (a) => confirm_(a.el.getAttribute("data-sku")), "learn-back": () => find(),
                "learn-diff": () => different(), "learn-commit": () => { commit(); },
                "learn-unit": (a) => { S.unitTicked = !!a.el.checked; const b = el("lnNext1"); if(b) b.disabled = !S.unitTicked; },
                "learn-tick": () => { const b = el("lnLearn"); if(b) b.disabled = !ticksOk(); } };
 if(window.RX && RX.registerAct){
-  for(const n of ["learn-start", "learn-cancel", "learn-next1", "learn-pick", "learn-back", "learn-diff", "learn-commit", "learn-unit", "learn-tick"])
+  for(const n of ["learn-start", "learn-cancel", "learn-next1", "learn-pick", "learn-back", "learn-diff", "learn-commit", "learn-unit", "learn-tick", "learn-ask", "learn-banner-ok"])
     RX.registerAct(n, (a) => { ACTS[n](a); return (n === "learn-unit" || n === "learn-tick") ? undefined : "stop"; });
 }
 document.addEventListener("change", (e) => {
@@ -289,7 +353,7 @@ document.addEventListener("change", (e) => {
   if(act === "learn-tick"){ const b = el("lnLearn"); if(b) b.disabled = !ticksOk(); }
 });
 
-setTimeout(() => { refresh(true); flush(); }, 3000);
-setInterval(() => { refresh(false); flush(); }, REFRESH_MS);
-window.RXLearn = { setCandidate, start, apply, refresh, flush, learnBtn, validCheck, sizeOf, pendingFor, showPending, loadPending, state: S };
+setTimeout(() => { refresh(true); flush(); loadAsks(true); banner(); }, 3000);
+setInterval(() => { refresh(false); flush(); loadAsks(false); banner(); }, REFRESH_MS);
+window.RXLearn = { setCandidate, start, apply, refresh, flush, learnBtn, validCheck, sizeOf, pendingFor, showPending, loadPending, loadAsks, asksFor, banner, state: S };
 })();
