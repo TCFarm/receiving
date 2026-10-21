@@ -283,10 +283,22 @@ function _gs1Walk(s,today){
   }
   return {out,stop,split};
 }
+/* ⭐ 2026-10-21 (PM-2921; the real 10/20 case "10860011417610 04219605H 11262027"): a human-readable case label typed or
+   scanned WITHOUT AI brackets — space-separated fields, the first being the case GTIN. The walk read the leading "10" as AI 10
+   (lot) and threw the carton away as UNREADABLE. If the FIRST whitespace-separated token is a 12/13/14-digit code with a valid
+   check digit, it is AI 01. ⛔ Nothing else is guessed: the other tokens (lot, a date in an unknown order) are left for a
+   person to confirm. Same rule as gs1_case_label._spaced_gtin, pinned by gs1_vectors.json. */
+function _gs1SpacedGtin(s){
+  if(/[()]/.test(s) || s.includes(GS) || !/\s/.test(s)) return null;
+  const t=s.split(/\s+/)[0];
+  if(!/^\d{12,14}$/.test(t) || checkDigit(t.slice(0,-1))!==t.slice(-1)) return null;
+  return {"01": t.padStart(14,"0"), _spaced:true};
+}
 function parseElementString(scan,today){
   let s=String(scan||"").replace(_GS1_STRIP,""); if(!s) return {};
   const am=_GS1_AIM.exec(s); if(am) s=s.slice(am[0].length);     // strip ONE leading AIM symbology id
   s=s.replace(_GS1_SEP,GS);                                       // later ]C1 \x1d <GS> {GS} = separator
+  const sp=_gs1SpacedGtin(s); if(sp) return sp;
   if(!looksLikeElementString(s)) return {};
   if(s.includes("(")){
     const out={}; let m; const re=/\((\d{2,4})\)\s*([^(]*)/g;
