@@ -192,9 +192,11 @@ function sizeOf(name){ const m = /\s-\s([^-]*\d[^-]*)$/.exec(String(name || ""))
 function codesFor(sku){ const out = []; for(const k in CATALOG){ if(CATALOG[k] && CATALOG[k].sku === sku && !CATALOG[k].learned) out.push(k); } return out.slice(0, 3); }
 const cancel = `<div class="pcloseRow"><button type="button" class="pclose" data-act="learn-cancel" data-close="3">Cancel — nothing learned</button></div>`;
 
-function start(preSku){
+/* opts (B2, rx/identify.js): {noReplay, onLearned, onDifferent} — learning a carton ALREADY recorded unnamed: nothing is replayed (a
+   second receipt would double it); its saved date attaches once the code resolves. */
+function start(preSku, opts){
   if(!S.cand) return;
-  S.unitTicked = false; S.pick = null; S.preSku = preSku || null;
+  S.unitTicked = false; S.pick = null; S.preSku = preSku || null; S.opts = opts || null;
   prompt_("", "Learn a new barcode — 1 of 3: open the case",
     `New barcode <span class="num">${e_(S.cand.code)}</span>.<br><br>
      <strong>Open the case and take out ONE unit.</strong> Look at the unit's own barcode number.`,
@@ -271,13 +273,23 @@ async function commit(){
   try{ if(typeof reject === "function") reject("ALIAS", `${code} -> ${p.sku}`, code); }catch(_){}
   if(!CATALOG[code] || CATALOG[code].sku === p.sku) CATALOG[code] = Object.assign({}, p, {learned: true});
   flush();
-  S.cand = null; S.pick = null; S.preSku = null;
+  const o = S.opts; S.cand = null; S.pick = null; S.preSku = null; S.opts = null;
+  if(o && o.noReplay){                                                 // B2: a carton already recorded — never a second receipt
+    if(typeof clearPrompt === "function") clearPrompt();
+    try{ if(o.onLearned) o.onLearned(p.sku); }catch(_){}
+    if(typeof RX === "object" && RX.toast) RX.toast(`Learning ${code} as ${p.name || p.sku} — the recorded case attaches to it`);
+    return;
+  }
   try{ pending = null; unresolved = null; }catch(_){}
   if(typeof clearPrompt === "function") clearPrompt();
   if(typeof handleScan === "function") await handleScan(raw);        // the case carries on as the confirmed product
 }
 function different(){
   const code = S.cand ? S.cand.code : "";
+  const o = S.opts; S.opts = null;
+  if(o && o.noReplay){                                                 // B2: classify the recorded carton; there is no pending scan to clear
+    try{ if(o.onDifferent) o.onDifferent(); }catch(_){}
+  }
   try{ if(typeof reject === "function") reject("SKIPPED", `${code} :: different product - new item`, code); }catch(_){}
   S.cand = null; S.pick = null;
   try{ pending = null; unresolved = null; }catch(_){}
@@ -286,7 +298,8 @@ function different(){
      The skip and its reason are recorded. ⛔ Set the case aside; do not put it away.`);
 }
 function cancelFlow(){
-  S.pick = null; S.preSku = null;
+  const o = S.opts; S.pick = null; S.preSku = null; S.opts = null;
+  if(o && o.noReplay){ if(typeof clearPrompt === "function") clearPrompt(); return; }   // B2: nothing was pending — never clear a scan
   try{ pending = null; unresolved = null; }catch(_){}
   if(typeof clearPrompt === "function") clearPrompt();
 }
