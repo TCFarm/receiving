@@ -151,6 +151,8 @@
   <div id="rxArmed"></div>
   <div id="rxShelfBar"></div>
   <div id="rxStart" class="rx-start" hidden></div>
+  <!-- B2 (2026-10-21): To identify (n) + Finish truck, rx/identify.js -->
+  <div id="toIdArea"></div>
 
     <div class="scanbox" id="scanbox" style="border-color:var(--line)">
       <label class="big" for="po" id="poLabel">Delivery / PO number — optional</label>
@@ -224,6 +226,7 @@
 <script src="rx/staging.js"></script>
 <script src="rx/photos.js"></script>
 <script src="rx/learn.js"></script>
+<script src="rx/identify.js"></script>
 <script src="rx/version.js"></script>
 <script>
 "use strict";
@@ -1007,7 +1010,8 @@ async function handleScan(raw){
          <br><br>${window.RXLearn ? RXLearn.learnBtn() : ""}
          <button ${window.RXLearn && RXLearn.state.cand ? "" : 'class="primary" '}id="pendGo">Enter the date (unnamed)</button>
          ${noDateBtn()}
-         <button id="pendSkip">Skip this carton</button>
+         <button id="unkSealed">Sealed — can't open now</button>
+           <button id="toidCard" data-act="toid-open">To identify <strong>(${window.RXIdentify ? RXIdentify.count() : 0})</strong> — skip is in here</button>
          ${photoBtn()}`);
       return;
     }
@@ -1375,10 +1379,11 @@ function askDate(){
          ruling that the date outranks identification still holds, and this
          deliberately does not reverse it. */
       ? `<div style="margin-top:13px;border-top:1px solid var(--line);padding-top:11px">
-           <button class="primary" id="unkUnit">Scan a unit from inside the case</button>
+           <button class="primary" id="unkUnit">Open the case — scan one unit</button>
            <button id="unkFind">Find it by name</button>
            ${window.RXLearn ? RXLearn.learnBtn().replace('class="primary" ', '') : ""}
-           <button id="pendSkip">Skip this carton</button>
+           <button id="unkSealed">Sealed — can't open now</button>
+           <button id="toidCard" data-act="toid-open">To identify <strong>(${window.RXIdentify ? RXIdentify.count() : 0})</strong> — skip is in here</button>
            ${photoBtn()}
            <div class="hint">⛔ Without one of the first two we have the DATE but not
              the PRODUCT, so it attaches to nothing and waits in the Purchasing app
@@ -1413,11 +1418,11 @@ function askIdentify(){
     `<span class="num">${esc(rawCode)}</span> is not in the catalog. The best-by
      <strong>${esc(pending.best)}</strong> came off the label, so the date is safe either way.`,
     `<div style="margin-top:4px">
-       <button class="primary" id="unkUnit">Scan a unit from inside the case</button>
+       <button class="primary" id="unkUnit">Open the case — scan one unit</button>
        <button id="unkFind">Find it by name</button>
        ${window.RXLearn ? RXLearn.learnBtn().replace('class="primary" ', '') : ""}
-       <button id="pendCont">Record it unnamed</button>
-       <button id="pendSkip">Skip this carton</button>
+       <button id="unkSealed">Sealed — can't open now</button>
+           <button id="toidCard" data-act="toid-open">To identify <strong>(${window.RXIdentify ? RXIdentify.count() : 0})</strong> — skip is in here</button>
        <div class="hint">⛔ Unnamed, the date attaches to nothing until somebody matches it by
          hand. ⭐ Scanning a unit also teaches this carton's barcode, so it is never asked again.</div>
      </div>`);
@@ -1710,6 +1715,8 @@ function commit_(){
               _op: account, _at: Date.now(),
               saved:"queued", id:null, n:nextRowN() };
   rows.unshift(row); queue++;
+  /* ⭐ B2: an unnamed carton goes on this tablet's To identify list (rx/identify.js) */
+  try{ if(window.RXIdentify) RXIdentify.add(p, row); }catch(_){}
   /* ⭐ B12: scanning IS using the mode — the 6-hour question measures idleness,
      not time since somebody last tapped the mode buttons. */
   localStorage.setItem("modeAt", Date.now());
@@ -2726,6 +2733,21 @@ document.addEventListener("click",e=>{
      supplier print-quality complaint; "too busy" is a staffing problem; "not our
      product" is a delivery error. Four different fixes, identical without the why. */
   if(e.target.closest("#pendSkip")) return askSkipReason();
+  /* ⭐ B2 (plan 2026-10-21 §4b): "Sealed — can't open now" SAVES THE DATE and records the carton unnamed (HOLD shelf, To identify).
+     On the date prompt it needs the date first (the date outranks identification, Jack 2026-09-03); with a date already known
+     (label, or askIdentify) it records at once; on the retail-code card it goes on to the date. */
+  if(e.target.closest("#unkSealed") && pending){
+    pending.sealed = true; pending.idAsked = true;
+    const ty = $("typed"), pk = $("pick");
+    if(ty || pk){
+      if(!((ty && ty.value.trim()) || (pk && pk.value))){
+        const h = $("bbRead"); if(h) h.innerHTML = `<span style="color:var(--bad,#b00)">Enter the best-by first — Sealed saves it and puts the case on the HOLD shelf.</span>`;
+        if(ty) ty.focus(); return;
+      }
+      const ok = $("dok"); if(ok) ok.click(); return;
+    }
+    clearPrompt(); return next();
+  }
   const sk = e.target.closest("[data-skip]");
   if(sk){
     const why = sk.dataset.skip === "other"
@@ -2796,7 +2818,7 @@ document.addEventListener("click",e=>{
      ladder now runs automatically for an unknown code, so an optional button
      asking for the same thing could only be a second, colder path. */
   if(e.target.closest("#unkFind")){ pending = null; return askFind(); }
-  if(e.target.closest("#pendCont") && pending){ pending.idAsked = true; clearPrompt(); return next(); }
+  /* ⛔ #pendCont ("Record it unnamed") was replaced by #unkSealed on 2026-10-21 (B2): same action, plus the HOLD shelf and the list */
   /* ⭐ B4(b): a failed read has no code worth pairing, so this starts clean */
   if(e.target.closest("#failFind")){ pending = null; unresolved = null; return askFind(); }
   if(e.target.closest("#bbRedo") && pending){ pending.best=null; delete pending.dateConfirmed; return askDate(); }
