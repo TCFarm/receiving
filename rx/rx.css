@@ -103,3 +103,17 @@ body.rx-on .modes button,body.rx-on #signout{min-height:48px!important}
 .rx-banner[role="alert"]{background:var(--stop-soft);color:var(--ink)}
 /* the scan label: the page's uppercase micro-label measured 4.2:1; one step darker passes 4.5:1 in light and dark */
 body.rx-on label.big#scanLabel{color:var(--ink-2)}
+/* 2026-10-22 — a problem's words + its one button (rx/problems.js), the PO drawer's "What's holding this truck", Fix a scan */
+.rx-pb{display:block;margin:6px 0 4px;padding:8px 10px;border-left:5px solid var(--wait);background:var(--wait-soft);color:var(--ink);font-size:13.5px;line-height:1.35}
+.rx-pb-refused,.rx-pb-denied{border-left-color:var(--stop);background:var(--stop-soft)}
+.rx-pb-buyer,.rx-pb-told{border-left-color:var(--line);background:var(--card)}
+.rx-pb .rx-btn{margin:6px 6px 0 0;min-height:48px}
+.rx-pb-msg{margin-top:4px}
+.rx-holding{margin-top:6px}
+.rx-holding .rx-chipbtn{min-height:48px;text-align:left}
+.rx-scan{padding:6px 0;border-top:1px solid var(--line-2)}
+.rx-scan > .rx-btn{min-height:48px;margin-left:6px}
+.rx-scan.rx-strike{background:none}
+.rx-fix{margin:8px 0;padding:10px;border:1px solid var(--line);background:var(--card)}
+.rx-fix input{width:110px;font-size:20px;padding:8px;min-height:48px;margin:6px 8px 6px 0}
+.rx-fix .rx-btn{min-height:48px;margin:4px 6px 0 0}
