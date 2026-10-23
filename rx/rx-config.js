@@ -63,7 +63,7 @@ const CFG = {
   /* the flows RX knows and the steps each runs between "qty saved" and "commit".
      ⭐ A step with no registered handler is SKIPPED, so a flow whose steps have not shipped degrades to today's
      best-by-only commit instead of breaking. WP4b registers `shelf`, `stage`, `tray` (and may add `exceptions`). */
-  flows: { bestby: [], direct: ["damage","overship","exceptions","nopo","shelf"], sort: ["damage","overship","exceptions","nopo","stage"], staged: ["damage","overship","nopo","tray"] },
+  flows: { bestby: [], direct: ["oncart","damage","overship","exceptions","nopo","shelf"], sort: ["oncart","damage","overship","exceptions","nopo","stage"], staged: ["damage","overship","nopo","tray"] },
   scan_log_max: 12,
   PHOTO_WAIT:     10*1000,          // round 5: Continue on the damage-photo card waits this long (twice) for an upload in flight
   SHELF_IDLE:     10*60*1000,       // round 4 (D12): shelf mode clears after this long with no case put away
