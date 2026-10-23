@@ -47,6 +47,7 @@ const COPY_ADD = {
   pb_staged_dup:  "Finale already has all of this line ({n} of {m}) — this cart record ({area}, {age} ago) looks like the same case scanned again.",
   pb_dup_rm:      "Same case — remove this record",
   pb_dup_keep:    "It's a second case — put it away",
+  pb_auto_dup:    "Counted as a duplicate automatically: the same item and best-by was put away later and Finale has the whole line.",
   pb_temp:        "{name} is filed as {cls}, but {bin} is a {bcls} shelf. Finale is waiting for a yes.",
   pb_temp_yes:    "Yes, it belongs in {bin}",
   pb_over:        "Finale already has all {n} we ordered — this scan would be extra.",
@@ -150,6 +151,67 @@ P.of = function(v){
   }
   return null;
 };
+/* ⭐ 2026-10-23 (Jack: "If they scan a staged case twice but only put it away once, then we should count that as a duplicate
+   automatically"). A cart record is retired with NO tap only when it is certainly the same case: still staged and never acted on, the
+   PO line is already full in Finale, and the SAME item with the SAME best-by on the same PO was scanned LATER and is POSTED (the put-away
+   of the case that was on the cart). ⛔ A different best-by, nothing posted later, or a line not yet full still asks a person.
+   ⛔ Never while the PO-wide read is down or not loaded (an unseen part must not be decided on). ⛔ The cancel is an If-Match PATCH, so
+   two tablets cannot both act and a record the poster moved is left alone. Its best-by row is then removed with the Remove guard;
+   the cohort engine ALSO caps every SKU at the PO quantity across scan days (`_shared/inventory_cohorts._cap_to_finale`), so a row
+   that could not be removed is still counted once while the PO is in its window. -> the posted twin, or null */
+P.autoTwin = function(v){
+  if(!v) return null;
+  const f = v.fields || {};
+  if(f.Kind !== "intent" || f.State !== "staged" || f.PageMode !== "live" || (v.fin || {}).FinState) return null;
+  if(!f.Po || !f.Sku || !f.BestBy) return null;
+  if(I.state && (I.state.poErr || !I.state.poLoaded)) return null;
+  const rec = I.byId(v.iid); if(rec && (rec.cancelled || rec.inflight || (rec.patches || []).length || !rec.sent)) return null;
+  const cf = RX.po && RX.po.confirmed ? RX.po.confirmed(f.Po, f.Sku) : null;
+  if(!(cf && cf.ordered > 0 && cf.units >= cf.ordered)) return null;
+  const at = Date.parse(f.ScanAt); if(isNaN(at)) return null;
+  /* ⛔ review 2026-10-23 (2): ONE put-away retires at most ONE cart record. Two cases staged with the same date and one of them put
+     away must leave the other on the cart (a vendor that over-shipped makes the line read full on the first put-away). Count, per
+     (PO, item, best-by): later posted scans vs cart records already cancelled; retire only while there are more of the first, and
+     only the OLDEST live cart record (ScanAt, then id) — every tablet picks the same one, so two tablets cannot retire two. */
+  const same = (g) => String(g.Po || "") === String(f.Po) && g.Sku === f.Sku && String(g.BestBy || "") === String(f.BestBy);
+  let twin = null, twins = 0, gone = 0; const live = [];
+  for(const x of (I.allPo ? I.allPo() : I.allToday())){
+    const g = x.fields || {}; if(g.Kind === "fix" || !same(g)) continue;
+    const xr = I.byId(x.iid);
+    const cancelled = g.State === "cancelled" || (xr && xr.cancelled);
+    if(g.Workflow === "staged" && cancelled){ gone++; continue; }
+    if(cancelled) continue;
+    if(g.State === "staged" && !(x.fin || {}).FinState){ live.push(x); continue; }
+    if(!(x.fin && x.fin.FinState === "posted") || rootOf(x) === rootOf(v)) continue;
+    const xa = Date.parse(g.ScanAt); if(isNaN(xa) || xa <= at) continue;
+    twins++; if(!twin) twin = x;
+  }
+  if(!twin || gone >= twins) return null;
+  live.sort((a, b) => (Date.parse((a.fields || {}).ScanAt) - Date.parse((b.fields || {}).ScanAt)) || (a.iid < b.iid ? -1 : a.iid > b.iid ? 1 : 0));
+  return live.length && live[0].iid === v.iid ? twin : null;
+};
+const AUTO_TRIED = new Set();
+P.autoRetire = async function(){
+  let n = 0;
+  for(const v of (I.allPo ? I.allPo() : I.allToday())){
+    if(AUTO_TRIED.has(v.iid) || BUSY.has(v.iid) || !P.autoTwin(v)) continue;
+    AUTO_TRIED.add(v.iid); BUSY.add(v.iid);
+    try{
+      const r = await patchIntent(v, {State:"cancelled"}, "");
+      if(r.ok){
+        n++; P.state.msg[v.iid] = t("pb_auto_dup");
+        /* review 2026-10-23 (3): also take its best-by row (the same guard as Remove — never one another live part uses, never
+           while the PO-wide read is down), so the date is counted once even after the PO leaves the engine's PO-lines window */
+        const b = await P.dropBb(v);
+        if(!b.ok) P.tellBbLeft(v, b.why || "the best-by delete failed");
+      }
+    }catch(e){ try{ console.error("rx auto-dup", e); }catch(_){} }
+    finally{ BUSY.delete(v.iid); }
+  }
+  if(n){ RX.refresh(); RX.call("drawer", "refresh", true); }
+  return n;
+};
+RX.on("intents", () => { P.autoRetire(); });
 /* ⭐ 2026-10-22 (PM-3069): a staged case taken off the cart list ("Not put away") must take its best-by row with it, or the date is
    counted twice when the case is scanned again (live: Rosemary Garlic Fries BB 4486 kept, rescanned as 4492 → 18u recorded vs 12).
    The SAME guard as "Scanned twice": never while another live part of the case uses that row, nor while the PO-wide read is down.
