@@ -27,6 +27,11 @@ const showShelf = () => RX.active() && (RX.flowActive() || pageRows().some(r => 
 const portrait = () => { try{ return window.matchMedia("(orientation: portrait)").matches; }catch(_){ return false; } };
 const bucket = (r) => {
   if(r.saved === "FAILED" || r.saved === "UNSAVEABLE" || r.fix) return "problems";
+  /* ⭐ 2026-10-22: the problem map decides (rx/problems.js) — a held / refused scan the crew can fix is a problem; a staged case keeps
+     its own chip (Staged) but the Problems filter lists it too (inProblems), because it is not in Finale until it is shelved */
+  const pb = RX.problems ? RX.problems.forRow(r) : null;
+  if(pb && pb.owner === "crew" && pb.kind !== "staged") return "problems";
+  if(pb && pb.owner === "buyer") return "other";
   const c = RX.intents.chipFor(r); if(!c) return "other";
   if(c.tone === "red" || c.tone === "violet") return "problems";
   if(c.tone === "blue") return "staged";
@@ -34,10 +39,11 @@ const bucket = (r) => {
   return "other";
 };
 
+const inProblems = (r) => bucket(r) === "problems" || (bucket(r) === "staged" && !!(RX.problems && RX.problems.forRow(r)));
 D.histRows = function(all){
   if(!showShelf()) return all;
   let out = all;
-  if(H.hist !== "all") out = out.filter(r => bucket(r) === H.hist);
+  if(H.hist !== "all") out = out.filter(r => H.hist === "problems" ? inProblems(r) : bucket(r) === H.hist);
   if(!H.showAll && H.hist === "all" && RX.flowActive() && portrait() && out.length > 8) out = out.slice(0, 8);
   return out;
 };
@@ -58,7 +64,7 @@ D.afterRender = function(){
   if(tools){
     if(!on){ tools.innerHTML = ""; }
     else{
-      const cnt = {problems:0}; for(const r of all) if(bucket(r) === "problems") cnt.problems++;
+      const cnt = {problems:0}; for(const r of all) if(inProblems(r)) cnt.problems++;
       const f = (k, label, n) => `<button class="rx-chipbtn${H.hist === k ? " on" : ""}" data-act="hist-filter" data-f="${k}" aria-pressed="${H.hist === k}">${esc(label)}${n ? " "+n : ""}</button>`;
       const more = (RX.flowActive() && portrait() && H.hist === "all" && all.length > 8 && !H.showAll) ? `<button class="rx-chipbtn" data-act="hist-show-all">${esc(t("hist_show_all"))}</button>` : "";
       const h = f("all", t("hist_all")) + f("waiting", t("hist_waiting")) + f("problems", t("hist_problems"), cnt.problems) + f("staged", t("hist_staged")) + more;
@@ -70,7 +76,7 @@ D.afterRender = function(){
     let mine = all.filter(r => !r.audit); try{ mine = all.filter(r => !!r.audit === isAudit()); }catch(_){}
     let inF = 0, wait = 0, prob = 0, gs1 = 0;
     for(const r of mine){ const b = bucket(r); const c = RX.intents.chipFor(r);
-      if(c && c.tone === "green") inF++; if(b === "waiting") wait++; if(b === "problems") prob++;
+      if(c && c.tone === "green") inF++; if(b === "waiting") wait++; if(inProblems(r)) prob++;
       if(String(r.source || "").endsWith("gs1")) gs1++; }
     const tiles = [[t("tile_cases"), mine.length, false], [t("tile_infinale"), inF, false], [t("tile_waiting"), wait, wait > 0 && false],
                    [t("tile_problems"), prob, prob > 0], [t("tile_notyping"), mine.length ? Math.round(gs1 / mine.length * 100)+"%" : "—", false]];
@@ -81,7 +87,7 @@ D.afterRender = function(){
 RX.registerAct("hist-filter", ({el}) => { H.hist = el.dataset.f || "all"; H.showAll = false; RX.refresh(); });
 RX.registerAct("hist-show-all", () => { H.showAll = true; RX.refresh(); });
 RX.registerAct("hist-row", ({el, ev}) => {
-  if(ev.target.closest(".datecell,.unitcell,.delcell")) return;      // their own correction cells win
+  if(ev.target.closest(".datecell,.unitcell,.delcell,.rx-pb")) return;      // their own correction cells (and a problem's button) win
   if(!showShelf()) return;
   const row = pageRows().find(r => String(r.n) === el.dataset.n); if(row) D.openRow(row);
 });
@@ -133,23 +139,28 @@ function poHtml(){
   const q = H.poSearch.trim().toLowerCase();
   for(const x of sum){
     const pct = x.lines ? Math.round(x.done / x.lines * 100) : 0;
+    /* ⭐ 2026-10-22: what is holding THIS truck, in counts the crew can act on; tapping it shows only those lines */
+    const hold = [x.staged ? t("pb_sum_staged", {n:x.staged}) : "", (x.crew - x.staged) > 0 ? t("pb_sum_crew", {n:x.crew - x.staged}) : "", x.buyer ? t("pb_sum_buyer", {n:x.buyer}) : ""].filter(Boolean);
     body += `<div class="rx-pohead"><strong>PO ${esc(x.po.order_id)}</strong> · ${esc(x.due)}
       <div class="rx-bar" role="progressbar" aria-valuemin="0" aria-valuemax="${x.lines}" aria-valuenow="${x.done}"><span style="width:${pct}%"></span></div>
-      <div class="hint">${esc(t("po_progress", {done:x.done, total:x.lines, pct}))}</div></div>`;
+      <div class="hint">${esc(t("po_progress", {done:x.done, total:x.lines, pct}))}</div>
+      <div class="rx-holding" data-po="${esc(x.po.order_id)}">${hold.length ? `<button type="button" class="rx-chipbtn${H.poFilter === "problems" ? " on" : ""}" data-act="po-filter" data-f="problems"><strong>${esc(t("pb_holding"))}:</strong> ${esc(hold.join(" · "))}</button>` : `<span class="hint">${esc(t("pb_none"))}</span>`}</div></div>`;
     let n = 0;
     (x.po.lines || []).forEach((line, i) => {
       const s = x.statuses[i];
       const info = RX.pack.skuInfo(line.sku) || {};
       const name = info.name || line.sku;
-      if(H.poFilter === "problems" ? s.problems === 0 : (H.poFilter !== "all" && H.poFilter !== "notpo" && s.state !== H.poFilter)) return;
+      /* a line just fixed stays in Problems while its answer is on screen ("Removed.", "Sent again…") — never vanishes mid-read */
+      const said = RX.problems && s.scans.some(c => RX.problems.state.msg[c.iid]);
+      if(H.poFilter === "problems" ? (s.problems === 0 && s.buyer === 0 && !said) : (H.poFilter !== "all" && H.poFilter !== "notpo" && s.state !== H.poFilter)) return;
       if(H.poFilter === "notpo") return;
       if(q && !(name.toLowerCase().includes(q) || String(line.sku).toLowerCase().includes(q))) return;
       n++;
-      const key = x.po.order_id+"|"+line.sku, open = !!H.expanded[key];
+      const key = x.po.order_id+"|"+line.sku, open = !!H.expanded[key] || (H.poFilter === "problems" && H.expanded[key] !== false);
       body += `<div class="rx-line rx-${s.state}"><button class="rx-linebtn" data-act="po-line" data-key="${esc(key)}" aria-expanded="${open}">
         <span class="rx-lname">${esc(name)}</span><span class="rx-lqty num">${esc(t("po_line_of", {k:s.k, n:s.n, unit:s.unit}))}</span>
         <span class="rx-lshelf">${esc(s.shelves.join(", "))}</span>${s.problems ? `<span class="rx-chip rx-red">${s.problems}</span>` : ""}</button>`;
-      if(open) body += `<div class="rx-scans">` + (s.scans.length ? s.scans.map(c => `<div class="num">${esc(RX.hhmm(c.at))} ${esc(String(c.op).split("@")[0])} · ${c.units}u${c.bb ? " · bb "+esc(c.bb) : ""}${c.bin ? " · "+esc(c.bin) : ""}${c.fin ? " · "+esc(c.fin) : ""}</div>`).join("") : `<div class="hint">No scans yet.</div>`) + `</div>`;
+      if(open) body += `<div class="rx-scans">` + (s.scans.length ? s.scans.map(c => scanLine(c)).join("") : `<div class="hint">No scans yet.</div>`) + `</div>`;
       body += `</div>`;
     });
     if(!n && H.poFilter !== "notpo") body += `<div class="hint">${esc(t("po_empty"))}</div>`;
@@ -161,12 +172,28 @@ function poHtml(){
   }
   return shell("Delivery", body);
 }
+/* one scan under an expanded line: when, who, units, date, shelf, its state in words — then the problem's words + button, and Fix.
+   ⭐ 2026-10-22: the date is shown (a scan from another day must be recognisable) and a cancelled scan is struck through, never hidden. */
+const FIN_WORDS = {posted:"in Finale", held:"held", refused:"refused", posting:"going into Finale", uncertain:"checking Finale", shadow:"practice"};
+function scanLine(c){
+  const f = (c.v && c.v.fields) || {};
+  const day = c.at ? String(c.at).slice(5, 10) : "";
+  const cancelled = c.state === "cancelled" || (RX.intents.byId(c.iid) || {}).cancelled;
+  const st = cancelled ? "cancelled" : (c.state === "staged" && !c.fin ? "on a cart" : (FIN_WORDS[c.fin] || (c.fin ? c.fin : "waiting")));
+  let h = `<div class="rx-scan${cancelled ? " rx-strike" : ""}" data-iid="${esc(c.iid)}"><span class="num">${esc(day)} ${esc(RX.hhmm(c.at))} ${esc(String(c.op).split("@")[0])} · ${c.units}u${c.bb ? " · bb "+esc(c.bb) : ""}${c.bin ? " · "+esc(c.bin) : (f.StagedArea ? " · "+esc(f.StagedArea) : "")} · ${esc(st)}</span>`;
+  if(!cancelled && c.v && f.Kind !== "fix") h += ` <button type="button" class="rx-btn" data-act="fix-open" data-iid="${esc(c.iid)}">${esc(t("fix_btn"))}</button>`;
+  const ph = (!cancelled && c.v && RX.problems) ? RX.problems.html(c.v) : "";
+  if(ph) h += ph;
+  else if(RX.problems && RX.problems.state.msg[c.iid]) h += `<div class="hint rx-pb-msg" role="status">${esc(RX.problems.state.msg[c.iid])}</div>`;
+  if(c.v && RX.problems && RX.problems.state.fixing === c.iid) h += RX.problems.fixHtml(c.v);
+  return h + `</div>`;
+}
 function notOnPo(){
   return pageRows().filter(r => !r.audit && !r.deleted && r.prod && !String(r.prod.sku).startsWith("!") && RX.pack.data
     && (RX.po.matchFor(r) || {}).status === "notpo");
 }
 RX.registerAct("po-filter", ({el}) => { H.poFilter = el.dataset.f || "all"; D.refresh(true); });
-RX.registerAct("po-line", ({el}) => { const k = el.dataset.key; H.expanded[k] = !H.expanded[k]; D.refresh(true); });
+RX.registerAct("po-line", ({el}) => { const k = el.dataset.key; const was = el.getAttribute("aria-expanded") === "true"; H.expanded[k] = !was; D.refresh(true); });
 RX.registerAct("po-refresh", () => { RX.pack.load({force:true}); });
 document.addEventListener("input", (e) => { if(e.target && e.target.id === "rxPoSearch"){ H.poSearch = e.target.value; D.refresh(true); const f = $("rxPoSearch"); if(f){ f.focus(); try{ f.setSelectionRange(f.value.length, f.value.length); }catch(_){} } } });
 
@@ -197,6 +224,8 @@ function rowHtml(){
   const basis = row.qtyBasis ? ` · case size ${esc(row.qtyShown)} (${esc(row.qtyBasis.replace(/_/g, " "))})` : "";
   b += `<div class="rx-kv"><span>Source</span><span>${String(row.source || "").endsWith("gs1") ? "GS1 label" : "keyed"}${basis}</span></div>`;
   b += `<div class="rx-kv"><span>Scanned</span><span>${esc(String(row._op || "").split("@")[0])} · ${esc(RX.hhmm(row._at || 0))}</span></div>`;
+  if(RX.problems){ for(const rec of recs){ const v = {iid:rec.iid, fields:rec.fields, fin:rec.fin || {}, itemId:rec.itemId, etag:rec.etag, local:true};
+    if(RX.problems.of(v) || RX.problems.state.msg[rec.iid]) b += RX.problems.html(v) || `<div class="hint rx-pb-msg" role="status">${esc(RX.problems.state.msg[rec.iid])}</div>`; } }
   const editable = recs.length && recs.every(r => RX.intents.editable(r));
   let actions = "";
   if(recs.length){
