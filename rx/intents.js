@@ -37,6 +37,7 @@
    byId(iid)  forRow(row) → [rec]  allToday() → [{iid, fields, fin, itemId, etag, local}]  editable(rec)
    chipFor(row) → {text, tone, title, rank, since?}|null     chipOf(rec) → same for one intent
    query(odataFilter, {select})  → [{id, etag, iid, fields, fin}]  (paged; throws on ANY failure — never partial)
+   allPo() → allToday() ∪ every intent of the open pack POs (any day, any tablet; 2026-10-22)
    flush()  unsent()  poll()  denied()  resolveList()  state
    rec = {iid, day, createdAt, fields, itemId, etag, sent, tried, inflight, patches[], fin, denied, cancelled, …} */
 (function(){
@@ -749,8 +750,47 @@ async function pollList(gen){
   const items = await I.query(`fields/ScanDay eq '${RX.today()}'`);
   if(gen !== pollGen) return;                // a late answer is ignored
   applyList(items); I.state.lastPollAt = RX.now(); I.state.lastPollErr = ""; authOk(null);
+  await pollPo(gen);
   RX.emit("intents"); RX.refresh();
 }
+/* ⭐ 2026-10-22 (crew: "what is holding it up?"): EVERY intent of each OPEN pack PO, whatever day and tablet scanned it. Reading only
+   ScanDay == today hid yesterday's staged and held cases from every tablet but the one that scanned them, so the PO drawer showed a
+   truck at 95% with nothing to act on. Counters and problems read today ∪ these (I.allPo, de-duplicated by IntentId).
+   ⛔ A failed read keeps the last good map (never "nothing is wrong"); only today's map is authoritative for this tablet's own rows. */
+RX.state.poAll = new Map();
+async function pollPo(gen){
+  const pos = (RX.pack.data && RX.pack.data.pos || []).map(p => String(p.order_id || "")).filter(x => /^[\w-]{1,40}$/.test(x));
+  if(!pos.length){ RX.state.poAll = new Map(); return; }
+  try{
+    const m = new Map();
+    for(const po of pos){
+      const items = await I.query(`fields/Po eq '${po}'`);
+      if(gen !== pollGen) return;
+      for(const it of items){ if(it.iid) m.set(it.iid, {itemId:it.id, etag:it.etag, fields:it.fields, fin:it.fin}); }
+    }
+    /* ⛔ review 2026-10-22 (4): this tablet's OWN earlier-day records were refreshed only by today's read, so a case another tablet
+       put away yesterday still read "on a cart" here and every action met a stale etag. Bring sent records up to date from this read
+       exactly as applyList does (fin, etag, page-owned columns when nothing of ours is queued). */
+    for(const [iid, v] of m){
+      const rec = S.recs[iid]; if(!rec || !rec.sent || rec.inflight || RX.state.todayAll.has(iid)) continue;
+      rec.itemId = rec.itemId || v.itemId; rec.etag = v.etag || rec.etag; rec.fin = v.fin || {}; rec.lastSeen = RX.now();
+      if(!rec.patches.length){
+        for(const k of ["State","Location","BinSource","ReadyAt","PlacedBy","StagedArea","CancelTooLate","Units"]){
+          if(v.fields[k] !== undefined && v.fields[k] !== null) rec.fields[k] = v.fields[k];
+        }
+        if(rec.fields.State === "cancelled") rec.cancelled = true;
+      }
+    }
+    RX.state.poAll = m; I.state.poErr = ""; I.state.poLoaded = true; save();
+  }catch(e){ I.state.poErr = (e && e.message) || "error"; }
+}
+I.allPo = function(){
+  const out = I.allToday(), seen = new Set(out.map(x => x.iid));
+  for(const [iid, v] of RX.state.poAll){ if(seen.has(iid)) continue; const rec = S.recs[iid];
+    out.push(rec ? {iid, fields:Object.assign({}, v.fields, rec.fields), fin:rec.fin && rec.fin.FinState ? rec.fin : v.fin, itemId:v.itemId, etag:rec.etag || v.etag, local:true}
+                 : {iid, fields:v.fields, fin:v.fin, itemId:v.itemId, etag:v.etag, local:false}); seen.add(iid); }
+  return out;
+};
 async function pollPoster(gen){
   const ps = RX.poster;
   try{
