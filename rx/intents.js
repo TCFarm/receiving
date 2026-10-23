@@ -34,6 +34,10 @@
    patch(iid, colFields)         → 'queued'|'merged'|'too_late'|'none'  (unsent ⇒ merged into the pending POST)
    cancel(iid)                   → 'cancelled'|'too_late'|'none'
    fix({of, units, bin, note})   → rec    (Kind=fix; the poster ignores it, Julia's tab lists it)
+   shorts() → every Kind=short record of today ∪ the open pack POs (rx/short.js — the crew's "we never got it", 2026-10-23)
+   ⛔ allToday() / allPo() NEVER return a Kind=short record: every counter, problem and chip reads them and was written for
+      receipts (they exclude only Kind=fix). A short is not a scan; it is read only through shorts(). It carries Units=0 too, so a
+      reader elsewhere that miscounts it as a receipt adds nothing.
    byId(iid)  forRow(row) → [rec]  allToday() → [{iid, fields, fin, itemId, etag, local}]  editable(rec)
    chipFor(row) → {text, tone, title, rank, since?}|null     chipOf(rec) → same for one intent
    query(odataFilter, {select})  → [{id, etag, iid, fields, fin}]  (paged; throws on ANY failure — never partial)
@@ -46,7 +50,7 @@ const RX = window.RX; if(!RX) return;
 const CFG = RX.CFG, I = RX.intents, t = RX.t;
 
 RX.INTENT_FIELDS = ["IntentId","Kind","State","PageMode","ScanDay","ScanAt","ReadyAt","Po","Sku","Upc","Gtin14","Units","Cases","CaseQty","QtyKind","BestBy","Lot","Location","BinSource","Workflow","StagedArea","RecommendedBin","RecReasons","SplitOf","TempConfirmed","FefoOverride","ShortDated","CancelTooLate","OverConfirmed","DamagedUnits","RejectedUnits","RawScans","PhotoUrls","Operator","Device","BbItemId","PlacedBy","FixUnits","FixBin","FixNote"];
-RX.INTENT_CHOICES = {"Kind":["intent","fix"],"State":["staged","ready","skipped","cancelled"],"PageMode":["off","shadow","live"],"QtyKind":["full","part"],"BinSource":["scanned","typed","armed"],"Workflow":["direct","staged"]};
+RX.INTENT_CHOICES = {"Kind":["intent","fix","short"],"State":["staged","ready","skipped","cancelled"],"PageMode":["off","shadow","live"],"QtyKind":["full","part"],"BinSource":["scanned","typed","armed"],"Workflow":["direct","staged"]};
 const FIN_FIELDS = ["FinState","FinReason","FinPo","FinShipment","FinBatch","FinAt","FinUnitsPosted","FinUnitsHeld","FinUnitsWould"];
 const NUM = new Set(["Units","Cases","CaseQty","DamagedUnits","RejectedUnits","FixUnits"]);
 const BOOL = new Set(["TempConfirmed","FefoOverride","ShortDated","CancelTooLate","OverConfirmed"]);
@@ -179,7 +183,7 @@ const isFinal = (rec) => {
   const fs = (rec.fin && rec.fin.FinState) || "";
   if(fs === "posted" || fs === "refused" || fs === "shadow") return true;
   if(rec.fields.State === "skipped" || rec.fields.State === "cancelled") return true;
-  if(rec.fields.Kind === "fix") return true;
+  if(rec.fields.Kind === "fix" || rec.fields.Kind === "short") return true;
   if(rec.fields.PageMode === "shadow" && rec.sent && rec.fields.State !== "staged") return true;    // shadow ends at "Saved"
   return false;
 };
@@ -473,7 +477,8 @@ function dropPatch(rec, p, why){
   if(voidSplit(rec, p, why)) return;
   const f = p.fields || {};
   if(f.State === "cancelled"){ rec.cancelled = false; rec.fields.State = p.prevState || (rec.fields.State === "cancelled" ? "ready" : rec.fields.State); }
-  if(!evidenceOnly(f) && !p.tooLateOk){
+  /* ⛔ a crew SHORT whose cancel was refused is not a buyer correction: no fix row (rx/short.js shows it on the line) */
+  if(!evidenceOnly(f) && !p.tooLateOk && rec.fields.Kind !== "short"){
     I.fix({of:rec.iid, units:f.Units, bin:f.Location, note:(f.State === "cancelled" ? "cancel" : "edit")+" refused: "+why});
     try{ RX.toast(t(f.State === "cancelled" ? "cancel_too_late" : "fix_sent")); }catch(_){}
   }
@@ -693,7 +698,7 @@ I.flush = async function(){
 };
 /* the BB Receipts id is only known once the scan row has saved: patch it onto the intent (evidence, not control) */
 function attachBb(rec){
-  if(rec.fields.BbItemId || rec.bbTried === 2 || rec.fields.Kind === "fix") return;
+  if(rec.fields.BbItemId || rec.bbTried === 2 || rec.fields.Kind === "fix" || rec.fields.Kind === "short") return;
   let rowsNow = []; try{ rowsNow = rows; }catch(_){}
   const row = rowsNow.find(r => r.rx && ((r.rx.iids || []).indexOf(rec.iid) >= 0 || r.rx.iid === rec.iid));
   /* ⭐ UX audit 2026-10-19: kick a flush, or the patch waited for the next 20-60 s poll and the page showed a red
@@ -717,7 +722,8 @@ I.query = async function(filter, o){
   return out;
 };
 RX.state.todayAll = new Map();
-I.allToday = function(){
+const isShort = (x) => ((x && x.fields) || {}).Kind === "short";
+function rawToday(){
   const seen = new Set(), out = [];
   for(const [iid, v] of RX.state.todayAll){ const rec = S.recs[iid];
     out.push(rec ? {iid, fields:Object.assign({}, v.fields, rec.fields), fin:rec.fin && rec.fin.FinState ? rec.fin : v.fin, itemId:v.itemId, etag:rec.etag || v.etag, local:true}
@@ -725,7 +731,8 @@ I.allToday = function(){
   for(const rec of Object.values(S.recs)){ if(seen.has(rec.iid)) continue;
     out.push({iid:rec.iid, fields:rec.fields, fin:rec.fin || {}, itemId:rec.itemId, etag:rec.etag, local:true}); }
   return out;
-};
+}
+I.allToday = () => rawToday().filter(x => !isShort(x));
 const hasOpen = () => Object.values(S.recs).some(r => !r.denied && !isFinal(r));
 const needList = () => !!(Object.keys(S.recs).length || (RX.pack.data && (RX.pack.data.pos || []).length));
 function applyList(items){
@@ -784,13 +791,15 @@ async function pollPo(gen){
     RX.state.poAll = m; I.state.poErr = ""; I.state.poLoaded = true; save();
   }catch(e){ I.state.poErr = (e && e.message) || "error"; }
 }
-I.allPo = function(){
-  const out = I.allToday(), seen = new Set(out.map(x => x.iid));
+function rawPo(){
+  const out = rawToday(), seen = new Set(out.map(x => x.iid));
   for(const [iid, v] of RX.state.poAll){ if(seen.has(iid)) continue; const rec = S.recs[iid];
     out.push(rec ? {iid, fields:Object.assign({}, v.fields, rec.fields), fin:rec.fin && rec.fin.FinState ? rec.fin : v.fin, itemId:v.itemId, etag:rec.etag || v.etag, local:true}
                  : {iid, fields:v.fields, fin:v.fin, itemId:v.itemId, etag:v.etag, local:false}); seen.add(iid); }
   return out;
-};
+}
+I.allPo = () => rawPo().filter(x => !isShort(x));
+I.shorts = () => rawPo().filter(isShort);
 async function pollPoster(gen){
   const ps = RX.poster;
   try{
