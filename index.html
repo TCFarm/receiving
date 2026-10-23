@@ -3093,6 +3093,8 @@ document.addEventListener("click",e=>{
   if(e.target.id==="qYes" && pending && pending.qtyCheck != null){ return takeQty(pending.qtyCheck); }
   if(e.target.id==="qRedo" && pending){ delete pending.qtyCheck; return askQty(); }
   if(e.target.id==="qskip" && pending){
+    /* ⛔ PM-3086 (2026-10-23): damaged units already entered must not vanish with an unknown count (they are the KeHE credit) */
+    if(window.RX && RX.dmgBlocksUnknown && RX.dmgBlocksUnknown(pending)) return;
     pending.qtyUnknown=true; return next();
   }
   const f=e.target.closest("[data-flag]");
