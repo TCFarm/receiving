@@ -153,7 +153,7 @@ PO.dueText = function(po){
 };
 PO.lineStatus = function(po, line){
   const c = PO.counts(po, line), upc = upcOf(line);
-  const state = c.total <= 0 ? "notstarted" : (c.total < c.ordered ? "partial" : (c.total === c.ordered ? "done" : "over"));
+  let state = c.total <= 0 ? "notstarted" : (c.total < c.ordered ? "partial" : (c.total === c.ordered ? "done" : "over"));
   /* ⭐ 2026-10-22: problems come from ONE map (rx/problems.js): `problems` = scans that need the CREW (staged, held, refused…),
      `buyer` = scans only the buyer can clear. A cancelled scan is listed (struck through) but is never a problem. */
   let problems = 0, buyer = 0, staged = 0; const scans = [];
@@ -168,6 +168,10 @@ PO.lineStatus = function(po, line){
   }
   scans.sort((a, b) => String(a.at).localeCompare(String(b.at)));
   const cases = upc > 0;
+  /* ⭐ 2026-10-23 (rx/short.js): a line whose missing units the crew recorded as SHORT is finished for the crew — state "short" */
+  let st = state;
+  if((st === "notstarted" || st === "partial") && RX.short){ const L = RX.short.line(po, line); if(L && L.missing > 0 && L.open <= 0) st = "short"; }
+  state = st;
   return Object.assign({state, problems, buyer, staged, scans, unit:cases ? "cases" : "units",
     k:fmt(cases ? c.total / upc : c.total), n:fmt(cases ? c.ordered / upc : c.ordered)}, c);
 };
@@ -176,7 +180,7 @@ PO.summary = function(){
     const ls = (po.lines || []).map(l => PO.lineStatus(po, l));
     /* ⛔ 2026-10-22: a line is DONE only when nothing on it still needs the crew — a case on a cart or a held scan is counted as
        scanned but is not in Finale, and "95%" with nothing to act on is what the crew could not read */
-    const done = ls.filter(x => (x.state === "done" || x.state === "over") && !x.problems).length;
+    const done = ls.filter(x => (x.state === "done" || x.state === "over" || x.state === "short") && !x.problems).length;
     const crew = ls.reduce((a, x) => a + x.problems, 0), staged = ls.reduce((a, x) => a + x.staged, 0), buyer = ls.reduce((a, x) => a + x.buyer, 0);
     return {po, lines:ls.length, done, left:ls.length - done, due:PO.dueText(po), statuses:ls, crew, staged, buyer};
   });
