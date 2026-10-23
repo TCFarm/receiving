@@ -47,6 +47,10 @@ const COPY_ADD = {
   pb_staged_dup:  "Finale already has all of this line ({n} of {m}) — this cart record ({area}, {age} ago) looks like the same case scanned again.",
   pb_dup_rm:      "Same case — remove this record",
   pb_dup_keep:    "It's a second case — put it away",
+  fix_pending:    "Sent to the buyer: the count is {n} — the line shows the old count until the buyer corrects Finale.",
+  fix_already_sent:"Already sent to the buyer: the count is {n}. Nothing else to do — the buyer corrects Finale.",
+  pb_temp_ok:     "{cls} item on a {cls} shelf ({bin}) — sending it to Finale, nothing to answer.",
+  pb_dup_auto:    "Same case as one already put away — nothing to do, this record clears itself.",
   pb_auto_dup:    "Counted as a duplicate automatically: the same item and best-by was put away later and Finale has the whole line.",
   pb_temp:        "{name} is filed as {cls}, but {bin} is a {bcls} shelf. Finale is waiting for a yes.",
   pb_temp_yes:    "Yes, it belongs in {bin}",
@@ -92,6 +96,12 @@ const COPY_ADD = {
 for(const k of Object.keys(COPY_ADD)) if(!(k in RX.COPY)) RX.COPY[k] = COPY_ADD[k];
 
 const CLS = {R:"Refrigerated", F:"Frozen", D:"Dry"};
+/* a shelf's temperature is its FIRST LETTER — R refrigerated, F frozen, D dry (Jack, 2026-10-23: "if it starts with an R, then it is a
+   Refrig location"); the pack's bin table only when the name has no such letter */
+const binCls = (bin) => { const l = String(bin || "").slice(0, 1).toUpperCase(); if(CLS[l]) return CLS[l]; const bi = RX.pack.binInfo(bin); return bi ? (CLS[bi.temp] || bi.temp || "") : ""; };
+/* the item's class from the receiving catalog (the poster's own source since 2026-10-21) agrees with the shelf */
+const tempAgrees = (v) => { const f = (v && v.fields) || {}; const si = RX.pack.skuInfo(f.Sku); const ic = si && si.cls; const bc = binCls(f.Location);
+  return !!(ic && bc && ic === bc); };
 const code = (fin) => String((fin && fin.FinReason) || "").split(":")[0].trim().toUpperCase();
 const sentence = (fin) => { const r = String((fin && fin.FinReason) || ""); const i = r.indexOf(":"); return (i >= 0 ? r.slice(i + 1) : r).trim(); };
 const nameOf = (sku) => { const i = RX.pack.skuInfo(sku); if(i && i.name) return i.name;
@@ -102,6 +112,13 @@ const ageText = (iso) => { const ms = RX.now() - Date.parse(iso); if(isNaN(ms) |
 const sameLoc = (v) => String((v.fields || {}).Location || "");
 const fmtN = (x) => String(Math.round((+x || 0) * 100) / 100);
 /* a fix row (Kind=fix) this tablet or any tablet already sent for this intent */
+/* the buyer requests (Kind=fix rows) already sent for this scan, any tablet: [{FixUnits, FixNote, ScanAt}] */
+function fixRowsFor(iid){
+  const out = [];
+  for(const x of (I.allPo ? I.allPo() : I.allToday())){ const f = x.fields || {}; if(f.Kind === "fix" && f.SplitOf === iid && f.State !== "cancelled") out.push(f); }
+  return out;
+}
+P.fixRowsFor = fixRowsFor;
 function fixSentFor(iid){
   for(const x of (I.allPo ? I.allPo() : I.allToday())){ const f = x.fields || {}; if(f.Kind === "fix" && f.SplitOf === iid) return true; }
   return false;
@@ -117,6 +134,7 @@ P.of = function(v){
   if(rec && rec.cancelled) return null;
   if(rec && rec.denied) return {kind:"denied", owner:"crew", text:t("pb_denied"), act:"pb-remove", label:t("pb_rm_rescan")};
   if(f.State === "staged" && !fs){
+    if(P.isDup(v)) return {kind:"dup", owner:"none", text:t("pb_dup_auto")};
     /* ⭐ a case still "on a cart" whose PO line Finale ALREADY has in full was received AGAIN by a later scan (10-22: 16 frozen cases
        re-scanned with Put away here while their 10-20 cart records stayed staged). Putting it away would only hit the poster's
        over-receipt hold: removing the duplicate is the likely answer; Put away stays for a genuine second case. */
@@ -130,9 +148,13 @@ P.of = function(v){
     const c = code(fin);
     if(fixSentFor(v.iid)) return {kind:"told", owner:"buyer", text:t("pb_told")};
     if(c === "TEMP_UNCONFIRMED"){
-      const bin = sameLoc(v), bi = RX.pack.binInfo(bin), si = RX.pack.skuInfo(f.Sku);
-      const bcls = bi ? (CLS[bi.temp] || bi.temp) : (CLS[bin.slice(0, 1).toUpperCase()] || "different");
+      const bin = sameLoc(v), si = RX.pack.skuInfo(f.Sku);
+      const bcls = binCls(bin) || "different";
       const cls = (si && si.cls) || (CLS[String(f.Sku || "").slice(0, 1).toUpperCase()] || "another class");
+      /* ⭐ 2026-10-23 (Jack: "all locations that start with R are refrig"): a hold made under the poster's OLD rule (the item judged by
+         its SKU's first letter — Elmhurst cashew milk DDair… read as Dry) whose item and shelf now AGREE is stale: it is confirmed
+         automatically (P.autoTemp), never shown as a question that contradicts itself */
+      if(tempAgrees(v)) return {kind:"temp_ok", owner:"none", text:t("pb_temp_ok", {cls, bin: bin || "that shelf"})};
       return {kind:"temp", owner:"crew", text:t("pb_temp", {name:nameOf(f.Sku), cls, bin: bin || "that shelf", bcls}),
               act:"pb-temp-yes", label:t("pb_temp_yes", {bin: bin || "that shelf"})};
     }
@@ -159,36 +181,64 @@ P.of = function(v){
    two tablets cannot both act and a record the poster moved is left alone. Its best-by row is then removed with the Remove guard;
    the cohort engine ALSO caps every SKU at the PO quantity across scan days (`_shared/inventory_cohorts._cap_to_finale`), so a row
    that could not be removed is still counted once while the PO is in its window. -> the posted twin, or null */
-P.autoTwin = function(v){
-  if(!v) return null;
-  const f = v.fields || {};
-  if(f.Kind !== "intent" || f.State !== "staged" || f.PageMode !== "live" || (v.fin || {}).FinState) return null;
-  if(!f.Po || !f.Sku || !f.BestBy) return null;
-  if(I.state && (I.state.poErr || !I.state.poLoaded)) return null;
-  const rec = I.byId(v.iid); if(rec && (rec.cancelled || rec.inflight || (rec.patches || []).length || !rec.sent)) return null;
-  const cf = RX.po && RX.po.confirmed ? RX.po.confirmed(f.Po, f.Sku) : null;
-  if(!(cf && cf.ordered > 0 && cf.units >= cf.ordered)) return null;
-  const at = Date.parse(f.ScanAt); if(isNaN(at)) return null;
-  /* ⛔ review 2026-10-23 (2): ONE put-away retires at most ONE cart record. Two cases staged with the same date and one of them put
-     away must leave the other on the cart (a vendor that over-shipped makes the line read full on the first put-away). Count, per
-     (PO, item, best-by): later posted scans vs cart records already cancelled; retire only while there are more of the first, and
-     only the OLDEST live cart record (ScanAt, then id) — every tablet picks the same one, so two tablets cannot retire two. */
-  const same = (g) => String(g.Po || "") === String(f.Po) && g.Sku === f.Sku && String(g.BestBy || "") === String(f.BestBy);
-  let twin = null, twins = 0, gone = 0; const live = [];
+/* ⭐ 2026-10-23 PM (Jack: "how do we get the tablets to always show the correct info needed?"): ONE rule decides which cart records
+   are finished duplicates, and every surface uses it — the staged list (rx/staging.js ST.records), the PO counts
+   (rx/receive-po.js scannedUnits / lineStatus), this problems map, and the auto-retire below. So a duplicate stops being shown as
+   work the moment any tablet DRAWS the screen; the retire write only tidies the record afterwards.
+   Per (PO, SKU, best-by), only when the PO line is FULL in Finale and the PO-wide read is loaded: the live cart records, oldest first,
+   are paired one-to-one with POSTED scans made after each of them (⛔ never a split part of the same case); the first `gone` pairs
+   (cart records already cancelled) are used up, the rest are duplicates. -> Set of intent ids */
+const sameCase = (x) => String(((x.fields || {}).SplitOf) || x.iid);
+let DUP_MEMO = null;                     // one computation per synchronous render pass (every line of a PO asks); cleared next microtask
+P.dupIids = function(){
+  if(DUP_MEMO) return DUP_MEMO;
+  const out = dupCompute(); DUP_MEMO = out; Promise.resolve().then(() => { DUP_MEMO = null; });
+  return out;
+};
+function dupCompute(){
+  const out = new Set();
+  if(I.state && (I.state.poErr || !I.state.poLoaded)) return out;
+  const groups = new Map();
   for(const x of (I.allPo ? I.allPo() : I.allToday())){
-    const g = x.fields || {}; if(g.Kind === "fix" || !same(g)) continue;
+    const g = x.fields || {}; if(g.Kind === "fix" || !g.Po || !g.Sku || !g.BestBy) continue;
+    const key = String(g.Po) + "|" + g.Sku + "|" + g.BestBy;
+    let G = groups.get(key); if(!G) groups.set(key, G = {po: String(g.Po), sku: g.Sku, live: [], posted: [], gone: 0});
     const xr = I.byId(x.iid);
-    const cancelled = g.State === "cancelled" || (xr && xr.cancelled);
-    if(g.Workflow === "staged" && cancelled){ gone++; continue; }
-    if(cancelled) continue;
-    if(g.State === "staged" && !(x.fin || {}).FinState){ live.push(x); continue; }
-    if(!(x.fin && x.fin.FinState === "posted") || rootOf(x) === rootOf(v)) continue;
-    const xa = Date.parse(g.ScanAt); if(isNaN(xa) || xa <= at) continue;
-    twins++; if(!twin) twin = x;
+    if(g.State === "cancelled" || (xr && xr.cancelled)){ if(g.Workflow === "staged") G.gone++; continue; }
+    const fs = (x.fin || {}).FinState || "";
+    if(g.State === "staged" && !fs){ if(g.PageMode === "live") G.live.push(x); continue; }
+    if(fs === "posted") G.posted.push(x);
   }
-  if(!twin || gone >= twins) return null;
-  live.sort((a, b) => (Date.parse((a.fields || {}).ScanAt) - Date.parse((b.fields || {}).ScanAt)) || (a.iid < b.iid ? -1 : a.iid > b.iid ? 1 : 0));
-  return live.length && live[0].iid === v.iid ? twin : null;
+  for(const G of groups.values()){
+    if(!G.live.length || !G.posted.length) continue;
+    /* "full" = Finale has what KeHE SHIPPED (else what we ordered) — the poster's own limit. Against ORDERED a real extra case KeHE
+       shipped and billed would be hidden and retired (review 2026-10-23 PM (3)). */
+    const cf = RX.po && RX.po.confirmed ? RX.po.confirmed(G.po, G.sku) : null;
+    const cp = RX.po && RX.po.capOf ? RX.po.capOf(G.po, G.sku) : null;
+    const lim = cp ? cp.cap : (cf ? cf.ordered : 0);
+    if(!(cf && lim > 0 && cf.units >= lim)) continue;
+    const roots = new Set(G.live.map(sameCase));
+    const posts = G.posted.filter(x => !roots.has(sameCase(x))).map(x => Date.parse((x.fields || {}).ScanAt)).filter(n => !isNaN(n)).sort((a, b) => a - b);
+    const live = G.live.slice().sort((a, b) => (Date.parse((a.fields || {}).ScanAt) - Date.parse((b.fields || {}).ScanAt)) || (a.iid < b.iid ? -1 : a.iid > b.iid ? 1 : 0));
+    let gone = G.gone;
+    for(const s of live){
+      const at = Date.parse((s.fields || {}).ScanAt); if(isNaN(at)) continue;
+      const i = posts.findIndex(t0 => t0 > at); if(i < 0) continue;
+      posts.splice(i, 1);
+      if(gone > 0){ gone--; continue; }
+      out.add(s.iid);
+    }
+  }
+  return out;
+}
+P.isDup = (v) => !!(v && P.dupIids().has(v.iid));
+/* the auto-retire's own gates on top of the rule: a record this tablet still has a write in flight for is left alone */
+P.autoTwin = function(v){
+  if(!v) return false;
+  const f = v.fields || {};
+  if(f.Kind !== "intent" || f.State !== "staged" || f.PageMode !== "live" || (v.fin || {}).FinState) return false;
+  const rec = I.byId(v.iid); if(rec && (rec.cancelled || rec.inflight || (rec.patches || []).length || !rec.sent)) return false;
+  return P.isDup(v);
 };
 const AUTO_TRIED = new Set();
 P.autoRetire = async function(){
@@ -211,7 +261,25 @@ P.autoRetire = async function(){
   if(n){ RX.refresh(); RX.call("drawer", "refresh", true); }
   return n;
 };
-RX.on("intents", () => { P.autoRetire(); });
+const TEMP_TRIED = new Set();
+P.autoTemp = async function(){
+  let n = 0;
+  for(const v of (I.allPo ? I.allPo() : I.allToday())){
+    const fin = v.fin || {}, f = v.fields || {};
+    if(TEMP_TRIED.has(v.iid) || BUSY.has(v.iid) || f.Kind === "fix" || f.State === "cancelled" || fin.FinState !== "held" || code(fin) !== "TEMP_UNCONFIRMED" || !tempAgrees(v)) continue;
+    if(fixSentFor(v.iid)) continue;
+    TEMP_TRIED.add(v.iid); BUSY.add(v.iid);
+    try{
+      const r = await patchIntent(v, {State:"cancelled"}, "held");
+      /* ⛔ ONLY after the cancel LANDED (the same rule as the Yes button): the new intent never coexists with a live copy of the old one */
+      if(r.ok){ I.create(replacement(v, {TempConfirmed:true}), {}); n++; P.state.msg[v.iid] = t("pb_done_temp"); }
+    }catch(e){ try{ console.error("rx auto-temp", e); }catch(_){} }
+    finally{ BUSY.delete(v.iid); }
+  }
+  if(n){ RX.refresh(); RX.call("drawer", "refresh", true); }
+  return n;
+};
+RX.on("intents", () => { P.autoRetire(); P.autoTemp(); });
 /* ⭐ 2026-10-22 (PM-3069): a staged case taken off the cart list ("Not put away") must take its best-by row with it, or the date is
    counted twice when the case is scanned again (live: Rosemary Garlic Fries BB 4486 kept, rescanned as 4492 → 18u recorded vs 12).
    The SAME guard as "Scanned twice": never while another live part of the case uses that row, nor while the PO-wide read is down.
@@ -385,6 +453,8 @@ P.fixHtml = function(v){
   const f = v.fields || {}; const err = P.state.fixErr;
   return `<div class="rx-fix" data-iid="${esc(v.iid)}"><strong>${esc(t("fix_h"))}</strong>
     <div class="hint">${esc(nameOf(f.Sku))} · ${esc(String(f.Units ?? "?"))}u${f.BestBy ? " · bb " + esc(f.BestBy) : ""}${(v.fin || {}).FinState === "posted" ? " · " + esc(t("fix_in_finale")) : ""}</div>
+    ${(() => { const fr = fixRowsFor(v.iid).filter(x => x.FixUnits != null && +x.FixUnits > 0); if(!fr.length) return "";
+      const last = fr[fr.length - 1]; return `<div class="hint rx-pb-msg" role="status"><strong>${esc(t("fix_pending", {n:String(+last.FixUnits)}))}</strong></div>`; })()}
     <label class="hint" for="rxFixN">${esc(t("fix_units"))}</label>
     <input id="rxFixN" class="num" type="text" inputmode="numeric" maxlength="5" autocomplete="off" value="${esc(P.state.draft && P.state.draft.iid === v.iid ? P.state.draft.val : String(f.Units ?? ""))}" aria-label="${esc(t("fix_units"))}">
     <button type="button" class="rx-btn primary" data-act="fix-save" data-iid="${esc(v.iid)}">${esc(t("fix_save"))}</button>
@@ -412,6 +482,10 @@ RX.registerAct("fix-save", ({el}) => { const iid = el.dataset.iid;
     const r = await patchIntent(v, cq > 0 ? {Units:n, Cases: Math.round(n / cq * 100) / 100} : {Units:n}, fs);
     if(!r.ok){ P.state.fixErr = whyText(r.why); return; }
   }else{
+    /* ⭐ 2026-10-23 (crew: "it does not save the new 12 count when I press save count"): on a scan already in Finale the tablet sends the
+       buyer a request and Finale is corrected by the buyer — the line keeps showing the old count until then. A second Save with the
+       same number must not send the request again (three identical requests were sent for the cashew milk). */
+    if(fixRowsFor(iid).some(x => +x.FixUnits === n)){ P.state.fixing = null; P.state.fixErr = ""; say(iid, t("fix_already_sent", {n:String(n)})); return; }
     tellBuyer(v, `crew: the count is ${n}, not ${old}` + (IN_FINALE.has(fs) ? ` — correct Finale by ${n - old > 0 ? "+" : ""}${n - old}` : ""), n);
   }
   /* ⛔ review (2): the BB row is the WHOLE case. A part of a split case moves the case total by its own change, never to its own count */
