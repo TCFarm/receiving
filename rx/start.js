@@ -23,6 +23,9 @@
 "use strict";
 const RX = window.RX; if(!RX) return;
 const U = RX.ui, t = RX.t, esc = RX.esc;
+/* ⭐ 2026-10-23 (Jack: "delayed 8:19 - this will now just say 8 min"): the poster's age on the strip is whole minutes — "8:19" read as a
+   time of day. Spinners keep RX.ago's seconds clock (a wait shows a moving clock, _shared/APP-PROGRESS-STATUS.md). */
+RX.agoMin = (ms) => { const m = Math.max(0, Math.floor((+ms || 0) / 60000)); return m < 1 ? "<1 min" : m < 120 ? m + " min" : Math.floor(m / 60) + " h " + (m % 60) + " min"; };
 const $ = (id) => document.getElementById(id);
 const pageAudit = () => { try{ return isAudit(); }catch(_){ return false; } };
 const pageRows = () => { try{ return rows; }catch(_){ return []; } };
@@ -180,8 +183,8 @@ U.renderStrip = function(){
   const mode = RX.mode(), d = RX.poster.data;
   if(mode === "live"){
     const age = RX.intents.posterAgeMs();
-    if(RX.intents.posterDelayed()) seg.push(`<button class="rx-seg rx-amber" data-act="banner-poster-details">${esc(t("strip_delayed", {ago:"\u0000"})).replace("\u0000", `<span class="rx-tick" aria-hidden="true" data-from="${Date.parse(d.at)}">${RX.ago(age)}</span>`)}</button>`);
-    else seg.push(`<span class="rx-seg" aria-live="polite">${esc(t("strip_live", {ago:"\u0000"})).replace("\u0000", `<span class="rx-tick" aria-hidden="true" data-from="${d ? Date.parse(d.at) : 0}">${d ? RX.ago(age) : "—"}</span>`)}</span>`);
+    if(RX.intents.posterDelayed()) seg.push(`<button class="rx-seg rx-amber" data-act="banner-poster-details">${esc(t("strip_delayed", {ago:"\u0000"})).replace("\u0000", `<span class="rx-tick" aria-hidden="true" data-fmt="min" data-from="${Date.parse(d.at)}">${RX.agoMin(age)}</span>`)}</button>`);
+    else seg.push(`<span class="rx-seg" aria-live="polite">${esc(t("strip_live", {ago:"\u0000"})).replace("\u0000", `<span class="rx-tick" aria-hidden="true" data-fmt="min" data-from="${d ? Date.parse(d.at) : 0}">${d ? RX.agoMin(age) : "—"}</span>`)}</span>`);
   }else seg.push(`<span class="rx-seg">${esc(t("strip_practice"))}</span>`);
   const staged = +RX.counter("staged") || 0;
   if(staged > 0) seg.push(`<button class="rx-seg${RX.state.stagedLate ? " rx-amber" : ""}" data-act="hdr-staged">${esc(t("strip_staged", {n:staged}))}</button>`);
@@ -192,10 +195,38 @@ U.renderStrip = function(){
 };
 RX.registerAct("hdr-po", () => RX.call("drawer", "openPo"));
 RX.registerAct("hdr-staged", () => { if(!RX.hasStep("tray")) return; if(RX.setFlow("staged")) RX.refresh(); });
-RX.registerAct("banner-poster-details", () => {
-  const age = RX.intents.posterAgeMs();
-  U.toast(t("poster_down_det", {ago: age == null ? "a while" : RX.ago(age)}));
-});
+/* ⭐ 2026-10-23 (Eli: "When I click for details on why the finale posting is delayed it just jumps to the scanning section of the page"):
+   Details used to fire a 4-second toast, and the page's click-refocus then scrolled to the scan box — so it looked like a jump and said
+   nothing. It now opens the explanation IN the banner (what the mini last reported, what is waiting, what to do) and returns "stop" so
+   the refocus never runs. A second tap closes it. */
+const DET_COPY = {
+  pdet_last:    "The Mac mini that sends scans to Finale last reported {ago} ago (it normally reports every 5 minutes; a long posting run can stretch that).",
+  pdet_wait:    "Waiting to go into Finale: {n} scan(s){oldest}.",
+  pdet_oldest:  ", oldest {ago}",
+  pdet_none:    "Nothing was waiting at that report — every scan it had seen was in Finale.",
+  pdet_last_post:"Last scan put into Finale: {ago} ago.",
+  pdet_finale:  "Finale is not answering the mini right now.",
+  pdet_budget:  "The mini is pausing to stay under Finale's hourly limit — it catches up on its own.",
+  pdet_tablet:  "This tablet still holds {n} scan(s) it has not sent — keep this page open with signal.",
+  pdet_do:      "Your scans are saved. Keep scanning. If this stays over 30 minutes, tell the buyer.",
+  btn_hide:     "Hide",
+};
+for(const k of Object.keys(DET_COPY)) if(!(k in RX.COPY)) RX.COPY[k] = DET_COPY[k];
+RX.state.posterDet = false;
+function posterDetHtml(){
+  const mins = (ms) => RX.agoMin(ms).replace("<1 min", "under a minute");
+  const d = RX.poster.data || {}, age = RX.intents.posterAgeMs(), ago = (iso) => { const m = Date.parse(iso); return isNaN(m) ? "?" : mins(RX.now() - m); };
+  const L = [t("pdet_last", {ago: age == null ? "a while" : mins(age)})];
+  const n = +d.open_ready || 0;
+  L.push(n > 0 ? t("pdet_wait", {n:String(n), oldest: d.oldest_ready_age_s != null ? t("pdet_oldest", {ago: mins((+d.oldest_ready_age_s || 0) * 1000)}) : ""}) : t("pdet_none"));
+  if(d.last_post_at) L.push(t("pdet_last_post", {ago: ago(d.last_post_at)}));
+  if(d.finale_ok === false) L.push(t("pdet_finale"));
+  if(d.finale_budget && d.finale_budget.waiting) L.push(t("pdet_budget"));
+  const ts = RX.intents.unsent ? RX.intents.unsent() : 0; if(ts > 0) L.push(t("pdet_tablet", {n:String(ts)}));
+  L.push(t("pdet_do"));
+  return `<div class="hint rx-pdet" role="status">${L.map(x => `<div>${esc(x)}</div>`).join("")}</div>`;
+}
+RX.registerAct("banner-poster-details", () => { RX.state.posterDet = !RX.state.posterDet; RX.refresh(); return "stop"; });
 RX.registerAct("banner-pack-retry", () => { RX.pack.load({force:true}); });
 
 /* ───────────────────────── banners (one at a time, highest priority first) ───────────────────────── */
@@ -208,7 +239,7 @@ U.renderBanner = function(){
     if(!blocked){
       if(RX.intents.denied()) h = `<div class="banner rx-banner" role="alert" style="border-left-color:var(--stop)"><strong>${esc(t("denied"))}</strong></div>`;
       else if(RX.mode() === "live" && RX.intents.posterDelayed()) h = `<div class="banner rx-banner" role="status" style="border-left-color:var(--wait)"><strong>${esc(t("poster_down"))}</strong>
-        <button class="rx-btn" data-act="banner-poster-details">${esc(t("btn_details"))}</button></div>`;
+        <button class="rx-btn" data-act="banner-poster-details" aria-expanded="${RX.state.posterDet ? "true" : "false"}">${esc(t(RX.state.posterDet ? "btn_hide" : "btn_details"))}</button>${RX.state.posterDet ? posterDetHtml() : ""}</div>`;
       else if(RX.mode() === "shadow" && RX.flowActive()) h = `<div class="banner rx-banner" style="border-left-style:dashed">${esc(RX.poster.status === "ok" ? t("practice") : t("practice_quiet"))}</div>`;
     }
   }
@@ -285,7 +316,7 @@ U.refresh = function(){
 RX.on("tick", () => {
   if(!RX.state.booted) return;
   const now = RX.now();
-  document.querySelectorAll(".rx-tick").forEach(el => { const from = +el.dataset.from; if(from) el.textContent = RX.ago(now - from); });
+  document.querySelectorAll(".rx-tick").forEach(el => { const from = +el.dataset.from; if(from) el.textContent = el.dataset.fmt === "min" ? RX.agoMin(now - from) : RX.ago(now - from); });
   document.querySelectorAll("[data-chip-n]").forEach(el => {
     const row = pageRows().find(r => String(r.n) === el.dataset.chipN);
     if(!row) return;
