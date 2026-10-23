@@ -313,6 +313,9 @@ RX.on("intents", () => { P.autoRetire(); P.autoTemp(); });
    The SAME guard as "Scanned twice": never while another live part of the case uses that row, nor while the PO-wide read is down.
    Call it with the scan as it was BEFORE the cancel. -> {ok, kept?, why?} */
 P.vOf = (iid) => findV(iid);
+/* ⭐ 2026-10-23: rx/short.js cancels a short record another tablet wrote through the SAME If-Match write (never a second copy) */
+P.patchIntent = (v, cols, expectFin) => patchIntent(v, cols, expectFin);
+P.whyText = (why) => whyText(why);
 P.dropBb = async function(v){
   if(!v || !String((v.fields || {}).BbItemId || "")) return {ok:true, skipped:true};
   if(bbShared(v)) return {ok:true, kept:true};
