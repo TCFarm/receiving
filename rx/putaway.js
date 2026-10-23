@@ -546,9 +546,10 @@ RX.registerStep("shelf", {
     if(d2.sub !== "main") return false;               // a card / input is open: the page's "finish this item first" refusal
     const id = PA.identify(raw);
     if(id.kind === "tag"){ onTag(ctx, d2, id.bin, "scanned"); return true; }
-    if(id.kind === "date"){ noticeMain(ctx, d2, esc(t("date_in_d2")), "refused"); return true; }
+    if(id.kind === "date"){ try{ noteDropped(raw, "SHELF_DATE"); }catch(_){} noticeMain(ctx, d2, esc(t("date_in_d2")), "refused"); return true; }
     if(id.kind === "product"){
       if(id.sku === ctx.p.prod.sku && !d2.late){ d2.same = {best: id.best, diff: !!(id.best && ctx.p.best && id.best !== ctx.p.best)}; setSub(ctx, d2, "samesku"); RX.sound("decide"); return true; }
+      try{ noteDropped(raw, "SHELF_WRONG"); }catch(_){}
       noticeMain(ctx, d2, `<strong>${esc(t("wrong_product", {name: ctx.p.prod.name}))}</strong> ${esc(t("wrong_detail", {code: String(raw).slice(0, 24)}))}`, "refused"); return true;
     }
     noticeMain(ctx, d2, `<strong>${esc(t("unknown_tag", {code: String(raw).slice(0, 24)}))}</strong> ${esc(t("unknown_tag_hint"))} ${esc(t("nothing_recorded"))}`, "refused");
