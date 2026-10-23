@@ -314,6 +314,23 @@ RX.registerAct("dmg-save", () => {
   const box = document.getElementById("rxDmg"); if(box) box.innerHTML = `<span class="hint" style="display:block;margin-top:6px"><strong>${k} damaged</strong> — not received. ${total - k} to put away.</span>`;
   refreshQtyCard();
 });
+/* ⛔ PM-3086 (2026-10-23): "Some damaged" then "Don't know" used to save the case with NO intent — and the damaged units, which ride on
+   the intent, never reached the KeHE credit list. Now "Don't know" stops and asks: all of them damaged (the photos, then the credit),
+   or clear the damaged number. -> true when it stopped the skip */
+RX.dmgBlocksUnknown = function(p){
+  const k = +(((p || {}).rx || {}).fields || {}).damaged || 0; if(!(k > 0)) return false;
+  const box = document.getElementById("rxDmg"); if(!box) return false;
+  box.innerHTML = `<span style="display:block;margin-top:8px;padding:9px 12px;background:var(--card);border-left:5px solid var(--stop)">${RX.esc(t("dmg_unknown", {k}))}
+    <button type="button" class="rx-btn primary" data-act="dmg-all-yes">${RX.esc(t("dmg_all_yes", {k}))}</button>
+    <button type="button" class="rx-btn" data-act="dmg-cancel" data-close="1">${RX.esc(t("dmg_clear"))}</button></span>`;
+  RX.sound("decide");
+  return true;
+};
+RX.registerAct("dmg-all-yes", () => {
+  const p = (() => { try{ return pending; }catch(_){ return null; } })(); if(!p) return;
+  const k = +((p.rx || {}).fields || {}).damaged || 0; if(!(k > 0)) return;
+  allDamaged(p, k);
+});
 function allDamaged(p, k){
   /* whole case damaged: nothing to put away and NO BB receipt (a 0-unit receipt would pollute arrival-life). ⭐ ROUND 4 (D36): the
      photos come FIRST (rx/photos.js); the intent is written when they are done. ⛔ Damaged units are never posted to Finale. */
