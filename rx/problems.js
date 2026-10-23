@@ -150,6 +150,22 @@ P.of = function(v){
   }
   return null;
 };
+/* ⭐ 2026-10-22 (PM-3069): a staged case taken off the cart list ("Not put away") must take its best-by row with it, or the date is
+   counted twice when the case is scanned again (live: Rosemary Garlic Fries BB 4486 kept, rescanned as 4492 → 18u recorded vs 12).
+   The SAME guard as "Scanned twice": never while another live part of the case uses that row, nor while the PO-wide read is down.
+   Call it with the scan as it was BEFORE the cancel. -> {ok, kept?, why?} */
+P.vOf = (iid) => findV(iid);
+P.dropBb = async function(v){
+  if(!v || !String((v.fields || {}).BbItemId || "")) return {ok:true, skipped:true};
+  if(bbShared(v)) return {ok:true, kept:true};
+  return bb(v, {del:true});
+};
+/* ⛔ review 2026-10-22 (2): a CANCELLED scan has no Fix button, so the crew cannot finish a failed removal — the buyer is told instead
+   (a fix row), with the row id. `why` says why the row was not removed here. */
+P.tellBbLeft = function(v, why){
+  const id = String((v && v.fields || {}).BbItemId || ""); if(!id) return;
+  tellBuyer(v, `crew took this staged case off the list; its best-by row ${id} was not removed (${String(why || "").slice(0, 80)}) — delete it if the case was scanned again, so the date is not counted twice`, 0);
+};
 P.crewOpen = (v) => { const p = P.of(v); return !!p && p.owner === "crew"; };
 P.forRow = function(row){
   let best = null;
