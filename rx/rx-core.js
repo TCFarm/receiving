@@ -364,7 +364,7 @@ RX.backToQty = function(){
   const p = pendingNow(); if(!p) return false;
   RX.abandon({keep:true});
   const rxs = p.rx || (p.rx = {});
-  rxs.done = false; rxs.i = -1; delete rxs.d2; delete rxs.stage; delete rxs.exc;
+  rxs.done = false; rxs.i = -1; delete rxs.d2; delete rxs.stage; delete rxs.exc; delete rxs.note;
   if(rxs.fields) for(const k of STEP_KEYS) delete rxs.fields[k];
   try{ clearPrompt(); }catch(_){}
   const had = p.qty;
@@ -404,7 +404,7 @@ RX.beforeCommit = function(p){
          received only when it is later put away from the staged list. No prompt is added — the per-case speed is unchanged. */
       if(flow === "bestby" && RX.mode() === "live" && !receivable(p)){
         rxs.flow = "bestby"; rxs.fields = Object.assign({}, rxs.fields, {state:"staged", workflow:"staged", stagedArea:RX.t("notput_area")});
-      }
+      }else{ const w = receivable(p); if(w) rxs.note = w; }          // ⛔ review 2026-10-22 (3): no count / no name ⇒ no intent here either
       return false;
     }
     const why = receivable(p);
@@ -416,7 +416,7 @@ RX.beforeCommit = function(p){
     rxs.flow = flow; rxs.steps = list; rxs.i = -1; rxs.fields = rxs.fields || {};
     advance(p);
     return true;
-  }catch(e){ try{ console.error("rx beforeCommit", e); }catch(_){} if(p && p.rx) p.rx.done = true; return false; }
+  }catch(e){ try{ console.error("rx beforeCommit", e); }catch(_){} if(p && p.rx){ p.rx.done = true; try{ const w = receivable(p); if(w) p.rx.note = w; }catch(_){} } return false; }
 };
 
 function makeCtx(p, name){
@@ -492,7 +492,10 @@ RX.onCommit = function(row){
     RX.state.lastRow = row;
     const rxs = row.rx;
     let made = null;
-    if(RX.active() && rxs && rxs.fields && !rxs.fields.noIntent){
+    /* ⛔ PM-3067 (2026-10-22): an item with NO usable quantity (or no name) never writes an intent — not even after "Back to the
+       count": backToQty leaves an emptied `fields` object behind, and Chad's Garlic Naan (Back, then "I don't know the count") went to
+       the poster as a ready intent with no units and no shelf → BAD_SHAPE. `rxs.note` is set by beforeCommit for exactly these. */
+    if(RX.active() && rxs && rxs.fields && !rxs.fields.noIntent && !rxs.note){
       made = RX.intents.createFromRow(row);
     }
     if(RX.active() && RX.flowActive()){
