@@ -39,9 +39,12 @@ const builtMs = () => { const d = RX.pack.data; const m = d && d.built ? Date.pa
 
 PO.scannedUnits = function(poId, sku){
   const built = builtMs(); let u = 0; const seen = new Set(); const shelves = [];
+  /* ⭐ 2026-10-23: a cart record whose case is already put away (rx/problems.js P.dupIids) is not counted twice */
+  const dups = (RX.problems && RX.problems.dupIids) ? RX.problems.dupIids() : new Set();
   for(const v of allIntents()){
     const f = v.fields || {};
     if(f.Kind === "fix" || f.State === "cancelled" || f.Sku !== sku || String(f.Po || "") !== String(poId)) continue;
+    if(dups.has(v.iid)) continue;
     if(v.fin && v.fin.FinState === "posted"){ const at = Date.parse(v.fin.FinAt); if(!isNaN(at) && at <= built) continue; }
     /* ⛔ review 2026-10-22 (5): a scan the poster will never post — practice, or a hold/refusal that tells the crew to receive it in the
        Finale app — is not scanned-and-coming: once the crew does that, the pack's received_units carries it and it would count twice
@@ -69,6 +72,32 @@ PO.confirmed = function(poId, sku){
     u += num(v.fin.FinUnitsPosted != null ? v.fin.FinUnitsPosted : f.Units);
   }
   return {units:u, ordered:num(line.ordered_units != null ? line.ordered_units : line.qty)};
+};
+/* ⭐ 2026-10-23 PM (Jack: "if they DO put away twice as many we want them to be prompted to confirm we actually got twice or extras … not
+   have it hang up and cause delays"): putting a CART RECORD on a shelf asks at the shelf when it would take the line past what KeHE
+   shipped (else what we ordered) — the same confirm the receive ladder has (overship), so nothing is left HELD for someone to find.
+   Counted: what Finale has (PO.confirmed) + scans already placed and on their way (ready, not yet posted, or a cold-shelf hold that
+   becomes a receipt once someone says yes) + `adding`. ⛔ A confirm, never a cap (hard boundary 6). -> {n, cap, basis, over} | null */
+/* the limit the poster uses: what KeHE SHIPPED when the shipped file is known, else what we ordered (review 2026-10-23 PM (3)) */
+PO.capOf = function(poId, sku){
+  const po = RX.pack.poById(poId), line = po && PO.line(po, sku); if(!line) return null;
+  const sh = line.shipped_units, known = (typeof sh === "number" && isFinite(sh));
+  return {cap: known ? sh : num(line.ordered_units != null ? line.ordered_units : line.qty), basis: known ? "shipped" : "ordered", known};
+};
+PO.putCheck = function(poId, sku, adding){
+  const cp = PO.capOf(poId, sku); if(!cp) return null;
+  const cf = PO.confirmed(poId, sku); if(!cf) return null;
+  const cap = cp.cap, known = cp.known;
+  if(!(cap > 0) && !known) return null;
+  let coming = 0;
+  for(const v of allIntents()){
+    const f = v.fields || {};
+    if(f.Kind === "fix" || f.State !== "ready" || f.Sku !== sku || String(f.Po || "") !== String(poId)) continue;
+    const fs = (v.fin && v.fin.FinState) || "";
+    if(fs === "" || fs === "posting" || fs === "uncertain" || (fs === "held" && /^TEMP_UNCONFIRMED/.test(String(v.fin.FinReason || "")))) coming += num(f.Units);
+  }
+  const n = num(cf.units) + coming + num(adding);
+  return {n, have: num(cf.units) + coming, cap, basis: known ? "shipped" : "ordered", over: n > cap};
 };
 PO.counts = function(po, line){
   const ordered = num(line.ordered_units != null ? line.ordered_units : line.qty);
