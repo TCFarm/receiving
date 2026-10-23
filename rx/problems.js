@@ -25,6 +25,8 @@
 
    ═══ FIX A SCAN ═══ (PO drawer → a line → a scan → Fix)
      Count is wrong      BB row: PATCH units (page `bbFixItem`) · intent: not acted on ⇒ PATCH Units (If-Match); acted on ⇒ a fix row.
+     Count is HIGHER on a scan in Finale (posted) ⇒ ⭐ RECEIVE THE REST (2026-10-23): the PO facts + a confirm card → ONE new intent for
+                         the difference (OverConfirmed only past shipped-else-ordered), the scan's buyer count-up notes withdrawn.
      Scanned twice       intent: not in Finale ⇒ cancel; in Finale ⇒ a fix row "take N off in Finale" · BB row: delete (shared-row guard).
    ⛔ The tablet NEVER un-receives in Finale (Tier C stays with the buyer). ⛔ The best-by ledger is never written here: the BB Receipts
       item is corrected in place / deleted and ProductPipeline's drain (the ONE writer of receipts.csv) folds it in — a correction
@@ -86,7 +88,33 @@ const COPY_ADD = {
   fix_cancel:     "Cancel",
   fix_bad_n:      "Type a whole number of units (1 or more).",
   fix_same:       "That is the count it already has.",
-  fix_in_finale:  "Already in Finale: the buyer gets a note to correct Finale; the best-by list is fixed now.",
+  fix_in_finale:  "Already in Finale. A higher count receives the rest of the PO here; a lower count goes to the buyer.",
+  fix_po:         "PO {po}: ordered {ordered}{cases} · KeHE shipped {shipped} · Finale has received {have}{coming}.",
+  fix_po_cases:   " ({c} cases of {cq})",
+  fix_po_coming:  " · {n} more scanned, going into Finale now",
+  fix_po_unk:     "not known yet",
+  recv_h:         "Receive {d} more into Finale?",
+  recv_body:      "This case: {base} → {n}. The {d} will be dated {bb} on {loc}. Finale will then have {after} of {cap} {basis} for this PO line.",
+  recv_over_h:    "That is {over} more than {basis_long}.",
+  recv_over_body: "This case: {base} → {n}. Finale would then have {after} for this PO line. Only if you really have {n} in this case.",
+  recv_case:      "This case: {old} on this scan + {more} received later = {total}.",
+  recv_case_has:  "This case already has {total} ({old} on this scan + {more} received later). If it is still wrong, tell the buyer.",
+  recv_cart:      "{n} of this item is still on a cart ({area}, {age} ago). If that is the case you mean, put it away instead.",
+  recv_cart_go:   "Put it away",
+  recv_retype:    "That is a lot more than one case. Type {n} again to confirm:",
+  recv_retype_bad:"The numbers don't match — type {n} to confirm, or Back.",
+  recv_who:       "Signed in as {who}.",
+  recv_not_live:  "This tablet is not sending to Finale right now — tell the buyer. Nothing was saved.",
+  fix_units_case: "Units in this case (1 case = {cq})",
+  recv_yes:       "Receive {d} more",
+  recv_yes_over:  "Yes — we got {over} extra",
+  recv_back:      "Back",
+  recv_done:      "Receiving {d} more — it goes into Finale in a few minutes.",
+  recv_withdrawn: " The earlier note to the buyer was withdrawn.",
+  recv_left:      " Tell the buyer to ignore the earlier note (it could not be withdrawn).",
+  recv_noread:    "The PO could not be read — try again in a minute. Nothing was saved.",
+  recv_bb_failed: "The best-by list did not update ({why}) — tell the buyer. Do NOT receive it again.",
+  recv_changed:   "The numbers changed on another tablet or in Finale. Nothing was saved — check them, then Save count again.",
   fix_saved:      "Count saved.",
   fix_saved_noBb: "Count saved. The best-by list was not changed (the rest of this case could not be read) — tell the buyer.",
   fix_saved_finale:"Count fixed on the best-by list. The buyer will correct Finale.",
@@ -449,22 +477,142 @@ RX.registerAct("pb-tell", ({el}) => { const iid = el.dataset.iid; return run(iid
 }); });
 
 /* ───────────────────────── FIX A SCAN ───────────────────────── */
+/* ⭐ 2026-10-23 (Jack: "did we order 12 of these? Only 6 were received, and so then we can't receive the other 6? That isn't the right
+   sequence … give them the appropriate information"): the PO facts the crew needs to get a count right — ordered, KeHE shipped, what
+   Finale has, what is on its way. Read from the SAME helpers the poster's limit mirrors (RX.po.capOf / putCheck). -> text | "" */
+const poRead = () => !(I.state && (I.state.poErr || !I.state.poLoaded));
+function poFacts(f){
+  if(!f.Po || !RX.po || !RX.po.capOf || !RX.po.putCheck || !poRead()) return "";
+  const cp = RX.po.capOf(f.Po, f.Sku), pc = RX.po.putCheck(f.Po, f.Sku, 0), cf = RX.po.confirmed ? RX.po.confirmed(f.Po, f.Sku) : null;
+  if(!cp || !pc || !cf) return "";
+  const cq = +f.CaseQty || 0, ord = +cf.ordered || 0;
+  const cases = (cq > 0 && ord > 0 && ord % cq === 0) ? t("fix_po_cases", {c:String(ord / cq), cq:fmtN(cq)}) : "";
+  const coming = pc.have - (+cf.units || 0);
+  return t("fix_po", {po:String(f.Po), ordered:fmtN(ord), cases, shipped: cp.known ? fmtN(cp.cap) : t("fix_po_unk"), have:fmtN(cf.units),
+                      coming: coming > 0 ? t("fix_po_coming", {n:fmtN(coming)}) : ""});
+}
+/* the other live records of the SAME case (split parts, or units received later through Fix — they share the BB row): the case total
+   is what a Fix on a posted scan talks about, so "receive the rest" can never be done twice on one case (misuse review 2026-10-23 (1)) */
+/* the units a record stands for: on a POSTED one, what Finale really got (FinUnitsPosted — the poster may hold part of it, code review
+   2026-10-23 (4)); otherwise its Units */
+const unitsIn = (x) => { const fin = (x && x.fin) || {}, f = (x && x.fields) || {};
+  return (fin.FinState === "posted" && fin.FinUnitsPosted != null && fin.FinUnitsPosted !== "") ? (+fin.FinUnitsPosted || 0) : (+f.Units || 0); };
+function caseNow(v){
+  const parts = partners(v).filter(x => ((x.fields || {}).Kind || "intent") === "intent");
+  const old = unitsIn(v), more = parts.reduce((s0, x) => s0 + unitsIn(x), 0);
+  return {old, more, total: old + more, parts};
+}
+/* cart records (staged, not acted on, not a finished duplicate) of the same item on the same PO: usually the case the crew is missing
+   (misuse review 2026-10-23 (2)) */
+function onCart(f){
+  const dups = P.dupIids(), out = [];
+  for(const x of (I.allPo ? I.allPo() : I.allToday())){
+    const g = x.fields || {};
+    if(g.Kind === "fix" || g.State !== "staged" || (x.fin || {}).FinState || g.Sku !== f.Sku || String(g.Po || "") !== String(f.Po || "")) continue;
+    const rec = I.byId(x.iid); if((rec && rec.cancelled) || dups.has(x.iid)) continue;
+    out.push(x);
+  }
+  return out;
+}
+const whoAmI = () => { try{ return account || ""; }catch(_){ return ""; } };
+/* the confirm card for "receive the rest": numbers from putCheck at the moment Save was pressed */
+function recvHtml(v, a){
+  const f = v.fields || {}, pc = a.pc, after = pc.n, over = Math.max(0, pc.n - pc.cap);
+  const basis = pc.basis === "shipped" ? "shipped" : "ordered";
+  const basisLong = pc.basis === "shipped" ? `KeHE shipped (${fmtN(pc.cap)})` : `we ordered (${fmtN(pc.cap)})`;
+  const h = pc.over ? t("recv_over_h", {over:fmtN(over), basis_long:basisLong}) : t("recv_h", {d:fmtN(a.d)});
+  const body = pc.over ? t("recv_over_body", {base:fmtN(a.base), n:fmtN(a.n), after:fmtN(after)})
+                       : t("recv_body", {base:fmtN(a.base), n:fmtN(a.n), d:fmtN(a.d), bb: f.BestBy || "no best-by", loc: f.Location || "the same shelf",
+                                         after:fmtN(after), cap:fmtN(pc.cap), basis});
+  const yes = pc.over ? t("recv_yes_over", {over:fmtN(over)}) : t("recv_yes", {d:fmtN(a.d)});
+  const cart = onCart(f), err = P.state.fixErr, me = whoAmI();
+  const cartUnits = cart.reduce((s0, x) => s0 + (+((x.fields || {}).Units) || 0), 0);
+  const c0 = cart[0] && (cart[0].fields || {});
+  const cartNote = cart.length ? `<div class="rx-note rx-red" role="status">${esc(t("recv_cart", {n:fmtN(cartUnits), area: (c0 && c0.StagedArea) || "a cart", age: ageText(c0 && c0.ScanAt)}))}</div>` : "";
+  const retype = a.big ? `<label class="hint" for="rxRecvN">${esc(t("recv_retype", {n:fmtN(a.n)}))}</label>
+    <input id="rxRecvN" class="num" type="text" inputmode="numeric" maxlength="6" autocomplete="off" value="" aria-label="${esc(t("recv_retype", {n:fmtN(a.n)}))}">` : "";
+  const recvBtn = `<button type="button" class="rx-btn${cart.length ? "" : " primary"}" data-act="fix-recv" data-iid="${esc(v.iid)}">${esc(yes)}</button>`;
+  const cartBtn = cart.length ? `<button type="button" class="rx-btn primary" data-act="pb-putaway" data-iid="${esc(v.iid)}">${esc(t("recv_cart_go"))}</button>` : "";
+  return `<div class="rx-fix rx-recv${pc.over ? " rx-recv-over" : ""}" data-iid="${esc(v.iid)}" data-recv="${pc.over ? "over" : "ok"}"><strong>${esc(h)}</strong>
+    <div class="hint">${esc(nameOf(f.Sku))}${f.BestBy ? " · bb " + esc(f.BestBy) : ""}${f.Location ? " · " + esc(f.Location) : ""}</div>
+    <div class="hint rx-fix-po">${esc(poFacts(f))}</div>
+    ${cartNote}
+    <div class="hint">${esc(body)}</div>
+    ${retype}
+    ${cartBtn} ${recvBtn}
+    <button type="button" class="rx-btn" data-act="fix-recv-back" data-iid="${esc(v.iid)}">${esc(t("recv_back"))}</button>
+    ${me ? `<div class="hint">${esc(t("recv_who", {who:me}))}</div>` : ""}
+    ${err ? `<div class="rx-note rx-red" role="alert">${esc(err)}</div>` : ""}</div>`;
+}
 P.fixHtml = function(v){
   const f = v.fields || {}; const err = P.state.fixErr;
+  const a = P.state.recvAsk; if(a && a.iid === v.iid) return recvHtml(v, a);
+  const facts = poFacts(f);
   return `<div class="rx-fix" data-iid="${esc(v.iid)}"><strong>${esc(t("fix_h"))}</strong>
     <div class="hint">${esc(nameOf(f.Sku))} · ${esc(String(f.Units ?? "?"))}u${f.BestBy ? " · bb " + esc(f.BestBy) : ""}${(v.fin || {}).FinState === "posted" ? " · " + esc(t("fix_in_finale")) : ""}</div>
+    ${facts ? `<div class="hint rx-fix-po">${esc(facts)}</div>` : ""}
+    ${(() => { if((v.fin || {}).FinState !== "posted") return ""; const c = caseNow(v); if(!c.more) return "";
+      return `<div class="hint rx-fix-case">${esc(t("recv_case", {old:fmtN(c.old), more:fmtN(c.more), total:fmtN(c.total)}))}</div>`; })()}
     ${(() => { const fr = fixRowsFor(v.iid).filter(x => x.FixUnits != null && +x.FixUnits > 0); if(!fr.length) return "";
       const last = fr[fr.length - 1]; return `<div class="hint rx-pb-msg" role="status"><strong>${esc(t("fix_pending", {n:String(+last.FixUnits)}))}</strong></div>`; })()}
-    <label class="hint" for="rxFixN">${esc(t("fix_units"))}</label>
+    <label class="hint" for="rxFixN">${esc((v.fin || {}).FinState === "posted" && +f.CaseQty > 0 ? t("fix_units_case", {cq:fmtN(f.CaseQty)}) : t("fix_units"))}</label>
     <input id="rxFixN" class="num" type="text" inputmode="numeric" maxlength="5" autocomplete="off" value="${esc(P.state.draft && P.state.draft.iid === v.iid ? P.state.draft.val : String(f.Units ?? ""))}" aria-label="${esc(t("fix_units"))}">
     <button type="button" class="rx-btn primary" data-act="fix-save" data-iid="${esc(v.iid)}">${esc(t("fix_save"))}</button>
     <button type="button" class="rx-btn" data-act="fix-twice" data-iid="${esc(v.iid)}">${esc(t("fix_twice"))}</button>
     <button type="button" class="rx-btn" data-act="fix-cancel" data-close="1">${esc(t("fix_cancel"))}</button>
     ${err ? `<div class="rx-note rx-red" role="alert">${esc(err)}</div>` : ""}</div>`;
 };
-RX.registerAct("fix-open", ({el}) => { P.state.fixing = el.dataset.iid; P.state.fixErr = ""; P.state.draft = null; RX.call("drawer", "refresh", true);
+RX.registerAct("fix-open", ({el}) => { P.state.fixing = el.dataset.iid; P.state.fixErr = ""; P.state.draft = null; P.state.recvAsk = null; RX.call("drawer", "refresh", true);
   setTimeout(() => { const i = document.getElementById("rxFixN"); if(i){ try{ i.focus(); i.select(); }catch(_){} } }, 30); });
-RX.registerAct("fix-cancel", () => { P.state.fixing = null; P.state.fixErr = ""; RX.call("drawer", "refresh", true); });
+RX.registerAct("fix-cancel", () => { P.state.fixing = null; P.state.fixErr = ""; P.state.recvAsk = null; RX.call("drawer", "refresh", true); });
+RX.registerAct("fix-recv-back", () => { P.state.recvAsk = null; P.state.fixErr = ""; RX.call("drawer", "refresh", true); });
+/* ⭐ 2026-10-23: RECEIVE THE REST. A higher count on a scan Finale already has is the rest of the PO line, not a correction for the buyer:
+   ONE new put-away intent for the difference (same PO, item, best-by, shelf, BB row), which the poster posts under its own rules (within
+   the expected quantity posts; above it only with OverConfirmed, else it is held). ⛔ Re-checked at the tap: numbers that moved since the
+   card was drawn are shown again and nothing is written. ⛔ Never the original case's damage / reject / short-dated / photo evidence (a
+   second credit). Then the scan's open buyer count-up notes are withdrawn (If-Match) and the BB row is set to the case's new total. */
+RX.registerAct("fix-recv", ({el}) => { const iid = el.dataset.iid;
+  const a = P.state.recvAsk; if(!a || a.iid !== iid) return;
+  const typed = ((document.getElementById("rxRecvN") || {}).value || "").trim();      // read BEFORE run() re-renders the card
+  return run(iid, async () => {
+    if(a.big && typed !== String(a.n)){ P.state.fixErr = t("recv_retype_bad", {n:fmtN(a.n)}); return; }
+    const v = findV(iid);
+    if(!v || ((v.fin || {}).FinState || "") !== "posted" || (v.fields || {}).State === "cancelled" || unitsIn(v) !== a.old){ P.state.recvAsk = null; P.state.fixErr = t("pb_changed"); return; }
+    if(RX.mode() !== "live"){ P.state.recvAsk = null; P.state.fixErr = t("recv_not_live"); return; }
+    if(!poRead()){ P.state.fixErr = t("recv_noread"); return; }
+    const f = v.fields || {};
+    const c = caseNow(v), pc = RX.po.putCheck(f.Po, f.Sku, a.d);
+    /* ⛔ anything moved since the card was drawn (another tablet, the poster, Finale): NOTHING is written and the card closes — a new card
+       in its place would put a different meaning under the same finger (misuse review 2026-10-23 (3)) */
+    if(!pc || c.total !== a.base || pc.have !== a.pc.have || pc.cap !== a.pc.cap || pc.over !== a.pc.over){ P.state.recvAsk = null; P.state.fixErr = pc ? t("recv_changed") : t("recv_noread"); return; }
+    const cq = +f.CaseQty || 0;
+    I.create(replacement(v, {Units:a.d, Cases: cq > 0 ? Math.round(a.d / cq * 100) / 100 : null, QtyKind: (cq > 0 && a.d % cq === 0) ? "full" : "part",
+                             ScanAt:RX.iso(), OverConfirmed: !!pc.over, TempConfirmed: !!f.TempConfirmed,
+                             DamagedUnits:null, RejectedUnits:null, ShortDated:false, FefoOverride: !!f.FefoOverride,
+                             /* ⛔ a NEW receipt by whoever is signed in, put straight on the shelf: never the original scanner, never cart fields
+                                (a cancelled "staged" record would be counted as a gone cart record by dupCompute — code review 2026-10-23 (6)) */
+                             Operator: whoAmI() || f.Operator || "", Workflow:"direct", StagedArea:"", RecommendedBin:"", RecReasons:""}), {});
+    P.state.recvAsk = null; P.state.fixing = null; P.state.fixErr = "";
+    /* withdraw the buyer notes that asked for a HIGHER count on this scan — the tablet has now received it */
+    let gone = 0, left = 0;
+    for(const x of (I.allPo ? I.allPo() : I.allToday())){
+      const g = x.fields || {};
+      /* only the notes THIS receipt answers: a note asking for more than n stays with the buyer (code review 2026-10-23 (7)) */
+      if(g.Kind !== "fix" || g.SplitOf !== iid || g.State === "cancelled" || !(+g.FixUnits > a.old && +g.FixUnits <= a.n)) continue;
+      const r = await patchIntent(x, {State:"cancelled"}, "");
+      if(r.ok){ gone++; continue; }
+      const rec = I.byId(x.iid);
+      if(r.why === "sending" && rec && !rec.sent && I.cancel(x.iid) === "cancelled"){ gone++; continue; }
+      left++;
+    }
+    let msg = t("recv_done", {d:fmtN(a.d)}) + (gone ? t("recv_withdrawn") : "") + (left ? t("recv_left") : "");
+    if(f.BbItemId){
+      const b = await bb(v, {units: a.n});                           // the BB row is the WHOLE case, and n is the whole case
+      if(!b.ok) msg += " " + t("recv_bb_failed", {why:b.why});      // ⛔ never "tap again": a second tap would receive a second time
+    }
+    say(iid, msg);
+  });
+});
 RX.registerAct("fix-save", ({el}) => { const iid = el.dataset.iid;
   const raw = ((document.getElementById("rxFixN") || {}).value || "").trim();      // read BEFORE run() re-renders the panel
   return run(iid, async () => {
@@ -472,8 +620,8 @@ RX.registerAct("fix-save", ({el}) => { const iid = el.dataset.iid;
   const f = v.fields || {}, fs = (v.fin || {}).FinState || "";
   const n = /^\d+$/.test(raw) ? parseInt(raw, 10) : NaN;
   if(!(n >= 1)){ P.state.fixErr = t("fix_bad_n"); return; }
-  if(n === +f.Units){ P.state.fixErr = t("fix_same"); return; }
-  const old = +f.Units || 0;
+  const old = fs === "posted" ? unitsIn(v) : (+f.Units || 0);        // a posted scan: what Finale really got (code review 2026-10-23 (4))
+  if(n === old){ P.state.fixErr = t("fix_same"); return; }
   /* the intent itself is corrected when the poster can still post it: not acted on (incl. staged), or a NOT_ON_PO hold (re-evaluated by
      the poster, so a note alone would let it post the OLD count — review (6)). Anything in Finale or on its way: a note for the buyer. */
   const reeval = fs === "held" && /^NOT_ON_PO\b/.test(String((v.fin || {}).FinReason || ""));
@@ -481,6 +629,21 @@ RX.registerAct("fix-save", ({el}) => { const iid = el.dataset.iid;
     const cq = +f.CaseQty || 0;
     const r = await patchIntent(v, cq > 0 ? {Units:n, Cases: Math.round(n / cq * 100) / 100} : {Units:n}, fs);
     if(!r.ok){ P.state.fixErr = whyText(r.why); return; }
+  }else if(fs === "posted" && n > old && f.Po && f.Kind !== "fix" && RX.mode() === "live" && RX.po && RX.po.putCheck && RX.po.capOf && RX.po.capOf(f.Po, f.Sku)){
+    /* ⭐ 2026-10-23 RECEIVE THE REST: a higher count on a scan Finale has is the rest of the PO line — show the numbers and ask (fix-recv).
+       ⛔ Nothing is written here. ⛔ The PO-wide read must be loaded: an unseen scan on another tablet would make "on the way" wrong. */
+    if(!poRead()){ P.state.fixErr = t("recv_noread"); return; }
+    /* n is the WHOLE case: units already received later on this case (an earlier "receive the rest", a split part) count, so doing it
+       twice is refused rather than received twice (misuse review 2026-10-23 (1)) */
+    const c = caseNow(v);
+    if(n <= c.total){ P.state.fixErr = c.more ? t("recv_case_has", {old:fmtN(c.old), more:fmtN(c.more), total:fmtN(c.total)}) : t("fix_same"); return; }
+    const d = n - c.total;
+    const pc = RX.po.putCheck(f.Po, f.Sku, d);
+    if(!pc){ P.state.fixErr = t("recv_noread"); return; }
+    /* more than one case past what is expected (a typo, 99999, cases typed as units) must be typed twice — derived, never a fixed cap */
+    const cq = +f.CaseQty || 0, over = Math.max(0, pc.n - pc.cap);
+    P.state.recvAsk = {iid, n, old, base: c.total, d, pc, big: pc.over && over > (cq > 0 ? cq : Math.max(1, pc.cap))}; P.state.fixErr = ""; P.state.draft = null;
+    return;
   }else{
     /* ⭐ 2026-10-23 (crew: "it does not save the new 12 count when I press save count"): on a scan already in Finale the tablet sends the
        buyer a request and Finale is corrected by the buyer — the line keeps showing the old count until then. A second Save with the
