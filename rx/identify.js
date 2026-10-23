@@ -97,6 +97,7 @@ function panel(){
           The case on screen (<span class="num">${e_(String((cur.pendingCodes || "").split(" ")[0] || cur.upc || ""))}</span>) is not recorded yet.
           <button type="button" class="rx-btn" data-act="toid-skip-current" style="margin-left:6px">Skip this carton — not recorded</button></div>` : ""}
       ${list.map(rowHtml).join("") || (mode === "finish" ? "" : `<div class="hint">Nothing to identify.</div>`)}
+      ${mode === "finish" && window.RX && RX.short ? RX.short.finishHtml() : ""}
       ${mode === "finish" ? `<div style="margin-top:12px"><button type="button" class="primary rx-btn" data-act="toid-close" data-close="3">Finish — the rest stay on the HOLD shelf</button></div>` : ""}
     </div>`;
 }
@@ -134,5 +135,5 @@ document.addEventListener("keydown", (e) => {
   if(e.key === "Escape" && mode){ e.preventDefault(); e.stopImmediatePropagation(); mode = null; panel(); refocus(); }
 }, true);
 setTimeout(render, 500);
-window.RXIdentify = { add, open: (m) => { mode = m || "list"; panel(); }, list: () => L.slice(), count: () => open_().length, render, chipHtml };
+window.RXIdentify = { add, open: (m) => { mode = m || "list"; panel(); }, close: () => { mode = null; panel(); }, list: () => L.slice(), count: () => open_().length, render, chipHtml };
 })();
