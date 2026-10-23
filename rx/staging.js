@@ -74,7 +74,8 @@ const COPY_ADD = {
   tray_some_q:     "How many go on this shelf?",
   tray_some_save:  "Save",
   tray_in:         "in tray",
-  tray_expired:    "The tray was cleared after {m} idle minutes. Scan the items again.",
+  tray_expired:    "The tray was cleared after {m} idle minutes — those items are NOT in Finale. Scan each one again, then the shelf tag.",
+  tray_now_tag:    "<strong>{name}</strong> is in your hand. Now scan the SHELF TAG where you put it — it is not in Finale until you do.",
   tray_countdown:  "Tray clears in {s} s",
   notstaged:       "{name} isn't on the staged list.",
   notstaged_receive:"Receive it now",
@@ -558,7 +559,7 @@ RX.registerAct("lot-pick", ({el}) => {
   const r = lot.lots.find(x => x.iid === el.getAttribute("data-iid")); S.lot = null; try{ clearPrompt(); }catch(_){}
   if(r) take(r, lot.armed);
 });
-RX.registerAct("notstaged-cancel", () => { S.notstaged = null; try{ clearPrompt(); }catch(_){} });
+RX.registerAct("notstaged-cancel", () => { const n = S.notstaged; S.notstaged = null; try{ if(n) noteDropped(n.raw, "NOT_STAGED"); }catch(_){} try{ clearPrompt(); }catch(_){} });
 RX.registerAct("notstaged-receive", () => {
   const n = S.notstaged; if(!n) return; S.notstaged = null; try{ clearPrompt(); }catch(_){}
   S.bypass = true; setTimeout(() => { S.bypass = false; }, 800);
@@ -572,7 +573,7 @@ RX.registerIdle("tray", {
     if(S.placing) return true;
     const id = PA.identify(raw);
     if((S.dec && S.dec.card) || S.notstaged){                    // a modal question is open: refused, never recorded (SCANNER-UX §8 rule 3)
-      if(id.kind === "tag" || id.kind === "product"){ RX.toast("Answer the question first. That scan was not recorded."); RX.sound("refused"); return true; }
+      if(id.kind === "tag" || id.kind === "product"){ try{ noteDropped(raw, "MODAL"); }catch(_){} RX.toast("Answer the question first. That scan was not recorded."); RX.sound("refused"); return true; }
       return false;
     }
     if(id.kind === "tag"){ closeCards(); return onTagScan(id); }
@@ -610,7 +611,10 @@ RX.registerStep("tray", {
     const area = top ? (RX.pack.areaOf(top.bin) || "") : ((rank.area && rank.area.name) || "");
     ctx.commit({state: "staged", workflow: "staged", stagedArea: area, recommendedBin: top ? top.bin : "", recReasons: [rank.reason.code]});
     const row = RX.state.lastRow;
-    if(row && row.rx){ for(const rec of RX.intents.forRow(row)){ const r = norm({iid: rec.iid, fields: rec.fields, etag: rec.etag, itemId: rec.itemId}); S.list.push(r); S.tray.items.push({iid: r.iid, take: null}); } trayTouch(); ST.render(); }
+    if(row && row.rx){ for(const rec of RX.intents.forRow(row)){ const r = norm({iid: rec.iid, fields: rec.fields, etag: rec.etag, itemId: rec.itemId}); S.list.push(r); S.tray.items.push({iid: r.iid, take: null}); } trayTouch();
+      /* ⭐ 2026-10-22: received this way the case is only STAGED + in hand. On 10-22 eight new frozen items were received like this and
+         never got a shelf tag, so none reached Finale and nothing said why. Say the next step, in words, where the eye is. */
+      S.notice = t("tray_now_tag", {name: esc(p.prod.name)}); ST.render(); }
   },
   onScan(){ return false; },
 });
@@ -681,6 +685,7 @@ RX.registerStep("stage", {
     const st = ctx.p.rx.stage; if(!st || st.sub !== "main") return false;
     const id = PA.identify(raw);
     if(id.kind === "tag"){ toShelf(ctx, id.bin); return true; }          // a tag at the stage card = "I'm at the shelf"
+    try{ noteDropped(raw, "STAGE_WRONG"); }catch(_){}
     renderStage(ctx, t("stage_wrong", {name: ctx.p.prod.name})); RX.sound("refused");
     return true;
   },
