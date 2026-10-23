@@ -132,7 +132,7 @@ function poHtml(){
       : `<div class="rx-note rx-red">${esc(RX.pack.message() || t("pack_none"))} <button class="rx-btn" data-act="po-refresh">${esc(t("btn_try_again"))}</button></div>`;
     return shell("Delivery", body);
   }
-  const fl = [["all", t("po_f_all")], ["notstarted", t("po_f_notstarted")], ["partial", t("po_f_partial")], ["done", t("po_f_done")], ["over", t("po_f_over")], ["problems", t("po_f_problems")], ["notpo", t("po_f_notpo")]];
+  const fl = [["all", t("po_f_all")], ["notstarted", t("po_f_notstarted")], ["partial", t("po_f_partial")], ["done", t("po_f_done")], ["over", t("po_f_over")], ["short", t("po_f_short")], ["problems", t("po_f_problems")], ["notpo", t("po_f_notpo")]];
   body += `<div class="rx-chiprow">` + fl.map(([k, l]) => `<button class="rx-chipbtn${H.poFilter === k ? " on" : ""}" data-act="po-filter" data-f="${k}" aria-pressed="${H.poFilter === k}">${esc(l)}</button>`).join("") +
     `<button class="rx-btn" data-act="po-refresh" style="margin-left:auto">${esc(t("btn_refresh"))}</button></div>
     <input class="rx-search" id="rxPoSearch" type="search" placeholder="${esc(t("po_search_ph"))}" value="${esc(H.poSearch)}" aria-label="${esc(t("po_search_ph"))}">`;
@@ -159,8 +159,9 @@ function poHtml(){
       const key = x.po.order_id+"|"+line.sku, open = !!H.expanded[key] || (H.poFilter === "problems" && H.expanded[key] !== false);
       body += `<div class="rx-line rx-${s.state}"><button class="rx-linebtn" data-act="po-line" data-key="${esc(key)}" aria-expanded="${open}">
         <span class="rx-lname">${esc(name)}</span><span class="rx-lqty num">${esc(t("po_line_of", {k:s.k, n:s.n, unit:s.unit}))}</span>
-        <span class="rx-lshelf">${esc(s.shelves.join(", "))}</span>${s.problems ? `<span class="rx-chip rx-red">${s.problems}</span>` : ""}</button>`;
-      if(open) body += `<div class="rx-scans">` + (s.scans.length ? s.scans.map(c => scanLine(c)).join("") : `<div class="hint">No scans yet.</div>`) + `</div>`;
+        <span class="rx-lshelf">${esc(s.shelves.join(", "))}</span>${s.problems ? `<span class="rx-chip rx-red">${s.problems}</span>` : ""}${RX.short ? RX.short.tag(x.po, line) : ""}</button>`;
+      /* ⭐ 2026-10-23: "we never got it" lives on the line (rx/short.js) — above its scans, so a line with NO scans still has it */
+      if(open) body += `<div class="rx-scans">` + (RX.short ? RX.short.html(x.po, line) : "") + (s.scans.length ? s.scans.map(c => scanLine(c)).join("") : `<div class="hint">No scans yet.</div>`) + `</div>`;
       body += `</div>`;
     });
     if(!n && H.poFilter !== "notpo") body += `<div class="hint">${esc(t("po_empty"))}</div>`;
