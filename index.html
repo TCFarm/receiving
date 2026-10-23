@@ -228,6 +228,7 @@
 <script src="rx/learn.js"></script>
 <script src="rx/identify.js"></script>
 <script src="rx/problems.js"></script>
+<script src="rx/short.js"></script>
 <script src="rx/version.js"></script>
 <script>
 "use strict";
@@ -408,7 +409,10 @@ async function beginLogin(){
     client_id: CFG.clientId, response_type: "code",
     redirect_uri: location.origin + location.pathname,
     response_mode: "query", scope: CFG.scopes.join(" "),
-    code_challenge: challenge, code_challenge_method: "S256", state
+    code_challenge: challenge, code_challenge_method: "S256", state,
+    /* ⭐ 2026-10-23 (Eli: "when I click sign in it doesn't even give me a chance to put in my login info and just reverts to matt"):
+       always show Microsoft's account picker, so a shared tablet can switch person instead of silently reusing who signed in last */
+    prompt: "select_account"
   });
   location.assign(`${AUTH}/authorize?${p}`);
 }
@@ -3266,7 +3270,11 @@ async function start(){
 }
 $("signin").addEventListener("click", ()=>beginLogin().catch(e=>{
   $("gateMsg").innerHTML=`<strong style="color:var(--stop)">${esc(e.message)}</strong>`;}));
-$("signout").addEventListener("click", ()=>{ store.clear(); location.reload(); });
+/* ⭐ 2026-10-23: Sign out ends the MICROSOFT session in this browser too (it used to clear only this page, so the next Sign in came back
+   as the same person). Scans not yet sent live in localStorage (rx_intents_v1, pending rows) and are kept; they are sent after the next
+   sign-in, under the account that scanned them (Operator is stamped at scan time). */
+$("signout").addEventListener("click", ()=>{ store.clear();
+  location.assign(`${AUTH}/logout?post_logout_redirect_uri=${encodeURIComponent(location.origin + location.pathname)}`); });
 $("mReceive").addEventListener("click", ()=>chooseMode("receive"));
 $("mAudit").addEventListener("click",   ()=>chooseMode("audit"));
 $("cCases").addEventListener("click",   ()=>setCount("cases"));
