@@ -117,3 +117,9 @@ body.rx-on label.big#scanLabel{color:var(--ink-2)}
 .rx-fix{margin:8px 0;padding:10px;border:1px solid var(--line);background:var(--card)}
 .rx-fix input{width:110px;font-size:20px;padding:8px;min-height:48px;margin:6px 8px 6px 0}
 .rx-fix .rx-btn{min-height:48px;margin:4px 6px 0 0}
+
+/* 2026-10-23 rx/short.js: the crew's "we never got it" on a PO line */
+.rx-short{margin:6px 0 8px;padding:8px 10px;border-left:4px solid var(--wait,#b7791f);background:var(--card)}
+.rx-short .rx-btn{min-height:48px;margin:4px 6px 0 0}
+.rx-short-ask{border-left:4px solid var(--wait,#b7791f)}
+.rx-short-tag{margin-left:6px}
