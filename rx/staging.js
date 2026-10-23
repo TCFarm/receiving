@@ -65,6 +65,8 @@ const COPY_ADD = {
   staged_cancel:   "Not put away — take it off the list",
   staged_cancel_q: "It was never received. The buyer will see it as not received.",
   staged_cancel_yes:"Yes, take it off",
+  staged_cancel_bb_failed:"Taken off the list, but its best-by record could not be removed ({why}). The buyer has been told; nothing else to do.",
+  staged_cancel_bb_queued:"No signal: it comes off the list as soon as the tablet reconnects. Its best-by record was kept for now and the buyer has been told.",
   staged_cancel_no:"Keep it",
   tray_h:          "In hand (tray)",
   tray_empty:      "Tray is empty.",
@@ -592,11 +594,21 @@ RX.registerAct("staged-row", ({el}) => { const i = el.getAttribute("data-iid"); 
 RX.registerAct("staged-cancel", ({el}) => { S.confirm = el.getAttribute("data-iid"); ST.render(); });
 RX.registerAct("staged-cancel-no", () => { S.confirm = null; ST.render(); });
 RX.registerAct("staged-cancel-yes", async ({el}) => {
-  const iid = el.getAttribute("data-iid"), r = byIid(iid); S.confirm = null; S.expanded = null; if(!r){ ST.render(); return; }
-  const rec = RX.intents.byId(iid);
-  if(rec){ RX.intents.cancel(iid); S.hidden.add(iid); }
-  else{ const res = await ST.claim(r, {State: "cancelled"}, "staged"); if(res.ok) S.hidden.add(iid); else conflictToast(r, res); }
+  const iid = el.getAttribute("data-iid"), r = byIid(iid); S.confirm = null; S.expanded = null; S.notice = null; if(!r){ ST.render(); return; }
+  const rec = RX.intents.byId(iid), PB = RX.problems || {};
+  const v = PB.vOf ? (PB.vOf(iid) || {iid, fields: r.fields || {}}) : null;   // as it was BEFORE the cancel
+  /* ⭐ PM-3069: the best-by row goes with it — but ONLY once the cancel is CERTAIN (review 2026-10-22 (1): deleting it while the cancel
+     was still queued let a case another tablet had already put away — and the poster posted — lose its best-by).
+       never left this tablet  → cancelled here, certain;
+       otherwise               → ST.claim: PATCH only if the server still says `staged` (If-Match); certain only when it LANDED, not queued. */
+  let certain = false, queued = false;
+  if(rec && !rec.sent && !rec.tried && !rec.inflight){ RX.intents.cancel(iid); S.hidden.add(iid); certain = true; }
+  else{ const res = await ST.claim(r, {State: "cancelled"}, "staged"); if(res.ok){ S.hidden.add(iid); certain = !res.queued; queued = !!res.queued; } else conflictToast(r, res); }
   S.tray.items = S.tray.items.filter(x => x.iid !== iid); trayTouch();
+  if(v && certain && PB.dropBb){
+    const b = await PB.dropBb(v);
+    if(!b.ok){ if(PB.tellBbLeft) PB.tellBbLeft(v, b.why || "error"); S.notice = t("staged_cancel_bb_failed", {why: esc(b.why || "error")}); }
+  }else if(v && queued){ if(PB.tellBbLeft) PB.tellBbLeft(v, "no signal: the cancel was queued"); S.notice = t("staged_cancel_bb_queued"); }
   ST.render(); ST.refresh();
 });
 
