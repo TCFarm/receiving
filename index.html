@@ -227,6 +227,7 @@
 <script src="rx/photos.js"></script>
 <script src="rx/learn.js"></script>
 <script src="rx/identify.js"></script>
+<script src="rx/problems.js"></script>
 <script src="rx/version.js"></script>
 <script>
 "use strict";
@@ -756,7 +757,7 @@ function modeGate(){
 }
 async function handleScan(raw){
   const v=(raw||"").trim(); if(!v) return;
-  if(modeGate()) return;
+  if(modeGate()){ noteDropped(v, "NOT_READY"); return; }
   if(window.RX && await RX.intercept(v)) return;   // RX: a flow step / idle handler consumed the scan
   /* ⛔⛔ REVIEW FIX (2026-09-23): A NEW SCAN MUST NOT OVERWRITE AN ITEM STILL BEING
      ASKED ABOUT. Tapping the scan box and scanning the next carton while the date
@@ -771,6 +772,7 @@ async function handleScan(raw){
   const takesDate = !!(pending && !pending.best && /[\/-]/.test(v) && !upcCandidate(v)
                        && parseGs1Date(v) && plausibleBB(parseGs1Date(v)));
   if(pending && $("promptArea").querySelector(".prompt") && !takesDate){
+    noteDropped(v, "BUSY");
     showBurstRefusal(v);
     return;
   }
@@ -2005,6 +2007,24 @@ async function uploadPhoto(file, label, maxPx){
   return {name, url: j.webUrl, kb: Math.round(blob.size/1024)};
 }
 
+/* ⭐ 2026-10-22 (Jack: "We should be recording all their scans so we can learn from them if they don't work right"): a scan the page
+   REFUSES without recording it ("That scan was not recorded", a question still open, the staged list's "Not now", a wrong scan at the
+   shelf) is written down too, as a `!DROPPED` telemetry row: `<WHY> <raw scan>` in gtin14. ⛔ NOT a receipt and NOT a reject of a
+   code: the drain files every `!` row in rejects.csv, and abandoned_scans / past_scans read only UNKNOWN_UPC / UNREADABLE /
+   BAD_CHECKDIGIT, so a dropped scan never becomes a "barcode to identify". It does not touch the on-screen reject counter. Through the
+   persisted outbox, so a dropped scan made offline is still sent later. WHY: NOT_READY · BUSY · NOT_STAGED · MODAL · SHELF_WRONG ·
+   SHELF_DATE · STAGE_WRONG. */
+function noteDropped(raw, why){
+  try{
+    const v = String(raw == null ? "" : raw).trim(); if(!v || !Object.keys(FIELD).length) return;
+    const base = { Title: "! DROPPED" };
+    base[FIELD.sku] = "!DROPPED"; base[FIELD.upc] = "";
+    base[FIELD.gtin14] = `${String(why || "DROPPED").slice(0,12)} ${v}`.slice(0,60);
+    base[FIELD.lot] = ""; base[FIELD.units] = 0; base[FIELD.source] = "dropped";
+    base[FIELD.operator] = account; base[FIELD.po_ref] = ""; base[FIELD.device] = device;
+    enqueueRecord(base, "DROPPED");
+  }catch(_){}
+}
 async function reject(kind, raw, upc){
   /* Every scan the page REFUSED is written down (Jack, 2026-08-13). Nobody
      is going to keep a tally on paper, so if the page does not record its own
@@ -2215,6 +2235,49 @@ async function deleteRow(row){
     persistPending(); renderPending(); render();
     alert("Could not delete that scan: " + e.message +
           "\n\nIt has been put back on the list — try again.");
+  }
+}
+
+/* ⭐ 2026-10-22 — FIX A SCAN FROM ANY DAY OR TABLET (the crew: "can't edit in the receiving app"). The history cells above correct only
+   a row still on THIS tablet's screen (today's). rx/problems.js corrects any scan of an open PO by the BB Receipts item id its intent
+   carries (BbItemId), with the SAME two writes and the SAME fallback:
+     units  → PATCH the item's units in place          (the drain re-reads drained rows and folds the edit into the ledger row)
+     delete → DELETE the item                          (the drain moves the ledger row to deleted_by_operator.csv)
+     404    → the item was drained AND purged: send !CORRECTION / !DELETION (receipt id + sku cross-check), applied by the drain.
+   ⛔ The ledger (receipts.csv) is never written here: the drain is its ONE writer, a correction supersedes the row it names in place and
+      keeps the original timestamp. ⛔ A sentinel is sent ONLY on a 404: for an item still in SharePoint the drain's re-read would put the
+      old value back. A row still on this tablet goes through its own cell path, so the screen and SharePoint never disagree.
+   -> "patched" | "deleted" | "sent" (sentinel queued in the outbox) | "retry" (no signal / sign-in: nothing written — tap again).
+   Throws on a permanent refusal. */
+async function bbFixItem(o){
+  const id = String(o.id || ""); if(!/^\d+$/.test(id)) throw new Error("no best-by row id");
+  const row = rows.find(r => String(r.id) === id && !r.deleted);
+  if(row){
+    if(row.prod && o.sku && row.prod.sku !== o.sku) throw new Error("that best-by row is a different product");
+    if(o.del){ deleteRow(row); return "deleted"; }
+    row.units = o.units; persistPending(); render(); patchUnits(row); return "patched";
+  }
+  if(!siteId || needsSignIn) return "retry";
+  const pseudo = {id, prod:{sku:o.sku}, upc:o.upc || "", _po:o.po || ""};
+  try{
+    if(o.del) await graph(`/sites/${siteId}/lists/${listId}/items/${id}`, {method:"DELETE"});
+    else await graph(`/sites/${siteId}/lists/${listId}/items/${id}/fields`, {method:"PATCH", body: JSON.stringify({[FIELD.units]: o.units})});
+    return o.del ? "deleted" : "patched";
+  }catch(e){
+    if(e && e.status === 404){
+      if(o.del){
+        const base = { Title: "! DELETION" };
+        base[FIELD.sku] = "!DELETION"; base[FIELD.upc] = pseudo.upc;
+        base[FIELD.gtin14] = `DELETES ${id} ${o.sku}`.slice(0,60);
+        base[FIELD.lot] = ""; base[FIELD.units] = 0; base[FIELD.source] = "deletion";
+        base[FIELD.operator] = account; base[FIELD.po_ref] = pseudo._po; base[FIELD.device] = device;
+        enqueueRecord(base, "DELETION");
+      }else sendCorrectionRecord(pseudo, {units:o.units});
+      return "sent";
+    }
+    if(e && e.auth){ flagSignIn(); return "retry"; }
+    if(e && e.permanent) throw e;
+    return "retry";
   }
 }
 
