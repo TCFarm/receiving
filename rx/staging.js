@@ -68,6 +68,19 @@ const COPY_ADD = {
   staged_cancel_bb_failed:"Taken off the list, but its best-by record could not be removed ({why}). The buyer has been told; nothing else to do.",
   staged_cancel_bb_queued:"No signal: it comes off the list as soon as the tablet reconnects. Its best-by record was kept for now and the buyer has been told.",
   staged_cancel_no:"Keep it",
+  oncart_title:    "{name} is already on a cart. Is this that case?",
+  oncart_row:      "Yes — this is it: {units} u · best-by {bb} · {area} · staged {when} by {who}",
+  oncart_no:       "No — this is another case (we got extra)",
+  oncart_sub:      "This would make {n} — KeHE says it shipped {cap}.",
+  oncart_sub_ord:  "This would make {n} — we ordered {cap}.",
+  oncart_sort:     "{name} is already on the cart — nothing new recorded.",
+  oncart_intray:   "{name} from the cart is in your hand. Now scan the SHELF TAG where you put it — nothing new was recorded.",
+  putover_title:   "Already received: {have} of {item} — this makes {n}.",
+  putover_body:    "KeHE says it shipped {cap}. Did we really get {add} more?",
+  putover_body_ord:"We ordered {cap}. Did we really get {add} more?",
+  putover_yes:     "Yes — we got {add} extra",
+  putover_no:      "No — same case counted twice, remove it",
+  putover_removed: "Removed {name} — it was the same case counted twice. Nothing went into Finale.",
   tray_h:          "In hand (tray)",
   tray_empty:      "Tray is empty.",
   tray_clear:      "Clear tray",
@@ -160,7 +173,7 @@ const whoText = (r) => (r.by && r.by === acct()) ? t("staged_you") : nice(r.by);
 
 ST.state = {list: [], listAt: 0, loading: false, startedAt: 0, err: "", gen: 0, area: null, expanded: null, confirm: null, hidden: new Set(),
             tray: RX.store.get(TRAY_KEY, null) || {items: [], at: 0}, some: null, dec: null, lot: null, notstaged: null, placed: null, notice: "",
-            bypass: false, autoOpened: false, placing: false, lastPoll: 0};
+            bypass: false, autoOpened: false, placing: false, lastPoll: 0, returnFlow: null};
 const S = ST.state;
 if(!Array.isArray(S.tray.items)) S.tray = {items: [], at: 0};
 const saveTray = () => { if(S.tray.items.length) RX.store.set(TRAY_KEY, S.tray); else RX.store.del(TRAY_KEY); };
@@ -175,13 +188,17 @@ function norm(it){
 ST.records = function(){
   const I = RX.intents, map = new Map();
   for(const r of S.list){ const rec = I.byId(r.iid); if(rec && rec.fields && rec.fields.State !== "staged") continue; map.set(r.iid, r); }
-  for(const e of I.allToday()){
+  /* ⭐ 2026-10-23 PM: ∪ every intent of the open pack POs (any day, any tablet), so the receive screens' "already on a cart?" sees a
+     cart record from another day even before the staged list has been read */
+  for(const e of (I.allPo ? I.allPo() : I.allToday())){
     const f = e.fields || {};
     if(f.Kind === "fix" || f.State !== "staged" || (e.fin && e.fin.FinState)) { if(map.has(e.iid) && f.State !== "staged" && e.local) map.delete(e.iid); continue; }
     const rec = I.byId(e.iid); if(rec && (rec.cancelled || rec.denied)) continue;
     if(!map.has(e.iid)) map.set(e.iid, norm({iid: e.iid, fields: f, etag: e.etag, itemId: e.itemId}));
   }
-  const out = [...map.values()].filter(r => !S.hidden.has(r.iid) && r.sku);
+  /* ⭐ 2026-10-23: a cart record whose case is already put away is not work (rx/problems.js P.dupIids — the ONE rule) */
+  const dups = (RX.problems && RX.problems.dupIids) ? RX.problems.dupIids() : new Set();
+  const out = [...map.values()].filter(r => !S.hidden.has(r.iid) && r.sku && !dups.has(r.iid));
   out.sort((a, b) => String(a.bin || "~").localeCompare(String(b.bin || "~")) || String(a.area).localeCompare(String(b.area)) || String(a.at).localeCompare(String(b.at)));
   return out;
 };
@@ -310,7 +327,7 @@ RX.registerAct("leftovers-open", () => { if(RX.setFlow("staged")) RX.refresh(); 
 
 /* ───────────────────────── the tray ───────────────────────── */
 function trayTouch(){ S.tray.at = RX.now(); saveTray(); }
-function clearTray(notice){ S.tray = {items: [], at: 0}; S.some = null; saveTray(); S.notice = notice || ""; ST.render(); }
+function clearTray(notice){ S.tray = {items: [], at: 0}; S.some = null; saveTray(); S.notice = notice || ""; ST.render(); try{ maybeReturn(); }catch(_){} }
 function addToTray(r, take){
   if(inTray(r.iid)) return;
   S.tray.items.push({iid: r.iid, take: take || null}); trayTouch(); S.notice = ""; S.some = null;
@@ -355,7 +372,10 @@ function adopt(r){
                inflight: false, patches: [], fin: {}, denied: null, cancelled: false, err: "", bbN: null};
   store.recs[r.iid] = rec; I._save(); return rec;                  // ⛔ round-2 (5): through the merging save, never a raw overwrite
 }
-function mirror(rec, f, etag){
+function mirror(rec, f, etag, iid){
+  /* review 2026-10-23 PM (6): also the PO-wide copy, so a record from another tablet placed here stops reading "staged" now */
+  const id = iid || (rec && rec.iid);
+  const m = id && RX.state.poAll && RX.state.poAll.get(id); if(m){ Object.assign(m.fields, f); if(etag) m.etag = etag; }
   if(!rec) return;
   Object.assign(rec.fields, f); if(etag) rec.etag = etag;
   try{ RX.intents._save(); }catch(_){}
@@ -382,7 +402,7 @@ ST.claim = async function(r, f, expect, opts){
     try{
       const j = await graph(`/sites/${L.siteId}/lists/${L.listId}/items/${itemId}/fields`,
         {method: "PATCH", headers: etag ? {"If-Match": etag} : {}, body: JSON.stringify(f)});
-      mirror(I.byId(r.iid), f, etagOf(j));
+      mirror(I.byId(r.iid), f, etagOf(j), r.iid);
       return {ok: true, etag: etagOf(j)};
     }catch(e){
       if(e && e.status === 412){
@@ -411,8 +431,8 @@ function copyFields(r, take, f){
   const keep = {}; if(r.fields.ScanAt) keep.ScanAt = r.fields.ScanAt; if(r.fields.PageMode) keep.PageMode = r.fields.PageMode;
   return Object.assign(g, f, keep, {SplitOf: r.iid, Workflow: "staged", Kind: "intent"});
 }
-async function placeOne(r, take, info, source){
-  const f = {State: "ready", Location: info.name, BinSource: source, PlacedBy: acct(), ReadyAt: RX.iso()};
+async function placeOne(r, take, info, source, extra){
+  const f = Object.assign({State: "ready", Location: info.name, BinSource: source, PlacedBy: acct(), ReadyAt: RX.iso()}, extra || {});
   if(isHold(r)){ if(holdWaiting(r)) return {ok: false, gone: true}; try{ const ol = openLine(r.sku); if(ol && ol.po) f.Po = String(ol.po.order_id); }catch(_){} }   // a released hold now has its PO (the line with open units)
   if(take && take < r.units){
     /* ⛔ round-2 (1): the shrink carries the ACK (SplitOf = its own id); the portion exists only after it landed, or GATED on it */
@@ -434,10 +454,12 @@ function conflictToast(r, res){
 async function executePlace(dec){
   S.placing = true;
   const placed = [], skippedKeep = [];
+  const removed = [];
   for(const q of dec.queue){
+    if(q.dup){ S.tray.items = S.tray.items.filter(x => x.iid !== q.rec.iid); const n = await ST.retire(q.rec); if(n !== null) removed.push({r: q.rec, notice: n}); continue; }
     if(q.skip){ skippedKeep.push(q); continue; }
-    const res = await placeOne(q.rec, q.take, dec.info, dec.source);
-    if(res.ok){ placed.push({r: q.rec, take: q.take, portion: res.portion}); S.tray.items = S.tray.items.filter(x => x.iid !== q.rec.iid && !(res.portion && x.iid === q.rec.iid)); }
+    const res = await placeOne(q.rec, q.take, dec.info, dec.source, q.overConfirmed ? {OverConfirmed: true} : null);
+    if(res.ok){ placed.push({r: q.rec, take: q.take, portion: res.portion, prevOver: !!(q.rec.fields && q.rec.fields.OverConfirmed === true)}); S.tray.items = S.tray.items.filter(x => x.iid !== q.rec.iid && !(res.portion && x.iid === q.rec.iid)); }
     else if(res.denied){ RX.toast(t("denied")); }
     else{ conflictToast(q.rec, res); S.tray.items = S.tray.items.filter(x => x.iid !== q.rec.iid); S.hidden.add(q.rec.iid); }
   }
@@ -450,13 +472,21 @@ async function executePlace(dec){
     RX.flash(`<div class="last rx-last" role="status"><div class="nm">✓ ${esc(head)}</div><div class="rx-lastbtns">${btn("placed-undo", t("placed_undo"))}</div></div>`);
     RX.sound("saved");
   }
-  ST.refresh(); ST.render();
+  if(removed.length){ S.notice = removed.map(x => x.notice || t("putover_removed", {name: nameOf(x.r.sku)})).join(" "); if(!placed.length) RX.sound("decide"); }
+  ST.refresh(); ST.render(); maybeReturn();
 }
 function itemFor(r, take){ const c = catOf(r.sku); return {sku: r.sku, name: nameOf(r.sku), cls: c.cls, best: r.best, units: take || r.units}; }
 function runDec(){
   const dec = S.dec; if(!dec) return;
   while(dec.idx < dec.queue.length){
     const q = dec.queue[dec.idx], item = itemFor(q.rec, q.take);
+    /* ⭐ 2026-10-23 PM: past what KeHE shipped → ask HERE (extra, or the same case counted twice) instead of leaving a hold */
+    if(!q.flags.over && !(q.rec.fields && q.rec.fields.OverConfirmed === true) && RX.po && RX.po.putCheck && q.rec.po){
+      const earlier = dec.queue.slice(0, dec.idx).filter(e => !e.skip && e.rec.po === q.rec.po && e.rec.sku === q.rec.sku).reduce((a, e) => a + (e.take || e.rec.units || 0), 0);
+      const add = q.take || q.rec.units || 0;
+      const o = RX.po.putCheck(q.rec.po, q.rec.sku, earlier + add);
+      if(o && o.over){ dec.card = {kind: "over", item, o: Object.assign({add, have: o.have + earlier}, {n: o.n, cap: o.cap, basis: o.basis})}; showDecCard(); return; }
+    }
     const rank = PA.rankFor(item);
     const probs = PA.problems(item, dec.info, rank).filter(k => !q.flags[k]);
     if(probs.length){ dec.card = {kind: probs[0], item, rank}; showDecCard(); return; }
@@ -466,6 +496,13 @@ function runDec(){
 }
 function showDecCard(){
   const c = S.dec.card, info = S.dec.info;
+  if(c.kind === "over"){
+    const o = c.o, v = {item: c.item.name, have: fmtU(o.have), n: fmtU(o.n), cap: fmtU(o.cap), add: fmtU(o.add)};
+    prompt_("stop", esc(t("putover_title", v)), `<span class="rx-pa-sub">${esc(t(o.basis === "shipped" ? "putover_body" : "putover_body_ord", v))}</span>`,
+      `<div class="rx-pa-btns">${btn("putover-yes", t("putover_yes", v))}${btn("putover-no", t("putover_no"))}${btn("dec-back", t("btn_back"), "", 'data-close="3"')}</div>`);
+    /* ⛔ no primary: Enter must not decide between "extra" and "remove" (review 2026-10-23 PM (4)) — a person taps one */
+    RX.sound("decide"); return;
+  }
   if(c.kind === "temp"){
     prompt_("stop", esc(t("temp_title")), `<strong>${esc(PA.tempText(c.item, info))}</strong>`,
       `<div class="rx-pa-btns">${btn("temp-no", t("temp_no"), "primary", "data-primary")}${btn("temp-yes", t("temp_yes"))}${btn("dec-back", t("btn_back"), "", 'data-close="3"')}</div>`);
@@ -476,6 +513,9 @@ function showDecCard(){
   setTimeout(() => { const b = document.querySelector("#promptArea [data-primary]"); if(b) b.focus(); }, 30);
   RX.sound("decide");
 }
+const fmtU = (x) => String(Math.round((+x || 0) * 100) / 100);
+RX.registerAct("putover-yes", () => { const dec = S.dec; if(!dec || !dec.card || dec.card.kind !== "over") return; const q = dec.queue[dec.idx]; q.flags.over = true; q.overConfirmed = true; dec.card = null; try{ clearPrompt(); }catch(_){} runDec(); });
+RX.registerAct("putover-no", () => { const dec = S.dec; if(!dec || !dec.card || dec.card.kind !== "over") return; const q = dec.queue[dec.idx]; q.skip = true; q.dup = true; dec.card = null; dec.idx++; try{ clearPrompt(); }catch(_){} runDec(); });
 /* ⭐ ROUND 3: Back on a tray decision card — NOTHING is moved: the placement is dropped, the tray and the staged list stay as they were */
 RX.registerAct("dec-back", () => { if(!S.dec) return; S.dec = null; S.placing = false; try{ clearPrompt(); }catch(_){} RX.toast(t("dec_back_toast")); RX.refresh(); });
 PA.decisionHook = function(name){
@@ -500,7 +540,7 @@ RX.registerAct("placed-undo", async () => {
       else toLate = true;
       continue;
     }
-    const res = await ST.claim(it.r, {State: "staged", Location: "", BinSource: null, PlacedBy: "", ReadyAt: ""}, "ready");
+    const res = await ST.claim(it.r, {State: "staged", Location: "", BinSource: null, PlacedBy: "", ReadyAt: "", OverConfirmed: !!it.prevOver}, "ready");
     if(res.ok) S.hidden.delete(it.r.iid); else toLate = true;
   }
   RX.flash(""); RX.toast(toLate ? t("cancel_too_late") : t("placed_undone")); RX.sound("decide");
@@ -593,6 +633,21 @@ RX.registerAct("staged-area", ({el}) => { S.area = el.getAttribute("data-area");
 RX.registerAct("staged-row", ({el}) => { const i = el.getAttribute("data-iid"); S.expanded = S.expanded === i ? null : i; S.confirm = null; ST.render(); });
 RX.registerAct("staged-cancel", ({el}) => { S.confirm = el.getAttribute("data-iid"); ST.render(); });
 RX.registerAct("staged-cancel-no", () => { S.confirm = null; ST.render(); });
+/* take a cart record off the list (cancel) and, once the cancel is CERTAIN, its best-by row (PM-3069 rules, shared by "Not put away"
+   and the over card's "same case counted twice"). -> a notice for the crew, '' when all is well, or null when nothing changed */
+ST.retire = async function(r){
+  const iid = r.iid, rec = RX.intents.byId(iid), PB = RX.problems || {};
+  const v = PB.vOf ? (PB.vOf(iid) || {iid, fields: r.fields || {}}) : null;
+  let certain = false, queued = false;
+  if(rec && !rec.sent && !rec.tried && !rec.inflight){ RX.intents.cancel(iid); S.hidden.add(iid); certain = true; }
+  else{ const res = await ST.claim(r, {State: "cancelled"}, "staged"); if(res.ok){ S.hidden.add(iid); certain = !res.queued; queued = !!res.queued; } else{ conflictToast(r, res); return null; } }
+  S.tray.items = S.tray.items.filter(x => x.iid !== iid); trayTouch();
+  if(v && certain && PB.dropBb){
+    const b = await PB.dropBb(v);
+    if(!b.ok){ if(PB.tellBbLeft) PB.tellBbLeft(v, b.why || "error"); return t("staged_cancel_bb_failed", {why: esc(b.why || "error")}); }
+  }else if(v && queued){ if(PB.tellBbLeft) PB.tellBbLeft(v, "no signal: the cancel was queued"); return t("staged_cancel_bb_queued"); }
+  return "";
+};
 RX.registerAct("staged-cancel-yes", async ({el}) => {
   const iid = el.getAttribute("data-iid"), r = byIid(iid); S.confirm = null; S.expanded = null; S.notice = null; if(!r){ ST.render(); return; }
   const rec = RX.intents.byId(iid), PB = RX.problems || {};
@@ -611,6 +666,69 @@ RX.registerAct("staged-cancel-yes", async ({el}) => {
   }else if(v && queued){ if(PB.tellBbLeft) PB.tellBbLeft(v, "no signal: the cancel was queued"); S.notice = t("staged_cancel_bb_queued"); }
   ST.render(); ST.refresh();
 });
+
+/* ───────────────────────── "already on a cart?" — the receive and sort screens (2026-10-23 PM) ─────────────────────────
+   Jack: "how do we get the tablets to always show the correct info needed?" — 10-22: 16 frozen cases already on carts were scanned again
+   from the receive screens and became SECOND cart records. Now, after the count, when live cart records of that item exist on the same
+   PO the crew is asked first. [Yes — this is it] records NOTHING (no best-by row, no intent): in Put away here the record goes into the
+   hand (tray) for the shelf tag; in Sort first it is already where it belongs. [No — another case] carries on (the over-shipment
+   confirm still asks if it goes past what KeHE shipped). ⛔ Never in Best-by only (that flow runs no steps). */
+const dayAt = (iso) => { const d = new Date(Date.parse(iso)); if(isNaN(d)) return ""; return d.toLocaleDateString(undefined, {weekday: "short"}) + " " + RX.hhmm(iso); };
+/* ⛔ review 2026-10-23 PM (1): only when this case would take the item PAST what KeHE shipped (else ordered) counting what is already
+   received, scanned and on carts (RX.po.overCap) — a normal second, third … case of a line is never asked. (7): cart records of the
+   SKU on ANY open PO (a re-scan can match a different PO once the first reads full). */
+function onCartFor(p, m){
+  if(!p || !p.prod) return [];
+  const o = (RX.po && RX.po.overCap) ? RX.po.overCap(p, +p.qty || 0) : null;
+  if(!(o && o.over)) return [];
+  p.rx = p.rx || {}; p.rx.oncartOver = o;
+  const pos = new Set(RX.po.pos().map(po => String(po.order_id)));
+  return oldestFirst(ST.records().filter(r => r.sku === p.prod.sku && pos.has(String(r.po)) && !inTray(r.iid) && !holdWaiting(r)
+                                           && (r.fields || {}).PageMode === "live"));
+}
+RX.registerStep("oncart", {
+  keepScan: false,
+  applies(ctx){
+    const p = ctx.p; if(p.rx && p.rx.oncartNo) return false;
+    const recs = onCartFor(p, ctx.po); (p.rx || (p.rx = {})).oncart = recs.map(r => r.iid);
+    return recs.length > 0;
+  },
+  start(ctx){
+    const p = ctx.p, recs = onCartFor(p, ctx.po); if(!recs.length){ ctx.done({}); return; }
+    const same = recs.filter(r => p.best && r.best === p.best), order = same.concat(recs.filter(r => same.indexOf(r) < 0)).slice(0, 4);
+    const rows = order.map(r => btn("oncart-pick", t("oncart_row", {units: fmtU(r.units), bb: r.best ? r.best : "no date", area: r.area || "a cart", when: dayAt(r.at), who: whoText(r)}),
+      "rx-st-lot", `data-iid="${esc(r.iid)}"`)).join("");
+    const o = (p.rx && p.rx.oncartOver) || {};
+    const sub = o.cap != null ? `<span class="rx-pa-sub">${esc(t(o.basis === "shipped" ? "oncart_sub" : "oncart_sub_ord", {n: fmtU(o.n), cap: fmtU(o.cap)}))}</span>` : "";
+    /* ⭐ "No — another case" is the primary (Enter): it records the case, so a wrong Enter can never lose a real case */
+    prompt_("stop", esc(t("oncart_title", {name: p.prod.name})), sub,
+      `<div>${rows}</div><div class="rx-pa-btns">${btn("oncart-no", t("oncart_no"), "primary", "data-primary")}${btn("oncart-back", t("btn_back"), "", 'data-close="3"')}</div>`);
+    setTimeout(() => { const b = document.querySelector("#promptArea [data-primary]"); if(b) b.focus(); }, 30);
+    RX.sound("decide");
+  },
+  onScan(){ return false; },
+});
+const onCartCtx = () => { const st = RX.state.step; return st && st.name === "oncart" ? st.ctx : null; };
+RX.registerAct("oncart-no", () => { const c = onCartCtx(); if(!c) return; (c.p.rx || (c.p.rx = {})).oncartNo = true; try{ clearPrompt(); }catch(_){} c.done({overConfirmed: true}); });   // the crew just said it is an extra case: the overship step does not ask again
+RX.registerAct("oncart-back", () => { if(onCartCtx()) RX.backToQty(); });
+RX.registerAct("oncart-pick", ({el}) => {
+  const c = onCartCtx(); if(!c) return;
+  const iid = el.getAttribute("data-iid"), r = ST.records().find(x => x.iid === iid), name = c.p.prod.name, flow = RX.flow();
+  if(!r){ RX.toast(t("conflict_gone", {name})); return; }
+  /* ⛔ nothing is recorded: the open scan is dropped exactly as Close drops it (no best-by row, no intent) */
+  try{ if(typeof abandonPending === "function") abandonPending(); else RX.abandon(); }catch(_){}
+  try{ clearPrompt(); }catch(_){}
+  if(flow === "sort"){ RX.toast(t("oncart_sort", {name})); RX.sound("staged"); RX.refresh(); return; }
+  /* review 2026-10-23 PM (2): the staged screen only until this record is on a shelf (or the hand is cleared) — then back to the
+     screen the crew was on, so the next new case is received, not matched against the cart list */
+  if(RX.flow() !== "staged"){ S.returnFlow = flow; RX.setFlow("staged"); }
+  addToTray(r); S.notice = t("oncart_intray", {name}); ST.render();
+});
+function maybeReturn(){
+  if(!S.returnFlow || S.tray.items.length || S.dec) return;
+  const f = S.returnFlow; S.returnFlow = null;
+  if(RX.flow() === "staged") RX.setFlow(f);
+}
 
 /* ───────────────────────── the tray STEP: a case that was NOT on the list is received now, staged, and lands in the tray ───────────────────────── */
 RX.registerStep("tray", {
