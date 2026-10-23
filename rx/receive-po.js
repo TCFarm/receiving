@@ -6,8 +6,8 @@
      (order_id as the tie-break); when every PO that carries the SKU is full, the oldest is used and the case reads
      "over" (never refused, never blocking); a SKU on no pack PO is "not on a PO" (Julia decides). The crew never
      sees a PO number except in the strip, the start card and the drawers.
-   • COUNTERS = the pack's `received_units` (what Finale held when the pack was built) + today's intents (this tablet
-     AND the list read, de-duplicated by IntentId) + this tablet's best-by-only rows that have no intent.
+   • COUNTERS = the pack's `received_units` (what Finale held when the pack was built) + the open PO's intents (this tablet
+     AND the list read — today's AND every earlier day's for that PO since 2026-10-22, de-duplicated by IntentId) + this tablet's best-by-only rows that have no intent.
      ⛔ An intent the poster posted at/before `pack.built` is already inside the pack figure — it is skipped, or it
      would be counted twice. Cancelled and `fix` rows never count.
    • ⛔ Counts are ADVISORY. The poster re-derives everything from live Finale; the page never decides what posts.
@@ -27,6 +27,8 @@ const PKMAP = {g:"learned_gtin", learned_gtin:"learned_gtin", l:"learned_upc", l
 const pageRows = () => { try{ return rows; }catch(_){ return []; } };
 const pageAudit = () => { try{ return isAudit(); }catch(_){ return false; } };
 const num = (x) => (typeof x === "number" && isFinite(x)) ? x : (+x || 0);
+/* today's intents ∪ every intent of the open pack POs (any day, any tablet — 2026-10-22); falls back to today's on an old intents.js */
+const allIntents = () => (RX.intents.allPo ? RX.intents.allPo() : RX.intents.allToday());
 
 PO.pos = function(){
   const d = RX.pack.data; if(!d) return [];
@@ -37,10 +39,14 @@ const builtMs = () => { const d = RX.pack.data; const m = d && d.built ? Date.pa
 
 PO.scannedUnits = function(poId, sku){
   const built = builtMs(); let u = 0; const seen = new Set(); const shelves = [];
-  for(const v of RX.intents.allToday()){
+  for(const v of allIntents()){
     const f = v.fields || {};
     if(f.Kind === "fix" || f.State === "cancelled" || f.Sku !== sku || String(f.Po || "") !== String(poId)) continue;
     if(v.fin && v.fin.FinState === "posted"){ const at = Date.parse(v.fin.FinAt); if(!isNaN(at) && at <= built) continue; }
+    /* ⛔ review 2026-10-22 (5): a scan the poster will never post — practice, or a hold/refusal that tells the crew to receive it in the
+       Finale app — is not scanned-and-coming: once the crew does that, the pack's received_units carries it and it would count twice
+       (now that every day's scans of the PO are read). It is still listed as a problem. */
+    if(v.fin && (v.fin.FinState === "shadow" || ((v.fin.FinState === "held" || v.fin.FinState === "refused") && /finale app/i.test(String(v.fin.FinReason || ""))))) continue;
     u += num(f.Units); seen.add(v.iid); if(f.Location) shelves.push(f.Location);
   }
   for(const r of pageRows()){
@@ -49,6 +55,20 @@ PO.scannedUnits = function(poId, sku){
     if(r.units > 0) u += r.units;
   }
   return {units:u, shelves:[...new Set(shelves)]};
+};
+/* ⭐ 2026-10-22: units Finale ALREADY HAS for (PO, SKU) — the pack's received_units + intents POSTED after the pack was built. Never a
+   staged / held / waiting scan. rx/problems.js uses it to see that a case still "on a cart" was received AGAIN by a later scan. */
+PO.confirmed = function(poId, sku){
+  const po = RX.pack.poById(poId), line = po && PO.line(po, sku); if(!line) return null;
+  const built = builtMs(); let u = num(line.received_units);
+  for(const v of allIntents()){
+    const f = v.fields || {};
+    if(f.Kind === "fix" || f.State === "cancelled" || f.Sku !== sku || String(f.Po || "") !== String(poId)) continue;
+    if(!(v.fin && v.fin.FinState === "posted")) continue;
+    const at = Date.parse(v.fin.FinAt); if(!isNaN(at) && at <= built) continue;
+    u += num(v.fin.FinUnitsPosted != null ? v.fin.FinUnitsPosted : f.Units);
+  }
+  return {units:u, ordered:num(line.ordered_units != null ? line.ordered_units : line.qty)};
 };
 PO.counts = function(po, line){
   const ordered = num(line.ordered_units != null ? line.ordered_units : line.qty);
@@ -105,23 +125,31 @@ PO.dueText = function(po){
 PO.lineStatus = function(po, line){
   const c = PO.counts(po, line), upc = upcOf(line);
   const state = c.total <= 0 ? "notstarted" : (c.total < c.ordered ? "partial" : (c.total === c.ordered ? "done" : "over"));
-  let problems = 0; const scans = [];
-  for(const v of RX.intents.allToday()){
+  /* ⭐ 2026-10-22: problems come from ONE map (rx/problems.js): `problems` = scans that need the CREW (staged, held, refused…),
+     `buyer` = scans only the buyer can clear. A cancelled scan is listed (struck through) but is never a problem. */
+  let problems = 0, buyer = 0, staged = 0; const scans = [];
+  for(const v of allIntents()){
     const f = v.fields || {};
     if(f.Kind === "fix" || f.Sku !== line.sku || String(f.Po || "") !== String(po.order_id)) continue;
     const fs = v.fin && v.fin.FinState;
-    if(fs === "held" || fs === "refused" || +f.DamagedUnits > 0 || (RX.intents.byId(v.iid) && RX.intents.byId(v.iid).denied)) problems++;
-    scans.push({iid:v.iid, units:num(f.Units), bin:f.Location || "", at:f.ScanAt || "", op:f.Operator || "", bb:f.BestBy || "", fin:fs || "", state:f.State || ""});
+    const pb = RX.problems ? RX.problems.of(v) : null;
+    if(pb && pb.owner === "crew"){ problems++; if(pb.kind === "staged") staged++; }
+    else if(pb && pb.owner === "buyer") buyer++;
+    scans.push({iid:v.iid, v, pb, units:num(f.Units), bin:f.Location || "", at:f.ScanAt || "", op:f.Operator || "", bb:f.BestBy || "", fin:fs || "", state:f.State || ""});
   }
+  scans.sort((a, b) => String(a.at).localeCompare(String(b.at)));
   const cases = upc > 0;
-  return Object.assign({state, problems, scans, unit:cases ? "cases" : "units",
+  return Object.assign({state, problems, buyer, staged, scans, unit:cases ? "cases" : "units",
     k:fmt(cases ? c.total / upc : c.total), n:fmt(cases ? c.ordered / upc : c.ordered)}, c);
 };
 PO.summary = function(){
   return PO.pos().map(po => {
     const ls = (po.lines || []).map(l => PO.lineStatus(po, l));
-    const done = ls.filter(x => x.state === "done" || x.state === "over").length;
-    return {po, lines:ls.length, done, left:ls.length - done, due:PO.dueText(po), statuses:ls};
+    /* ⛔ 2026-10-22: a line is DONE only when nothing on it still needs the crew — a case on a cart or a held scan is counted as
+       scanned but is not in Finale, and "95%" with nothing to act on is what the crew could not read */
+    const done = ls.filter(x => (x.state === "done" || x.state === "over") && !x.problems).length;
+    const crew = ls.reduce((a, x) => a + x.problems, 0), staged = ls.reduce((a, x) => a + x.staged, 0), buyer = ls.reduce((a, x) => a + x.buyer, 0);
+    return {po, lines:ls.length, done, left:ls.length - done, due:PO.dueText(po), statuses:ls, crew, staged, buyer};
   });
 };
 
