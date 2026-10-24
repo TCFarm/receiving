@@ -52,7 +52,11 @@ PO.scannedUnits = function(poId, sku){
     /* ⛔ review 2026-10-22 (5): a scan the poster will never post — practice, or a hold/refusal that tells the crew to receive it in the
        Finale app — is not scanned-and-coming: once the crew does that, the pack's received_units carries it and it would count twice
        (now that every day's scans of the PO are read). It is still listed as a problem. */
-    if(v.fin && (v.fin.FinState === "shadow" || ((v.fin.FinState === "held" || v.fin.FinState === "refused") && /finale app/i.test(String(v.fin.FinReason || ""))))) continue;
+    /* ⭐ PM-3117 (2026-10-24): a scan whose Finale shipment was cancelled is `reversed` by the poster — not in Finale and not coming; a
+       STALE hold is skipped by its CODE (the poster's new STALE wording no longer says "Finale app"); the old wording still skips */
+    if(v.fin && (v.fin.FinState === "shadow" || v.fin.FinState === "reversed"
+       || (v.fin.FinState === "held" && /^STALE:/.test(String(v.fin.FinReason || "")))
+       || ((v.fin.FinState === "held" || v.fin.FinState === "refused") && /finale app/i.test(String(v.fin.FinReason || ""))))) continue;
     u += num(f.Units); seen.add(v.iid); if(f.Location) shelves.push(f.Location);
   }
   for(const r of pageRows()){
