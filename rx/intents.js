@@ -181,7 +181,7 @@ const finOf = (f) => { const o = {}; let any = false; for(const k of FIN_FIELDS)
 const isFinal = (rec) => {
   if(rec.cancelled) return true;
   const fs = (rec.fin && rec.fin.FinState) || "";
-  if(fs === "posted" || fs === "refused" || fs === "shadow") return true;
+  if(fs === "posted" || fs === "refused" || fs === "shadow" || fs === "reversed") return true;
   if(rec.fields.State === "skipped" || rec.fields.State === "cancelled") return true;
   if(rec.fields.Kind === "fix" || rec.fields.Kind === "short") return true;
   if(rec.fields.PageMode === "shadow" && rec.sent && rec.fields.State !== "staged") return true;    // shadow ends at "Saved"
@@ -850,7 +850,7 @@ const heldShort = (fin) => {
   const sentence = reason.indexOf(":") >= 0 ? reason.slice(reason.indexOf(":")+1).trim() : "";
   const map = { OVER_ORDERED: () => ((+fin.FinUnitsHeld || 0) ? (+fin.FinUnitsHeld)+" extra" : "extra"),
     NOT_ON_PO: () => "not on a PO", FINALE_APP_OVERLAP: () => "Finale app got it too", EXPIRED: () => "expired",
-    DAMAGED: () => "damaged", STALE: () => "too old — receive in Finale app", TEMP_UNCONFIRMED: () => "temperature not confirmed",
+    DAMAGED: () => "damaged", STALE: () => "too old — the buyer can post it", TEMP_UNCONFIRMED: () => "temperature not confirmed",
     LOT_FORM_UNPROVEN: () => "lot not proven yet" };
   if(map[code]) return map[code]();
   return (sentence || code.toLowerCase().replace(/_/g, " ") || "see the buyer").slice(0, 40);
@@ -875,6 +875,9 @@ function chipOf(rec){
   const fs = fin.FinState || "";
   if(f.PageMode === "shadow" || f.State === "skipped" || fs === "shadow") return mk(t("chip_practice"), "dash", 20);
   if(fs === "posted") return mk(t("chip_infinale"), "green", 10);
+  /* ⭐ PM-3117 (2026-10-24): the poster marks a scan whose Finale shipment was cancelled `reversed` — it is NOT in Finale and nothing is
+     coming; final (never the waiting clock, never "Receive in Finale app") */
+  if(fs === "reversed") return mk(t("chip_reversed"), "strike", 5, String(fin.FinReason || ""));
   if(fs === "held") return mk(t("chip_held")+" · "+heldShort(fin), "violet", 60, String(fin.FinReason || ""));
   if(fs === "refused") return mk(t("chip_refused")+" · "+refusedShort(fin), "red", 90, String(fin.FinReason || ""));
   if(fs === "posting" || fs === "uncertain") return mk(t("chip_checking"), "amber", 50, String(fin.FinReason || ""));
