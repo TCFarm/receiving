@@ -29,6 +29,9 @@ const pageAudit = () => { try{ return isAudit(); }catch(_){ return false; } };
 const num = (x) => (typeof x === "number" && isFinite(x)) ? x : (+x || 0);
 /* today's intents ∪ every intent of the open pack POs (any day, any tablet — 2026-10-22); falls back to today's on an old intents.js */
 const allIntents = () => (RX.intents.allPo ? RX.intents.allPo() : RX.intents.allToday());
+/* ⭐ PM-3111 review (3), 2026-10-23: the PO a POSTED intent's units are really on is the poster's `FinPo` (it re-derives the PO from Finale,
+   oldest open PO first); the intent's own `Po` is only the tablet's guess. With one open PO they are the same. */
+const poOfV = (v) => String(((v.fin && v.fin.FinState === "posted" && v.fin.FinPo) || (v.fields || {}).Po || ""));
 
 PO.pos = function(){
   const d = RX.pack.data; if(!d) return [];
@@ -43,7 +46,7 @@ PO.scannedUnits = function(poId, sku){
   const dups = (RX.problems && RX.problems.dupIids) ? RX.problems.dupIids() : new Set();
   for(const v of allIntents()){
     const f = v.fields || {};
-    if(f.Kind === "fix" || f.State === "cancelled" || f.Sku !== sku || String(f.Po || "") !== String(poId)) continue;
+    if(f.Kind === "fix" || f.State === "cancelled" || f.Sku !== sku || poOfV(v) !== String(poId)) continue;
     if(dups.has(v.iid)) continue;
     if(v.fin && v.fin.FinState === "posted"){ const at = Date.parse(v.fin.FinAt); if(!isNaN(at) && at <= built) continue; }
     /* ⛔ review 2026-10-22 (5): a scan the poster will never post — practice, or a hold/refusal that tells the crew to receive it in the
@@ -66,7 +69,7 @@ PO.confirmed = function(poId, sku){
   const built = builtMs(); let u = num(line.received_units);
   for(const v of allIntents()){
     const f = v.fields || {};
-    if(f.Kind === "fix" || f.State === "cancelled" || f.Sku !== sku || String(f.Po || "") !== String(poId)) continue;
+    if(f.Kind === "fix" || f.State === "cancelled" || f.Sku !== sku || poOfV(v) !== String(poId)) continue;
     if(!(v.fin && v.fin.FinState === "posted")) continue;
     const at = Date.parse(v.fin.FinAt); if(!isNaN(at) && at <= built) continue;
     u += num(v.fin.FinUnitsPosted != null ? v.fin.FinUnitsPosted : f.Units);
