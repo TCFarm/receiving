@@ -439,7 +439,7 @@ function partners(v){
   let rowIds = []; try{ const r = rows.find(r => r.rx && ((r.rx.iids || []).indexOf(v.iid) >= 0 || r.rx.iid === v.iid)); if(r) rowIds = (r.rx.iids && r.rx.iids.length) ? r.rx.iids : [r.rx.iid]; }catch(_){}
   for(const x of (I.allPo ? I.allPo() : I.allToday())){
     if(x.iid === v.iid) continue; const f = x.fields || {};
-    if(f.Kind === "fix" || f.State === "cancelled") continue;
+    if(f.Kind === "fix" || f.State === "cancelled" || (x.fin || {}).FinState === "reversed") continue;   // PM-3117: a reversed part is not stock
     const rec = I.byId(x.iid); if(rec && rec.cancelled) continue;
     if((id && String(f.BbItemId || "") === id) || rootOf(x) === root || x.iid === root || rowIds.indexOf(x.iid) >= 0
        || restLink(x) === v.iid || restLink(v) === x.iid) out.push(x);
@@ -450,7 +450,7 @@ function partners(v){
 function bbShared(v){ if(!String((v.fields || {}).BbItemId || "")) return false; if(I.state && (I.state.poErr || !I.state.poLoaded)) return true; return partners(v).length > 0; }
 /* FinState values from which a scan can still be withdrawn: not acted on, or stopped by the poster. posting / uncertain / posted are
    (or may be) in Finale already — those get a fix row, never a cancel (review 2026-10-22 (1)) */
-const WITHDRAWABLE = new Set(["", "held", "refused"]);
+const WITHDRAWABLE = new Set(["", "held", "refused", "reversed"]);   // PM-3117: a reversed scan is out of Finale already — remove it, never "take N off"
 const IN_FINALE = new Set(["posted", "posting", "uncertain"]);
 async function bb(v, op){
   const f = v.fields || {}; const id = String(f.BbItemId || "");
@@ -559,7 +559,7 @@ function partsIn(m, v){
   let rowIds = []; try{ const r = rows.find(r => r.rx && ((r.rx.iids || []).indexOf(v.iid) >= 0 || r.rx.iid === v.iid)); if(r) rowIds = (r.rx.iids && r.rx.iids.length) ? r.rx.iids : [r.rx.iid]; }catch(_){}
   for(const x of m.values()){
     if(x.iid === v.iid) continue; const f = x.fields || {};
-    if(f.Kind === "fix" || f.Kind === "short" || f.State === "cancelled") continue;
+    if(f.Kind === "fix" || f.Kind === "short" || f.State === "cancelled" || (x.fin || {}).FinState === "reversed") continue;
     if((id && String(f.BbItemId || "") === id) || rootOf(x) === root || x.iid === root || rowIds.indexOf(x.iid) >= 0
        || restLink(x) === v.iid || restLink(v) === x.iid) out.push(x);
   }
