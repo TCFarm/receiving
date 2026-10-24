@@ -127,6 +127,8 @@ const COPY_ADD = {
   /* PM-3109: "Scanned twice" on a scan whose rest was received later through Fix */
   fix_twice_rest: "This case also has {more} received later through Fix ({when}{fin}). Remove that one first — Fix on the {more}-unit scan → Scanned twice — then this one if it is still wrong. Nothing was changed.",
   fix_twice_rest_fin:" — already in Finale",
+  fix_lower_sending:"The count {n} is going to the buyer (the note is still sending). The best-by list was not changed yet — tell the buyer.",
+  fix_rm_finale_sending:"The buyer will take {n} off in Finale (the note is still sending). The best-by list was not changed yet — tell the buyer.",
   fix_rm_finale_noread:"The buyer will take {n} off in Finale. The best-by list was not changed (the rest of this case could not be read) — tell the buyer.",
   /* PM-3110: a LOWER count on a scan in Finale asks first, with units AND cases */
   fix_lower_h:    "Take {d} off in Finale?",
@@ -459,7 +461,7 @@ async function bb(v, op){
 }
 function tellBuyer(v, note, units){
   const f = v.fields || {};
-  I.create({Kind:"fix", Sku:f.Sku || "", Upc:f.Upc || "", Po:f.Po || "", SplitOf:v.iid,
+  return I.create({Kind:"fix", Sku:f.Sku || "", Upc:f.Upc || "", Po:f.Po || "", SplitOf:v.iid,
             FixUnits: units != null ? units : null, FixBin: f.Location || "", FixNote: String(note || "").slice(0, 250), Units:0}, {});
 }
 /* the fresh intent that replaces a held one: same case, same units/bin/best-by/BB row; the crew's yes rides on it */
@@ -542,33 +544,124 @@ RX.registerAct("pb-temp-yes", ({el}) => { const iid = el.dataset.iid; return run
    raised total (BB 12 while Finale had 6). Decided BEFORE the write, from the other live parts of the case (a part already flagged
    "scanned twice" to the buyer is not counted): none ⇒ the row is deleted (as before); some ⇒ the row is set to their units;
    ⛔ the PO-wide read down ⇒ the row is left alone and the crew is told (an unseen part must not lose its date or its count). */
-const flaggedTwice = (x) => fixRowsFor(x.iid).some(r => !(+r.FixUnits > 0) && /scanned twice/i.test(String(r.FixNote || "")));
-function bbPlan(v){
+/* ⭐ The case's parts, counted from a given view: `m` = a FRESH map read from the list at write time (PM-3169), or null = this page's
+   usual view (allPo). A part's units are its shelf Units, or — when the crew has an OPEN count note on it ("the count is n", e.g. a
+   lower count confirmed on the card) — that n (review 2026-10-23 PM (4): a lowered part must not be summed back at its old Units). */
+const viewOf = (m) => m ? [...m.values()] : (I.allPo ? I.allPo() : I.allToday());
+const notesOf = (m, iid) => viewOf(m).filter(x => ((x.fields || {}).Kind) === "fix" && (x.fields || {}).SplitOf === iid && (x.fields || {}).State !== "cancelled")
+  .map(x => x.fields || {}).sort((p, q) => String(p.ScanAt || "").localeCompare(String(q.ScanAt || "")));
+const flaggedIn = (m, x) => notesOf(m, x.iid).some(r => !(+r.FixUnits > 0) && /scanned twice/i.test(String(r.FixNote || "")));
+const flaggedTwice = (x) => flaggedIn(null, x);
+const countOf = (m, x) => { const ns = notesOf(m, x.iid).filter(r => +r.FixUnits > 0); return ns.length ? +ns[ns.length - 1].FixUnits : (+((x.fields || {}).Units) || 0); };
+function partsIn(m, v){
+  if(!m) return partners(v);
+  const id = String((v.fields || {}).BbItemId || ""), root = rootOf(v), out = [];
+  let rowIds = []; try{ const r = rows.find(r => r.rx && ((r.rx.iids || []).indexOf(v.iid) >= 0 || r.rx.iid === v.iid)); if(r) rowIds = (r.rx.iids && r.rx.iids.length) ? r.rx.iids : [r.rx.iid]; }catch(_){}
+  for(const x of m.values()){
+    if(x.iid === v.iid) continue; const f = x.fields || {};
+    if(f.Kind === "fix" || f.Kind === "short" || f.State === "cancelled") continue;
+    if((id && String(f.BbItemId || "") === id) || rootOf(x) === root || x.iid === root || rowIds.indexOf(x.iid) >= 0
+       || restLink(x) === v.iid || restLink(v) === x.iid) out.push(x);
+  }
+  return out;
+}
+function bbPlan(v, m){
   if(!String((v.fields || {}).BbItemId || "")) return {op:"none"};
   if(!poRead()) return {op:"keep"};
-  const rest = partners(v).filter(x => (((x.fields || {}).Kind) || "intent") === "intent" && !flaggedTwice(x));
+  const rest = partsIn(m, v).filter(x => (((x.fields || {}).Kind) || "intent") === "intent" && !flaggedIn(m, x));
   if(!rest.length) return {op:"del"};
-  const n = rest.reduce((s0, x) => s0 + (+((x.fields || {}).Units) || 0), 0);      // the shelf's units (a partly-posted part is still all there)
+  const n = rest.reduce((s0, x) => s0 + countOf(m, x), 0);                 // the shelf's units (a partly-posted part is still all there)
   return n > 0 ? {op:"units", n} : {op:"keep"};
 }
-async function bbApply(v, plan){
-  if(plan.op === "none") return {ok:true};
-  if(plan.op === "keep") return {ok:true, kept:true};
-  const b = await bb(v, plan.op === "del" ? {del:true} : {units:plan.n});
-  return b.ok ? {ok:true, lowered: plan.op === "units" ? plan.n : null} : {ok:false, why:b.why};
+/* ⭐ PM-3169 (2026-10-23): two tablets taking two parts off ONE case at the same moment each computed the row from what THEY saw, so the
+   later write could carry a total that still counted the other's part. Every best-by write for a case is now:
+     1. read the row's etag;  2. re-read the open POs' intents from the LIST into a FRESH map (this tablet's own records overlay it only
+        where they are not on the list yet or still have a change queued); 3. compute from that map;  4. PATCH / DELETE the row with
+        If-Match = that etag — the row changed since step 1 ⇒ 412 ⇒ start again (at most 3 rounds, then the crew is told).
+   The etag is read BEFORE the list, and each tablet's own removal is on the list before it reads the etag (an intent cancel lands
+   first; a buyer note is waited for), so a total computed from a stale list can never land on top of a newer one.
+   The old unconditional path (`bb`, which keeps a failed correction on this tablet's row and retries it) is used for a row this tablet
+   holds a correction for, a row already drained (404), a page whose list mapping is not ready, and — on a row this tablet scanned — any
+   failure other than "it changed" (review (6): the correction must not be lost). -> {ok, kept?, lowered?, why?} */
+async function freshMap(){
+  const pos = ((RX.pack.data && RX.pack.data.pos) || []).map(p => String(p.order_id || "")).filter(x => /^[\w-]{1,40}$/.test(x));
+  const m = new Map();
+  for(const po of pos){
+    const items = await I.query(`fields/Po eq '${po}'`);
+    for(const it of items){ if(it.iid) m.set(it.iid, {iid:it.iid, itemId:it.id, etag:it.etag, fields:it.fields, fin:it.fin}); }
+  }
+  /* this tablet's records: one not on the list yet (unsent) counts as it stands here; one with a change still queued (a cancel, an edit)
+     carries that change (review (2): the outbox copy must never HIDE another tablet's cancel, so a sent record with nothing queued
+     takes the LIST's word) */
+  try{ const st = I._store(); for(const k of Object.keys(st.recs || {})){ const r = st.recs[k]; if(!r || !r.fields || r.denied) continue;
+    const onList = m.get(r.iid);
+    if(!onList){ if(!r.sent) m.set(r.iid, {iid:r.iid, fields:Object.assign({}, r.fields, r.cancelled ? {State:"cancelled"} : {}), fin:r.fin || {}}); continue; }
+    if((r.patches || []).length || r.cancelled) onList.fields = Object.assign({}, onList.fields, r.fields, r.cancelled ? {State:"cancelled"} : {});
+  } }catch(_){}
+  /* the page's own view is brought up to date in ONE step (review (7): never interleaved with a poll's swap) */
+  try{ for(const [iid, x] of m){ if(x.itemId) RX.state.poAll.set(iid, {itemId:x.itemId, etag:x.etag, fields:x.fields, fin:x.fin}); } }catch(_){}
+  return m;
+}
+async function bbApply(v, planFn){
+  const id = String((v.fields || {}).BbItemId || ""); if(!id) return {ok:true};
+  let row = null, sid = null, lid = null, fld = null;
+  try{ row = rows.find(r => String(r.id) === id && !r.deleted) || null; }catch(_){}
+  try{ sid = siteId; lid = listId; fld = FIELD.units; }catch(_){}
+  const heldHere = () => !!(row && row.fix && Object.keys(row.fix).length);
+  const legacy = async (plan) => {
+    if(!plan){ let m = null; try{ m = await freshMap(); }catch(_){} plan = planFn(m); }
+    if(plan.op === "none") return {ok:true}; if(plan.op === "keep") return {ok:true, kept:true};
+    const b = await bb(v, plan.op === "del" ? {del:true} : {units:plan.n});
+    return b.ok ? {ok:true, lowered: plan.op === "units" ? plan.n : null} : {ok:false, why:b.why};
+  };
+  if(!/^\d+$/.test(id) || typeof graph !== "function" || !sid || !lid || !fld || heldHere()) return legacy();
+  const path = `/sites/${sid}/lists/${lid}/items/${id}`;
+  for(let round = 0; round < 3; round++){
+    if(heldHere()) return legacy();                                           // review (9): the crew edited the cell meanwhile
+    let cur = null;
+    try{ cur = await graph(path); }catch(e){ if(e && e.status === 404) return legacy(); return row ? legacy() : {ok:false, why: e && e.auth ? "sign in again" : "no signal"}; }
+    const etag = cur && (cur["@odata.etag"] || cur.eTag); if(!etag) return row ? legacy() : {ok:false, why:"no signal"};
+    let m = null; try{ m = await freshMap(); }catch(e){ return {ok:false, why:"no signal"}; }
+    const plan = planFn(m);
+    if(plan.op === "none") return {ok:true};
+    if(plan.op === "keep") return {ok:true, kept:true};
+    try{
+      if(plan.op === "del") await graph(path, {method:"DELETE", headers:{"If-Match":etag}});
+      else await graph(path + "/fields", {method:"PATCH", headers:{"If-Match":etag}, body:JSON.stringify({[fld]:plan.n})});
+    }catch(e){
+      if(e && e.status === 412) continue;                                   // another tablet wrote the row: read it all again
+      if(e && e.status === 404) return legacy(plan);
+      return row ? legacy(plan) : {ok:false, why: e && e.auth ? "sign in again" : "no signal"};
+    }
+    if(row){                                                                // review (5): the screen follows, as deleteRow does
+      try{
+        if(plan.op === "del"){ row.deleted = true; const i = rows.indexOf(row); if(i >= 0) rows.splice(i, 1); queue = rows.filter(r => r.saved !== "saved").length; }
+        else row.units = plan.n;
+        persistPending(); try{ renderPending(); }catch(_){} render();
+      }catch(_){}
+    }
+    return {ok:true, lowered: plan.op === "units" ? plan.n : null};
+  }
+  return {ok:false, why:"it kept changing on another tablet — look again"};
+}
+/* review (3): a buyer note must be ON THE LIST before this tablet reads the row's etag — else another tablet's fresh read cannot see this
+   removal and could write a total that still counts the part. -> true once sent */
+async function noteSent(rec){
+  if(!rec) return false; if(rec.sent) return true;
+  try{ await I.flush(); }catch(_){}
+  const r = I.byId(rec.iid); return !!(r && r.sent);
 }
 const rmMsg = (b) => !b.ok ? t("pb_bb_failed", {why:b.why}) : (b.kept ? t("pb_done_rm_noread") : (b.lowered != null ? t("pb_done_rm_lower", {n:fmtN(b.lowered)}) : t("pb_done_rm")));
 async function removeScan(v, expectFin){
   if(!WITHDRAWABLE.has(String(expectFin || ""))) return {ok:false, msg:t("pb_changed")};
-  const plan = bbPlan(v);
   const r = await patchIntent(v, {State:"cancelled"}, expectFin);
   if(!r.ok) return {ok:false, msg:whyText(r.why)};
-  return {ok:true, msg:rmMsg(await bbApply(v, plan))};
+  return {ok:true, msg:rmMsg(await bbApply(v, (m) => bbPlan(v, m)))};          // PM-3169: computed from the list at write time
 }
 RX.registerAct("pb-remove", ({el}) => { const iid = el.dataset.iid; return run(iid, async () => {
   const v = findV(iid); const p = P.of(v); if(!p || !p.act){ say(iid, t("pb_changed")); return; }
   const rec = I.byId(iid);
-  if(p.kind === "denied" && rec && !rec.sent){ const plan = bbPlan(v); I.cancel(iid); say(iid, rmMsg(await bbApply(v, plan))); return; }
+  if(p.kind === "denied" && rec && !rec.sent){ I.cancel(iid); say(iid, rmMsg(await bbApply(v, (m) => bbPlan(v, m)))); return; }
   const out = await removeScan(v, (v.fin || {}).FinState || "");
   say(iid, out.msg);
 }); });
@@ -720,13 +813,16 @@ RX.registerAct("fix-lower", ({el}) => { const iid = el.dataset.iid;
       P.state.lowerAsk = null; P.state.fixErr = t("pb_changed"); return; }
     P.state.lowerAsk = null; P.state.fixing = null; P.state.fixErr = "";
     if(fixRowsFor(iid).some(x => +x.FixUnits === a.n)){ say(iid, t("fix_already_sent", {n:String(a.n)})); return; }
-    tellBuyer(v, `crew: the count is ${a.n}, not ${a.old} — correct Finale by ${a.n - a.old}`, a.n);
+    const note = tellBuyer(v, `crew: the count is ${a.n}, not ${a.old} — correct Finale by ${a.n - a.old}`, a.n);
     const f = v.fields || {};
     if(String(f.BbItemId || "")){
-      if(!poRead()){ say(iid, t("fix_lower_done_noBb", {n:fmtN(a.n)})); return; }
-      const shelf = +f.Units || 0, parts = partners(v).filter(x => (((x.fields || {}).Kind) || "intent") === "intent" && !flaggedTwice(x));
-      const caseUnits = shelf + parts.reduce((s0, x) => s0 + (+((x.fields || {}).Units) || 0), 0);
-      const b = await bb(v, {units: caseUnits - shelf + a.n});
+      if(!(await noteSent(note))){ say(iid, t("fix_lower_sending", {n:fmtN(a.n)})); return; }
+      const b = await bbApply(v, (m) => {                   // PM-3169: the case total from the list at write time
+        if(!poRead()) return {op:"keep"};
+        const parts = partsIn(m, v).filter(x => (((x.fields || {}).Kind) || "intent") === "intent" && !flaggedIn(m, x));
+        return {op:"units", n: parts.reduce((s0, x) => s0 + countOf(m, x), 0) + a.n};
+      });
+      if(b.kept){ say(iid, t("fix_lower_done_noBb", {n:fmtN(a.n)})); return; }
       if(!b.ok){ say(iid, t("fix_lower_bbfail", {n:fmtN(a.n)}) + " " + t("pb_bb_failed", {why:b.why})); return; }
     }
     say(iid, t("fix_lower_done", {n:fmtN(a.n)}));
@@ -860,9 +956,9 @@ RX.registerAct("fix-twice", ({el}) => { const iid = el.dataset.iid;
     const f = v.fields || {}, fs = (v.fin || {}).FinState || "";
     const no = restRefusal(v); if(no){ P.state.fixErr = no; return; }
     if(!WITHDRAWABLE.has(fs)){                               // in Finale, or on its way there: never cancelled from the tablet
-      const plan = bbPlan(v);                                // PM-3108: decided before the note (the note marks this scan "scanned twice")
-      tellBuyer(v, `crew: scanned twice — take ${+f.Units || 0} off in Finale`, 0);
-      const b = await bbApply(v, plan);
+      const note = tellBuyer(v, `crew: scanned twice — take ${+f.Units || 0} off in Finale`, 0);
+      if(String(f.BbItemId || "") && !(await noteSent(note))){ P.state.fixing = null; P.state.fixErr = ""; say(iid, t("fix_rm_finale_sending", {n: +f.Units || 0})); return; }
+      const b = await bbApply(v, (m) => bbPlan(v, m));          // PM-3108/3169: the case's other parts, read from the list at write time
       if(!b.ok){ P.state.fixErr = t("pb_bb_failed", {why:b.why}); return; }
       P.state.fixing = null; P.state.fixErr = "";
       say(iid, b.kept ? t("fix_rm_finale_noread", {n: +f.Units || 0}) : (b.lowered != null ? t("fix_rm_finale_lower", {n:fmtN(b.lowered), d:fmtN(+f.Units || 0)}) : t("fix_rm_finale", {n: +f.Units || 0}))); return;
