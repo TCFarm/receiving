@@ -62,10 +62,42 @@ const COPY_ADD = {
   sh_fin_go:      "Open it",
   sh_fin_none:    "Every line on PO {po} is scanned or recorded short.",
   po_f_short:     "Short",
+  sh_closed:      "PO closed out by {who} ({when}) with this line short — the short is final here. To change it, tell the buyer.",
+  sh_closed_no:   "Not changed — this PO was closed out by {who} ({when}). Tell the buyer.",
+  sh_co_unknown_new:"Close-out status could not be read just now. Record it only if you are sure this PO has not been closed out yet.",
+  sh_co_unknown:  "Close-out status could not be read just now, so shorts on this PO cannot be changed from the tablet. Try again later or tell the buyer.",
 };
 for(const k of Object.keys(COPY_ADD)) if(!(k in RX.COPY)) RX.COPY[k] = COPY_ADD[k];
 
 S.state = { asking:null, err:"", msg:{}, busy:new Set() };
+
+/* ⭐ PM-3126 (2026-10-24): a crew short on a PO that has been CLOSED OUT is evidence the close-out used (who said it never arrived, and
+   when) — Undo or a re-record would erase it silently (a re-recorded short gets a NEW id). The pack publishes, per PO, `closed_out` =
+   {by, at, edit_id, skus, crew_intent_ids} or null, and `sources.closeouts.error` when the close-out log could not be read.
+     closed  — `closed_out` set:  a line whose SKU is in `skus`, or whose short record id is in `crew_intent_ids`, is LOCKED: no record,
+               no Undo, no fix-up; the line says who closed it out and to tell the buyer.
+     unknown — `sources.closeouts` missing (an older pack) or its `error` set, or a PO with no `closed_out` key: null is NOT "open";
+               an EXISTING short is left alone — Undo, fix-up and re-record are refused with a warning; a line with no short may still
+               record one (the card warns that the close-out could not be checked).
+     open    — `closed_out` null and no error.
+   Checked again at the moment of every tap (the pack may have refreshed). -> {state, co?} */
+function coState(poId){
+  const d = RX.pack.data; const po = d && RX.pack.poById ? RX.pack.poById(poId) : null;
+  const src = d && d.sources && d.sources.closeouts;
+  if(!po || !src || src.error || !Object.prototype.hasOwnProperty.call(po, "closed_out")) return {state:"unknown"};
+  return po.closed_out ? {state:"closed", co:po.closed_out} : {state:"open"};
+}
+S.coState = coState;
+/* -> "" (free to change) | the words that refuse the change */
+function locked(poId, sku, recs){
+  const c = coState(poId);
+  if(c.state === "unknown") return (recs || []).length ? t("sh_co_unknown") : "";   // an existing short is left alone; a first one may be recorded
+  if(c.state !== "closed") return "";
+  const co = c.co || {}, skus = (co.skus || []).map(String), ids = (co.crew_intent_ids || []).map(String);
+  const hit = skus.indexOf(String(sku)) >= 0 || (recs || []).some(x => ids.indexOf(String(x.iid)) >= 0);
+  return hit ? t("sh_closed_no", {who: short_(co.by) || "the buyer", when: whenText(co.at || "")}) : "";
+}
+S.locked = (poId, sku) => locked(poId, sku, records(poId, sku));
 const A = S.state;
 const keyOf = (po, sku) => String(po) + "|" + String(sku);
 const fmtN = (x) => String(Math.round((+x || 0) * 100) / 100);
@@ -138,6 +170,14 @@ S.html = function(po, line){
   const k = keyOf(po.order_id, line.sku), msg = A.msg[k] ? `<div class="hint rx-pb-msg" role="status">${esc(A.msg[k])}</div>` : "";
   const busy = A.busy.has(k) ? " disabled" : "";
   if(A.asking && A.asking.key === k) return askHtml(po, line, L);
+  const lk = locked(po.order_id, line.sku, L.recs);
+  if(lk){
+    const c = coState(po.order_id);
+    if(!L.rec && !(L.missing > 0)) return msg;
+    const head = L.rec ? `<strong>${esc(t("sh_rec", {n:fmtN(L.recorded), who:short_((L.rec.fields || {}).Operator) || "someone", when:whenText((L.rec.fields || {}).ScanAt)}))}</strong> ` : "";
+    const why = c.state === "closed" ? t("sh_closed", {who: short_((c.co || {}).by) || "the buyer", when: whenText((c.co || {}).at || "")}) : t("sh_co_unknown");
+    return `<div class="rx-short rx-short-locked" data-short="${esc(k)}" data-co="${esc(c.state)}">${head}<div class="hint" role="status">${esc(why)}</div>${msg}</div>`;
+  }
   if(L.rec){
     const f = L.rec.fields || {}, mine = I.byId(L.rec.iid), sending = mine && !mine.sent ? t("sh_sending") : "";
     let h = `<div class="rx-short" data-short="${esc(k)}"><strong>${esc(t("sh_rec", {n:fmtN(L.recorded), who:short_(f.Operator) || "someone", when:whenText(f.ScanAt)}))}</strong>${esc(sending)}
@@ -163,6 +203,7 @@ function askHtml(po, line, L){
   return `<div class="rx-fix rx-short-ask" data-short="${esc(k)}"><strong>${esc(t("sh_h", {name:nameOf(line.sku)}))}</strong>
     <div class="hint rx-fix-po">${esc(facts(po, line, L))}</div>
     <div class="hint">${esc(t("sh_look"))}</div>
+    ${coState(po.order_id).state === "unknown" ? `<div class="rx-note" role="status" data-k="sh-co-unknown">${esc(t("sh_co_unknown_new"))}</div>` : ""}
     ${(() => { let n = 0; try{ n = window.RXIdentify ? RXIdentify.count() : 0; }catch(_){} return n > 0 ? `<div class="rx-note rx-red" role="status" data-k="sh-hold">${esc(t("sh_hold", {n:String(n)}))}</div>` : ""; })()}
     <label class="hint" for="rxShortN">${esc(t("sh_units", {n:fmtN(L.missing)}))}</label>
     <input id="rxShortN" class="num" type="text" inputmode="numeric" maxlength="5" autocomplete="off" value="${esc(val)}" aria-label="${esc(t("sh_units", {n:fmtN(L.missing)}))}">
@@ -205,6 +246,7 @@ RX.registerAct("short-ask", ({el}) => {
   const c = find(el.dataset.key); if(!c) return;
   if(!usable()){ A.msg[c.k] = t("sh_noread"); refresh(); return; }
   const L = S.line(c.po, c.line); if(!L || !(L.missing > 0)) return;
+  const lk0 = locked(c.po.order_id, c.line.sku, L.recs); if(lk0){ A.msg[c.k] = lk0; refresh(); return; }
   A.asking = {key:c.k, missing:L.missing, got:L.got, rec:L.rec ? L.rec.iid : null, val:null}; A.err = ""; delete A.msg[c.k];
   RX.call("drawer", "refresh", true);
   setTimeout(() => { const i = document.getElementById("rxShortN"); if(i){ try{ i.focus(); i.select(); }catch(_){} } }, 30);
@@ -219,12 +261,15 @@ RX.registerAct("short-yes", async ({el}) => {
   const L = S.line(c.po, c.line);
   /* ⛔ the numbers are re-read at the tap: if anything moved, nothing is written (no new meaning under the finger) */
   if(!L || L.missing !== A.asking.missing || L.got !== A.asking.got || (L.rec ? L.rec.iid : null) !== A.asking.rec){ A.asking = null; A.msg[c.k] = t("sh_changed"); refresh(); return; }
+  const lk = locked(c.po.order_id, c.line.sku, L.recs); if(lk){ A.asking = null; A.msg[c.k] = lk; refresh(); return; }
   const n = /^\d+$/.test(raw) ? parseInt(raw, 10) : NaN;
   if(!(n >= 1 && n <= L.missing)){ A.err = t("sh_bad_n", {n:fmtN(L.missing)}); RX.call("drawer", "refresh", true); return; }
   A.busy.add(c.k); RX.call("drawer", "refresh", true);
   try{
     const why = await cancelAll(L);
     if(why){ A.asking = null; A.msg[c.k] = why; return; }
+    /* PM-3126 review (3): the pack may have refreshed to "closed out" while the cancel was on the wire — nothing new is recorded then */
+    const lk2 = locked(c.po.order_id, c.line.sku, L.recs); if(lk2){ A.asking = null; A.msg[c.k] = lk2; return; }
     record(c.po, c.line, n, L.got > 0 ? "got fewer" : "never arrived", L.got);
     A.asking = null; A.err = ""; A.msg[c.k] = t("sh_done", {n:fmtN(n)});
   }finally{ A.busy.delete(c.k); refresh(); }
@@ -232,6 +277,7 @@ RX.registerAct("short-yes", async ({el}) => {
 RX.registerAct("short-undo", async ({el}) => {
   const c = find(el.dataset.key); if(!c || A.busy.has(c.k)) return;
   const L = S.line(c.po, c.line); if(!L || !L.rec) return;
+  const lk = locked(c.po.order_id, c.line.sku, L.recs); if(lk){ A.msg[c.k] = lk; refresh(); return; }
   A.busy.add(c.k); RX.call("drawer", "refresh", true);
   try{ const why = await cancelAll(L); A.msg[c.k] = why || t("sh_undone"); }finally{ A.busy.delete(c.k); refresh(); }
 });
@@ -239,12 +285,14 @@ RX.registerAct("short-fixup", async ({el}) => {
   const c = find(el.dataset.key); if(!c || A.busy.has(c.k)) return;
   if(!usable()){ A.msg[c.k] = t("sh_noread"); refresh(); return; }
   const L = S.line(c.po, c.line); if(!L || !L.rec || !L.stale) return;
+  const lk = locked(c.po.order_id, c.line.sku, L.recs); if(lk){ A.msg[c.k] = lk; refresh(); return; }
   A.busy.add(c.k); RX.call("drawer", "refresh", true);
   try{
     const why = await cancelAll(L);
     if(why){ A.msg[c.k] = why; return; }
     const L2 = S.line(c.po, c.line);                      // review 8: re-read after the network wait
     if(!L2 || L2.missing !== L.missing){ A.msg[c.k] = t("sh_changed"); return; }
+    const lk2 = locked(c.po.order_id, c.line.sku, L.recs); if(lk2){ A.msg[c.k] = lk2; return; }   // PM-3126 review (3)
     if(L.missing > 0){ record(c.po, c.line, L.missing, "got fewer", L2.got); A.msg[c.k] = t("sh_done", {n:fmtN(L.missing)}); }
     else A.msg[c.k] = t("sh_undone");
   }finally{ A.busy.delete(c.k); refresh(); }
@@ -268,7 +316,7 @@ S.finishHtml = function(){
   for(const po of RX.po.pos()){
     const ls = (po.lines || []).map(l => ({l, L:S.line(po, l)})).filter(x => x.L);
     if(!ls.some(x => x.L.got > 0)) continue;
-    const open = ls.filter(x => x.L.open > 0);
+    const open = ls.filter(x => x.L.open > 0 && !(coState(po.order_id).state === "closed" && locked(po.order_id, x.l.sku, x.L.recs)));
     h += `<div class="rx-short-fin" data-po="${esc(po.order_id)}" style="margin-top:10px"><strong>${esc(t("sh_fin_h", {po:String(po.order_id)}))}</strong>`;
     if(!poRead()) h += `<div class="hint">${esc(t("sh_noread"))}</div>`;
     else if(!open.length) h += `<div class="hint">${esc(t("sh_fin_none", {po:String(po.order_id)}))}</div>`;
