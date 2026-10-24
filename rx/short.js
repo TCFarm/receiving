@@ -64,6 +64,7 @@ const COPY_ADD = {
   po_f_short:     "Short",
   sh_closed:      "PO closed out by {who} ({when}) with this line short — the short is final here. To change it, tell the buyer.",
   sh_closed_no:   "Not changed — this PO was closed out by {who} ({when}). Tell the buyer.",
+  sh_gone:        "PO {po} is no longer open for receiving — ask the buyer to change it.",
   sh_co_unknown_new:"Close-out status could not be read just now. Record it only if you are sure this PO has not been closed out yet.",
   sh_co_unknown:  "Close-out status could not be read just now, so shorts on this PO cannot be changed from the tablet. Try again later or tell the buyer.",
 };
@@ -81,12 +82,19 @@ S.state = { asking:null, err:"", msg:{}, busy:new Set() };
      unknown — `sources.closeouts` missing (an older pack), its `error` or `qbo_error` set, or a PO with no `closed_out` key: null is NOT "open";
                an EXISTING short is left alone — Undo, fix-up and re-record are refused with a warning; a line with no short may still
                record one (the card warns that the close-out could not be checked).
+     gone    — the PO is not in the current pack at all (left receiving): every short write refused, "ask the buyer" (§5b).
      open    — `closed_out` null and no error.
    Checked again at the moment of every tap (the pack may have refreshed). -> {state, co?} */
 function coState(poId){
   const d = RX.pack.data; const po = d && RX.pack.poById ? RX.pack.poById(poId) : null;
   const src = d && d.sources && d.sources.closeouts;
-  if(!po || !src || !Object.prototype.hasOwnProperty.call(po, "closed_out")) return {state:"unknown"};      // an older pack, a PO without the key
+  /* ⭐ PM-3126 §5b (plan 2026-10-23-closeout-crew-intent, decided 2026-10-24): a PO the current pack does not list has LEFT receiving
+     (fully received or closed out — the builder only packs OPEN POs): every short write on it is refused, "ask the buyer" */
+  if(d && !po) return {state:"gone", po:String(poId)};
+  /* review (1): a NEWER pack already fetched but not yet applied (applied at an idle moment) that no longer lists the PO wins too */
+  const q = RX.pack.queued && RX.pack.queued.data;
+  if(q && Array.isArray(q.pos) && !q.pos.some(p => String(p.order_id) === String(poId))) return {state:"gone", po:String(poId)};
+  if(!po || !src || !Object.prototype.hasOwnProperty.call(po, "closed_out")) return {state:"unknown"};      // no pack yet, an older pack, a PO without the key
   const co = po.closed_out;
   /* null = "not closed out" ONLY when both sources were read; with the portal log (`error`) or QBO-Tools' records (`qbo_error`) unreadable,
      a null is "can't tell". ⛔ A NON-null answer the pack still reached is honoured even then (review 2026-10-24 (1): QBO can still say
@@ -101,6 +109,7 @@ S.coState = coState;
 /* -> "" (free to change) | the words that refuse the change */
 function locked(poId, sku, recs){
   const c = coState(poId);
+  if(c.state === "gone") return t("sh_gone", {po:String(poId)});
   if(c.state === "unknown"){
     if(c.lockAll) return t("sh_co_unknown");                              // the pack says THIS PO cannot be told: every short is locked
     return (recs || []).length ? t("sh_co_unknown") : "";                 // source-wide unknown: an existing short is left alone; a first may be recorded
@@ -228,6 +237,15 @@ function askHtml(po, line, L){
     ${A.err ? `<div class="rx-note rx-red" role="alert">${esc(A.err)}</div>` : ""}</div>`;
 }
 
+/* a tap whose PO is no longer in the pack: say so (the button was drawn from an older pack) -> true when refused */
+function goneTap(k){
+  const i = String(k || "").lastIndexOf("|"); if(i < 0) return false;
+  const poId = String(k).slice(0, i);
+  if(!(RX.pack.data && RX.pack.poById)) return false;
+  if(RX.pack.poById(poId) && coState(poId).state !== "gone") return false;          // in the pack, and not dropped by a queued newer one
+  A.asking = null; A.msg[k] = t("sh_gone", {po:poId});
+  try{ RX.toast(t("sh_gone", {po:poId})); }catch(_){} refresh(); return true;
+}
 /* (po, line) for a key, from the pack */
 function find(k){
   const i = String(k || "").lastIndexOf("|"); if(i < 0) return null;
@@ -248,6 +266,8 @@ async function cancelAll(L){
   /* another tablet's records FIRST (they can fail: 412 / offline); this tablet's own only once those landed (review 8) */
   const recs = (L.recs || []).slice().sort((a, b) => (I.byId(a.iid) ? 1 : 0) - (I.byId(b.iid) ? 1 : 0));
   for(const x of recs){
+    const g = coState(String((x.fields || {}).Po || ""));                      // review (2): the PO may leave mid-loop
+    if(g.state === "gone") return t("sh_gone", {po:g.po});
     const rec = I.byId(x.iid);
     if(rec){ I.cancel(x.iid); continue; }
     const P = RX.problems; if(!P || !P.patchIntent) return t("sh_noread");
@@ -258,6 +278,7 @@ async function cancelAll(L){
 }
 
 RX.registerAct("short-ask", ({el}) => {
+  if(goneTap(el.dataset.key)) return;
   const c = find(el.dataset.key); if(!c) return;
   if(!usable()){ A.msg[c.k] = t("sh_noread"); refresh(); return; }
   const L = S.line(c.po, c.line); if(!L || !(L.missing > 0)) return;
@@ -268,6 +289,7 @@ RX.registerAct("short-ask", ({el}) => {
 });
 RX.registerAct("short-back", () => { A.asking = null; A.err = ""; RX.call("drawer", "refresh", true); });
 RX.registerAct("short-yes", async ({el}) => {
+  if(goneTap(el.dataset.key)) return;
   const c = find(el.dataset.key); if(!c || !A.asking || A.asking.key !== c.k) return;
   if(A.busy.has(c.k)) return;
   const inp = document.getElementById("rxShortN"), raw = String(inp ? inp.value : "").trim();
@@ -290,6 +312,7 @@ RX.registerAct("short-yes", async ({el}) => {
   }finally{ A.busy.delete(c.k); refresh(); }
 });
 RX.registerAct("short-undo", async ({el}) => {
+  if(goneTap(el.dataset.key)) return;
   const c = find(el.dataset.key); if(!c || A.busy.has(c.k)) return;
   const L = S.line(c.po, c.line); if(!L || !L.rec) return;
   const lk = locked(c.po.order_id, c.line.sku, L.recs); if(lk){ A.msg[c.k] = lk; refresh(); return; }
@@ -297,6 +320,7 @@ RX.registerAct("short-undo", async ({el}) => {
   try{ const why = await cancelAll(L); A.msg[c.k] = why || t("sh_undone"); }finally{ A.busy.delete(c.k); refresh(); }
 });
 RX.registerAct("short-fixup", async ({el}) => {
+  if(goneTap(el.dataset.key)) return;
   const c = find(el.dataset.key); if(!c || A.busy.has(c.k)) return;
   if(!usable()){ A.msg[c.k] = t("sh_noread"); refresh(); return; }
   const L = S.line(c.po, c.line); if(!L || !L.rec || !L.stale) return;
@@ -314,6 +338,7 @@ RX.registerAct("short-fixup", async ({el}) => {
 });
 /* Finish truck → the line in the PO drawer, opened, with its short button in view */
 RX.registerAct("short-goto", ({el}) => {
+  if(goneTap(el.dataset.key)) return;
   const c = find(el.dataset.key); if(!c) return;
   try{ if(window.RXIdentify && RXIdentify.close) RXIdentify.close(); }catch(_){}
   const D = RX.drawer; if(!D) return;
