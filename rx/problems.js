@@ -130,14 +130,16 @@ const COPY_ADD = {
   fix_rm_finale_noread:"The buyer will take {n} off in Finale. The best-by list was not changed (the rest of this case could not be read) — tell the buyer.",
   /* PM-3110: a LOWER count on a scan in Finale asks first, with units AND cases */
   fix_lower_h:    "Take {d} off in Finale?",
-  fix_lower_body: "Finale has {old}{oldc} from this scan. You typed {n}{nc}. The buyer takes {d} off in Finale; the best-by list is not changed.",
+  fix_lower_body: "Finale has {old}{oldc} from this scan. You typed {n}{nc}. The buyer takes {d} off in Finale, and the best-by list is set to {n}.",
   fix_lower_c:    " ({c} of {cq})",
   fix_lower_cases:" = {c} case(s) of {cq}",
   fix_lower_units:" unit(s)",
   fix_lower_hint: "Counting CASES? {n} cases = {u} units. This box takes units.",
   fix_lower_yes:  "Yes — the count is {n}",
   fix_lower_case: "This case has {total} ({old} on this scan + {more} received later). To lower it, first remove the later {more} (Fix on that scan → Scanned twice), then fix this one — or tell the buyer. Nothing was saved.",
-  fix_lower_done: "Sent to the buyer: the count is {n}. The best-by list is not changed until the buyer corrects Finale.",
+  fix_lower_done: "Sent to the buyer: the count is {n}. The best-by list now says {n} for this case.",
+  fix_lower_done_noBb:"Sent to the buyer: the count is {n}. The best-by list was not changed (the rest of this case could not be read) — tell the buyer.",
+  fix_lower_bbfail:"Sent to the buyer: the count is {n}.",
   /* PM-3111: the SKU is on more than one open PO — say which one Finale will fill */
   recv_po_multi:  "This item is on {k} open POs. Finale fills the oldest PO that has room first, so these go on PO {po}.",
   recv_po_multi_over:"This item is on {k} open POs. A confirmed extra goes on the OLDEST one: PO {po}.",
@@ -691,9 +693,10 @@ RX.registerAct("fix-open", ({el}) => { P.state.fixing = el.dataset.iid; P.state.
 RX.registerAct("fix-cancel", () => { P.state.fixing = null; P.state.fixErr = ""; P.state.recvAsk = null; P.state.lowerAsk = null; RX.call("drawer", "refresh", true); });
 /* ⭐ PM-3110 (2026-10-23, misuse review (4)): a LOWER count on a scan Finale has is un-receiving — the buyer's job — and the commonest way
    to get it wrong is typing CASES into a units box (2 meaning 2 cases of 6). So it is never sent on one tap: a card shows what Finale
-   has and what was typed, BOTH in units and cases, and only [Yes — the count is n] sends the buyer the note. ⛔ The best-by row is NOT
-   changed (it used to be set to n at once): if n was a typo the date would have been under-counted with nothing to show for it, and the
-   cohort engine already caps a SKU at what Finale has, so a row left high costs nothing while the buyer looks. */
+   has and what was typed, BOTH in units and cases, and only [Yes — the count is n] sends the buyer the note. ⭐ The best-by row is set
+   ONLY after that Yes (it used to be set at Save, with no confirm) — ruling (coordinator for Jack, 2026-10-23): the crew is confirming
+   what is physically there, which is what the row records; the buyer's Finale correction is a separate matter. The case total moves by
+   this scan's change (a split case's other parts keep theirs); ⛔ the PO-wide read down ⇒ the row is left and the crew is told. */
 function lowerHtml(v, a){
   const f = v.fields || {}, cq = +f.CaseQty || 0, err = P.state.fixErr;
   const oldc = (cq > 0 && a.old % cq === 0) ? t("fix_lower_c", {c:fmtN(a.old / cq) + (a.old / cq === 1 ? " case" : " cases"), cq:fmtN(cq)}) : "";
@@ -718,6 +721,14 @@ RX.registerAct("fix-lower", ({el}) => { const iid = el.dataset.iid;
     P.state.lowerAsk = null; P.state.fixing = null; P.state.fixErr = "";
     if(fixRowsFor(iid).some(x => +x.FixUnits === a.n)){ say(iid, t("fix_already_sent", {n:String(a.n)})); return; }
     tellBuyer(v, `crew: the count is ${a.n}, not ${a.old} — correct Finale by ${a.n - a.old}`, a.n);
+    const f = v.fields || {};
+    if(String(f.BbItemId || "")){
+      if(!poRead()){ say(iid, t("fix_lower_done_noBb", {n:fmtN(a.n)})); return; }
+      const shelf = +f.Units || 0, parts = partners(v).filter(x => (((x.fields || {}).Kind) || "intent") === "intent" && !flaggedTwice(x));
+      const caseUnits = shelf + parts.reduce((s0, x) => s0 + (+((x.fields || {}).Units) || 0), 0);
+      const b = await bb(v, {units: caseUnits - shelf + a.n});
+      if(!b.ok){ say(iid, t("fix_lower_bbfail", {n:fmtN(a.n)}) + " " + t("pb_bb_failed", {why:b.why})); return; }
+    }
     say(iid, t("fix_lower_done", {n:fmtN(a.n)}));
   });
 });
@@ -804,7 +815,7 @@ RX.registerAct("fix-save", ({el}) => { const iid = el.dataset.iid;
     /* ⭐ PM-3110: a LOWER count on a scan in Finale asks first (units AND cases) — nothing is written here, the BB row is left alone */
     /* ⛔ review (2): the box is "Units in this CASE"; with units received later onto it the case is old + more, and a note for this scan
        alone would leave the later units in Finale — so the later record is removed first (it has its own Fix) */
-    if(fs === "posted"){ const c = caseNow(v); if(c.more > 0){ P.state.fixErr = t("fix_lower_case", {old:fmtN(c.old), more:fmtN(c.more), total:fmtN(c.total)}); return; } }
+    if(fs === "posted" && laterRest(v).length){ const c = caseNow(v); P.state.fixErr = t("fix_lower_case", {old:fmtN(c.old), more:fmtN(c.total - c.old), total:fmtN(c.total)}); return; }   // a split part is not a rest: its own count may go down
     if(fixRowsFor(iid).some(x => +x.FixUnits === n)){ P.state.fixing = null; P.state.fixErr = ""; say(iid, t("fix_already_sent", {n:String(n)})); return; }
     P.state.lowerAsk = {iid, n, old, fs}; P.state.fixErr = ""; P.state.draft = null;
     return;
