@@ -74,8 +74,8 @@ S.state = { asking:null, err:"", msg:{}, busy:new Set() };
 /* ⭐ PM-3126 (2026-10-24): a crew short on a PO that has been CLOSED OUT is evidence the close-out used (who said it never arrived, and
    when) — Undo or a re-record would erase it silently (a re-recorded short gets a NEW id). The pack publishes, per PO, `closed_out` =
    {by, at, edit_id, skus, crew_intent_ids} or null, and `sources.closeouts.error` when the close-out log could not be read.
-     closed  — `closed_out` set:  a line whose SKU is in `skus`, or whose short record id is in `crew_intent_ids`, is LOCKED: no record,
-               no Undo, no fix-up; the line says who closed it out and to tell the buyer.
+     closed  — `closed_out` set: EVERY line of the PO is LOCKED (ruling: Jack, 2026-10-24) — no record, no Undo, no fix-up; the line
+               says who closed it out and to tell the buyer. (`skus` / `crew_intent_ids` are no longer needed to decide.)
      lock_all — `closed_out.lock_all` (a close-out QBO recorded with no shorts): EVERY crew short on the PO is final, named or not.
      unknown — `closed_out.unknown` (the pack could not tell for THIS PO; it carries lock_all): every short write on the PO is refused.
      unknown — `sources.closeouts` missing (an older pack), its `error` or `qbo_error` set, or a PO with no `closed_out` key: null is NOT "open";
@@ -106,9 +106,11 @@ function locked(poId, sku, recs){
     return (recs || []).length ? t("sh_co_unknown") : "";                 // source-wide unknown: an existing short is left alone; a first may be recorded
   }
   if(c.state !== "closed") return "";
-  const co = c.co || {}, skus = (co.skus || []).map(String), ids = (co.crew_intent_ids || []).map(String);
-  const hit = c.lockAll || skus.indexOf(String(sku)) >= 0 || (recs || []).some(x => ids.indexOf(String(x.iid)) >= 0);
-  return hit ? t("sh_closed_no", {who: short_(co.by) || "the buyer", when: whenText(co.at || "")}) : "";
+  /* ⭐ ruling (Jack, 2026-10-24, PM-3171): "it should all be locked out once completed and billed in QBO" — a closed-out PO locks EVERY
+     crew short on it, named in `skus` / `crew_intent_ids` or not. ⛔ No reopen path from the tablet ("we may need a way to re-open/adjust
+     this in the future, but not now"). */
+  const co = c.co || {};
+  return t("sh_closed_no", {who: short_(co.by) || "the buyer", when: whenText(co.at || "")});
 }
 S.locked = (poId, sku) => locked(poId, sku, records(poId, sku));
 const A = S.state;
