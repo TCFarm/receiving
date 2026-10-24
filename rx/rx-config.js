@@ -33,7 +33,13 @@ const CFG = {
   WAIT_USUAL:     120*1000,         // "usually under 2 min" (drill-down text only)
   WAIT_SLOW:      5*60*1000,        // "Waiting 6:12 — slow"
   WAIT_ALERT:     15*60*1000,       // "Waiting 16:02 — buyer told"
-  POSTER_STALE:   5*60*1000,        // ⭐ ONE stale threshold (MASTER-PLAN §9.3 — overrides the UX design's 3 min)
+  /* ⭐ ONE stale threshold. PM-3116 (2026-10-23): MEASURED, not chosen — the poster writes its status at the END of each run, and the 500
+     status writes 10-21 20:56Z → 10-24 02:32Z (the file's SharePoint version history) are 382 s apart at the median, 455 s at p95 and
+     518 s at most (10-23 14:12 → 14:21, the "delayed 8:19" Eli saw); 475 of the 500 gaps were over the old 5 min, so the banner fired on
+     almost every normal cycle. Worst age a tablet can show on a healthy mini = 518 s + `at` written ~9 s before upload + POLL_IDLE 60 s
+     ≈ 587 s; ONE missed run ≈ 2 × 382 s = 764 s. 12 min sits between them with ~2 min to spare for a tablet clock that runs fast
+     (adversarial review 2026-10-23: 11 left 73 s): no false alarm in the measured history (2.5 days), a missed run still shows. Re-measure from the version history before changing it (Procurement & Merchandising/plans/2026-10-23-receiving-fix-receive-rest-PLAN.md). */
+  POSTER_STALE:   12*60*1000,
   POLL_OPEN:      20*1000,          // read this tablet's intents while any is not final
   POLL_IDLE:      60*1000,
   POLL_LIMIT:     10*1000,          // every read has a time limit and a generation guard
