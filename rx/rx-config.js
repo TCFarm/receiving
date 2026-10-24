@@ -173,6 +173,7 @@ const COPY = {
   chip_alert:      "Waiting {clock} — buyer told",
   chip_waiting_t:  "Usually under 2 minutes. Your scan is safe.",
   chip_infinale:   "In Finale ✓",
+  chip_reversed:   "Taken back out of Finale (receipt cancelled)",
   chip_held:       "Held for the buyer",
   chip_refused:    "Refused",
   chip_practice:   "Not posted (practice)",
