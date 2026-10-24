@@ -120,6 +120,27 @@ const COPY_ADD = {
   fix_saved_finale:"Count fixed on the best-by list. The buyer will correct Finale.",
   fix_rm_q:       "Remove this scan?\n\n{name}\n{units} units · best-by {bb}\n\nOnly if the SAME case was scanned twice.",
   fix_rm_finale:  "Removed from the best-by list. The buyer will take {n} off in Finale.",
+  /* PM-3108: a part of a case removed — the case's best-by row keeps the date and now counts only the parts still there */
+  pb_done_rm_lower:"Removed. The best-by stays — another part of the same case uses it — and now counts {n} units.",
+  pb_done_rm_noread:"Removed. The best-by list was not changed (the rest of this case could not be read) — tell the buyer.",
+  fix_rm_finale_lower:"Taken off this case's best-by count ({n} left). The buyer will take {d} off in Finale.",
+  /* PM-3109: "Scanned twice" on a scan whose rest was received later through Fix */
+  fix_twice_rest: "This case also has {more} received later through Fix ({when}{fin}). Remove that one first — Fix on the {more}-unit scan → Scanned twice — then this one if it is still wrong. Nothing was changed.",
+  fix_twice_rest_fin:" — already in Finale",
+  fix_rm_finale_noread:"The buyer will take {n} off in Finale. The best-by list was not changed (the rest of this case could not be read) — tell the buyer.",
+  /* PM-3110: a LOWER count on a scan in Finale asks first, with units AND cases */
+  fix_lower_h:    "Take {d} off in Finale?",
+  fix_lower_body: "Finale has {old}{oldc} from this scan. You typed {n}{nc}. The buyer takes {d} off in Finale; the best-by list is not changed.",
+  fix_lower_c:    " ({c} of {cq})",
+  fix_lower_cases:" = {c} case(s) of {cq}",
+  fix_lower_units:" unit(s)",
+  fix_lower_hint: "Counting CASES? {n} cases = {u} units. This box takes units.",
+  fix_lower_yes:  "Yes — the count is {n}",
+  fix_lower_case: "This case has {total} ({old} on this scan + {more} received later). To lower it, first remove the later {more} (Fix on that scan → Scanned twice), then fix this one — or tell the buyer. Nothing was saved.",
+  fix_lower_done: "Sent to the buyer: the count is {n}. The best-by list is not changed until the buyer corrects Finale.",
+  /* PM-3111: the SKU is on more than one open PO — say which one Finale will fill */
+  recv_po_multi:  "This item is on {k} open POs. Finale fills the oldest PO that has room first, so these go on PO {po}.",
+  recv_po_multi_over:"This item is on {k} open POs. A confirmed extra goes on the OLDEST one: PO {po}.",
 };
 for(const k of Object.keys(COPY_ADD)) if(!(k in RX.COPY)) RX.COPY[k] = COPY_ADD[k];
 
@@ -298,16 +319,16 @@ P.autoTemp = async function(){
     if(fixSentFor(v.iid)) continue;
     TEMP_TRIED.add(v.iid); BUSY.add(v.iid);
     try{
-      const r = await patchIntent(v, {State:"cancelled"}, "held");
-      /* ⛔ ONLY after the cancel LANDED (the same rule as the Yes button): the new intent never coexists with a live copy of the old one */
-      if(r.ok){ I.create(replacement(v, {TempConfirmed:true}), {}); n++; P.state.msg[v.iid] = t("pb_done_temp"); }
+      /* ⛔ the SAME two writes as the Yes button (tempYes): replacement saved first, created only after the cancel LANDED (PM-3112) */
+      const r = await tempYes(v);
+      if(r.ok){ n++; P.state.msg[v.iid] = t("pb_done_temp"); }
     }catch(e){ try{ console.error("rx auto-temp", e); }catch(_){} }
     finally{ BUSY.delete(v.iid); }
   }
   if(n){ RX.refresh(); RX.call("drawer", "refresh", true); }
   return n;
 };
-RX.on("intents", () => { P.autoRetire(); P.autoTemp(); });
+RX.on("intents", () => { P.finishTempYes(); P.autoRetire(); P.autoTemp(); });
 /* ⭐ 2026-10-22 (PM-3069): a staged case taken off the cart list ("Not put away") must take its best-by row with it, or the date is
    counted twice when the case is scanned again (live: Rosemary Garlic Fries BB 4486 kept, rescanned as 4492 → 18u recorded vs 12).
    The SAME guard as "Scanned twice": never while another live part of the case uses that row, nor while the PO-wide read is down.
@@ -405,6 +426,10 @@ const whyText = (why) => why === "changed" || why === "gone" ? t("pb_changed") :
 /* the other LIVE parts of the same physical case: same BB row, OR the same split root (SplitOf || own id — a posted part often has no
    BbItemId: the evidence patch is dropped once the poster acted), OR on the same history row of this tablet (review 2026-10-22 (3)) */
 const rootOf = (x) => String(((x.fields || {}).SplitOf) || x.iid);
+/* ⭐ PM-3109 review (4): a "receive the rest" record names the scan it completes in FixBin "rest-of:<iid>" (FixBin is read by nobody on
+   an intent: the poster ignores it, the portal shows it only on fix rows) — the BB row alone cannot link them when the posted scan has
+   no BbItemId. -> the scan's iid | "" */
+const restLink = (x) => { const m = /^rest-of:(.+)$/.exec(String(((x && x.fields) || {}).FixBin || "")); return m ? m[1] : ""; };
 function partners(v){
   const id = String((v.fields || {}).BbItemId || ""), root = rootOf(v), out = [];
   let rowIds = []; try{ const r = rows.find(r => r.rx && ((r.rx.iids || []).indexOf(v.iid) >= 0 || r.rx.iid === v.iid)); if(r) rowIds = (r.rx.iids && r.rx.iids.length) ? r.rx.iids : [r.rx.iid]; }catch(_){}
@@ -412,7 +437,8 @@ function partners(v){
     if(x.iid === v.iid) continue; const f = x.fields || {};
     if(f.Kind === "fix" || f.State === "cancelled") continue;
     const rec = I.byId(x.iid); if(rec && rec.cancelled) continue;
-    if((id && String(f.BbItemId || "") === id) || rootOf(x) === root || x.iid === root || rowIds.indexOf(x.iid) >= 0) out.push(x);
+    if((id && String(f.BbItemId || "") === id) || rootOf(x) === root || x.iid === root || rowIds.indexOf(x.iid) >= 0
+       || restLink(x) === v.iid || restLink(v) === x.iid) out.push(x);
   }
   return out;
 }
@@ -450,26 +476,97 @@ async function run(iid, fn){
   finally{ BUSY.delete(iid); RX.refresh(); RX.call("drawer", "refresh", true); }
 }
 RX.registerAct("pb-putaway", () => { try{ RX.drawer.close(); }catch(_){} if(RX.setFlow("staged")){ try{ RX.staging.refresh(); }catch(_){} } });
+/* ⭐ PM-3112 (2026-10-23): "Yes, it belongs in <bin>" is TWO writes — cancel the held intent, then create its replacement. On 10-23 the
+   cashew milk's second cancel landed (14:16:57Z) and its replacement never reached the list; the only failure that fits the server
+   evidence is the page stopping between the two (a reload, the tab closed, the tablet asleep — the PATCH lands, its answer is never
+   processed, so the create never runs). So the replacement is written to THIS tablet's storage BEFORE the cancel, with its IntentId
+   fixed in advance, and the cancel PATCH carries `FixBin = "replaced-by:<that id>"` (a column no reader uses on an intent). After any
+   reload, P.finishTempYes() finishes it: the original cancelled BY THIS ANSWER (its FixBin names the id) and no intent with that id
+   anywhere ⇒ create it, with the SAME id (never a second one). ⛔ An original cancelled by anything else (Remove, another tablet) is
+   never resurrected; one still held means the cancel never landed — the question is simply still on screen. */
+const REPL_KEY = "rx_temp_repl_v1";
+const replAll = () => { let s = null; try{ s = RX.store.get(REPL_KEY, null); }catch(_){} return (s && typeof s === "object") ? s : {}; };
+const replPut = (m) => { try{ RX.store.set(REPL_KEY, m); }catch(_){} };
+const replDel = (oid) => { const m = replAll(); if(m[oid]){ delete m[oid]; replPut(m); } };
+async function tempYes(v){
+  /* ⛔ a retry REUSES the saved replacement (the same IntentId): a first tap whose cancel landed with its answer lost is then still
+     recognised by its FixBin (adversarial review 2026-10-23 (1): a fresh id on the retry orphaned the first one for good) */
+  const prev = replAll()[v.iid];
+  const g = (prev && prev.g && prev.g.IntentId) ? prev.g : replacement(v, {TempConfirmed:true, IntentId:RX.newId()});
+  const m = replAll(); m[v.iid] = {g, at:RX.now()}; replPut(m);              // ⛔ BEFORE the cancel
+  const r = await patchIntent(v, {State:"cancelled", FixBin:"replaced-by:" + g.IntentId}, "held");
+  /* offline (outcome unknown) and changed (412: maybe OUR earlier cancel) are decided by P.finishTempYes from the list itself; only a
+     write that certainly never landed drops the saved copy */
+  if(!r.ok){ if(r.why === "sending" || r.why === "denied" || r.why === "gone") replDel(v.iid); return r; }
+  /* ⛔ ONLY after the cancel LANDED: the new intent can never coexist with a live copy of the old one */
+  if(!I.byId(g.IntentId)) I.create(g, {});
+  return r;
+}
+const replSeen = (id) => (I.allPo ? I.allPo() : I.allToday()).find(x => x.iid === id) || null;
+/* the LIST's copy of an intent — never this tablet's outbox copy, which still says "held" after a cancel whose answer was lost */
+const serverCopy = (iid) => (RX.state.poAll && RX.state.poAll.get(iid)) || (RX.state.todayAll && RX.state.todayAll.get(iid)) || null;
+const goneHere = (iid) => { try{ const st = I._store && I._store(); return !!(st && st.gone && st.gone[iid]); }catch(_){ return false; } };
+P.finishTempYes = function(){
+  const m = replAll(), ids = Object.keys(m); if(!ids.length || !poRead()) return 0;
+  let n = 0, dirty = false;
+  for(const oid of ids){
+    if(BUSY.has(oid)) continue;                                              // the tap is still in flight on this page
+    const e = m[oid], g = e && e.g;
+    if(!g || !g.IntentId){ delete m[oid]; dirty = true; continue; }
+    const twin = replSeen(g.IntentId), rec = I.byId(g.IntentId);
+    if(twin || rec){ if((twin && !twin.local) || (rec && (rec.sent || rec.denied))){ delete m[oid]; dirty = true; } continue; }   // on the list (or refused) ⇒ done; in the outbox ⇒ wait
+    /* ⛔ it existed here and was removed or pruned (review (5): a refused replacement the crew removed must not come back) */
+    if(goneHere(g.IntentId)){ delete m[oid]; dirty = true; continue; }
+    const o = serverCopy(oid), of = (o && o.fields) || {};
+    if(!o){ if(RX.now() - (+e.at || 0) > 3 * 86400000){ delete m[oid]; dirty = true; } continue; }
+    if(of.State === "cancelled" && String(of.FixBin || "") === "replaced-by:" + g.IntentId){ I.create(g, {}); n++; continue; }
+    /* still live: the cancel never landed — but a tap on ANOTHER tab of this tablet may be mid-flight (BUSY is per tab), so a fresh
+       copy is given 2 minutes before it is dropped */
+    if(of.State !== "cancelled" && RX.now() - (+e.at || 0) < 120000) continue;
+    delete m[oid]; dirty = true;                                             // never landed, or cancelled by something else: never resurrected
+  }
+  if(dirty) replPut(m);
+  if(n){ RX.refresh(); RX.call("drawer", "refresh", true); }
+  return n;
+};
 RX.registerAct("pb-temp-yes", ({el}) => { const iid = el.dataset.iid; return run(iid, async () => {
   const v = findV(iid); const p = P.of(v); if(!p || p.kind !== "temp"){ say(iid, t("pb_changed")); return; }
-  const r = await patchIntent(v, {State:"cancelled"}, "held");
+  const r = await tempYes(v);
   if(!r.ok){ say(iid, whyText(r.why)); return; }
-  /* ⛔ ONLY after the cancel LANDED: the new intent can never coexist with a live copy of the old one */
-  I.create(replacement(v, {TempConfirmed:true}), {});
   say(iid, t("pb_done_temp"));
 }); });
+/* ⭐ PM-3108 (2026-10-23): a scan that leaves a case — Remove, Counted twice, Scanned twice — takes its units off the case's best-by row.
+   The row is the WHOLE case; a "receive the rest" record (and a split part) shares it. Before, removing the rest kept the row at the
+   raised total (BB 12 while Finale had 6). Decided BEFORE the write, from the other live parts of the case (a part already flagged
+   "scanned twice" to the buyer is not counted): none ⇒ the row is deleted (as before); some ⇒ the row is set to their units;
+   ⛔ the PO-wide read down ⇒ the row is left alone and the crew is told (an unseen part must not lose its date or its count). */
+const flaggedTwice = (x) => fixRowsFor(x.iid).some(r => !(+r.FixUnits > 0) && /scanned twice/i.test(String(r.FixNote || "")));
+function bbPlan(v){
+  if(!String((v.fields || {}).BbItemId || "")) return {op:"none"};
+  if(!poRead()) return {op:"keep"};
+  const rest = partners(v).filter(x => (((x.fields || {}).Kind) || "intent") === "intent" && !flaggedTwice(x));
+  if(!rest.length) return {op:"del"};
+  const n = rest.reduce((s0, x) => s0 + (+((x.fields || {}).Units) || 0), 0);      // the shelf's units (a partly-posted part is still all there)
+  return n > 0 ? {op:"units", n} : {op:"keep"};
+}
+async function bbApply(v, plan){
+  if(plan.op === "none") return {ok:true};
+  if(plan.op === "keep") return {ok:true, kept:true};
+  const b = await bb(v, plan.op === "del" ? {del:true} : {units:plan.n});
+  return b.ok ? {ok:true, lowered: plan.op === "units" ? plan.n : null} : {ok:false, why:b.why};
+}
+const rmMsg = (b) => !b.ok ? t("pb_bb_failed", {why:b.why}) : (b.kept ? t("pb_done_rm_noread") : (b.lowered != null ? t("pb_done_rm_lower", {n:fmtN(b.lowered)}) : t("pb_done_rm")));
 async function removeScan(v, expectFin){
   if(!WITHDRAWABLE.has(String(expectFin || ""))) return {ok:false, msg:t("pb_changed")};
+  const plan = bbPlan(v);
   const r = await patchIntent(v, {State:"cancelled"}, expectFin);
   if(!r.ok) return {ok:false, msg:whyText(r.why)};
-  if(bbShared(v)) return {ok:true, msg:t("pb_done_rm_bb")};
-  const b = await bb(v, {del:true});
-  return b.ok ? {ok:true, msg:t("pb_done_rm")} : {ok:true, msg:t("pb_bb_failed", {why:b.why})};
+  return {ok:true, msg:rmMsg(await bbApply(v, plan))};
 }
 RX.registerAct("pb-remove", ({el}) => { const iid = el.dataset.iid; return run(iid, async () => {
   const v = findV(iid); const p = P.of(v); if(!p || !p.act){ say(iid, t("pb_changed")); return; }
   const rec = I.byId(iid);
-  if(p.kind === "denied" && rec && !rec.sent){ I.cancel(iid); const b = bbShared(v) ? {ok:true} : await bb(v, {del:true}); say(iid, b.ok ? t("pb_done_rm") : t("pb_bb_failed", {why:b.why})); return; }
+  if(p.kind === "denied" && rec && !rec.sent){ const plan = bbPlan(v); I.cancel(iid); say(iid, rmMsg(await bbApply(v, plan))); return; }
   const out = await removeScan(v, (v.fin || {}).FinState || "");
   say(iid, out.msg);
 }); });
@@ -518,9 +615,29 @@ function onCart(f){
   return out;
 }
 const whoAmI = () => { try{ return account || ""; }catch(_){ return ""; } };
+/* ⭐ PM-3111 (2026-10-23): WHICH PO the poster will put `d` more units on. The scan's own `Po` is only advisory: lib/receiving_post.py
+   walks the open POs OLDEST first (receive date) and an unconfirmed receipt goes on the first PO with room — partly, with the rest
+   HELD, when that room is smaller than the receipt — while an OverConfirmed one goes whole on the oldest PO carrying the item. The pack
+   carries every open PO with its eta, so the tablet mirrors that order (the same sort as RX.po.matchFor):
+     the first PO with room > 0 has room for all `d` ⇒ that PO, not extra;  otherwise ⇒ the OLDEST PO carrying the item, extra.
+   With one open PO this is exactly the old rule (room ≥ d ⇔ putCheck not over). -> {po, pc, k} | null (a PO could not be read) */
+const etaSort = (a, b) => String(a.po.eta || "9999").localeCompare(String(b.po.eta || "9999")) || String(a.po.order_id).localeCompare(String(b.po.order_id));
+function posterPick(f, d){
+  const own = String(f.Po || "");
+  const ids = (RX.pack.poLinesBySku ? RX.pack.poLinesBySku(f.Sku) : []).slice().sort(etaSort).map(c => String(c.po.order_id));
+  if(ids.length <= 1){ const pc = RX.po.putCheck(own, f.Sku, d); return pc ? {po:own, pc, k:Math.max(1, ids.length)} : null; }
+  let first = null;
+  for(const id of ids){
+    const p0 = RX.po.putCheck(id, f.Sku, 0); if(!p0) return null;
+    if(p0.cap - p0.have > 0){ first = {id, room:p0.cap - p0.have}; break; }
+  }
+  const id = (first && first.room >= d) ? first.id : ids[0];
+  const pc = RX.po.putCheck(id, f.Sku, d); if(!pc) return null;
+  return {po:id, pc: (id === ids[0] && !(first && first.room >= d)) ? Object.assign({}, pc, {over:true}) : pc, k:ids.length};
+}
 /* the confirm card for "receive the rest": numbers from putCheck at the moment Save was pressed */
 function recvHtml(v, a){
-  const f = v.fields || {}, pc = a.pc, after = pc.n, over = Math.max(0, pc.n - pc.cap);
+  const f = Object.assign({}, v.fields || {}, {Po: a.po || (v.fields || {}).Po}), pc = a.pc, after = pc.n, over = Math.max(0, pc.n - pc.cap);
   const basis = pc.basis === "shipped" ? "shipped" : "ordered";
   const basisLong = pc.basis === "shipped" ? `KeHE shipped (${fmtN(pc.cap)})` : `we ordered (${fmtN(pc.cap)})`;
   const h = pc.over ? t("recv_over_h", {over:fmtN(over), basis_long:basisLong}) : t("recv_h", {d:fmtN(a.d)});
@@ -528,7 +645,9 @@ function recvHtml(v, a){
                        : t("recv_body", {base:fmtN(a.base), n:fmtN(a.n), d:fmtN(a.d), bb: f.BestBy || "no best-by", loc: f.Location || "the same shelf",
                                          after:fmtN(after), cap:fmtN(pc.cap), basis});
   const yes = pc.over ? t("recv_yes_over", {over:fmtN(over)}) : t("recv_yes", {d:fmtN(a.d)});
-  const cart = onCart(f), err = P.state.fixErr, me = whoAmI();
+  const cart = onCart(v.fields || {}), err = P.state.fixErr, me = whoAmI();
+  /* PM-3111: more than one open PO carries the item — name the one Finale will fill (the facts above are THAT PO's) */
+  const multi = (a.k || 1) > 1 ? `<div class="hint rx-recv-po" data-po="${esc(String(a.po || ""))}">${esc(t(pc.over ? "recv_po_multi_over" : "recv_po_multi", {k:String(a.k), po:String(a.po || "")}))}</div>` : "";
   const cartUnits = cart.reduce((s0, x) => s0 + (+((x.fields || {}).Units) || 0), 0);
   const c0 = cart[0] && (cart[0].fields || {});
   const cartNote = cart.length ? `<div class="rx-note rx-red" role="status">${esc(t("recv_cart", {n:fmtN(cartUnits), area: (c0 && c0.StagedArea) || "a cart", age: ageText(c0 && c0.ScanAt)}))}</div>` : "";
@@ -539,6 +658,7 @@ function recvHtml(v, a){
   return `<div class="rx-fix rx-recv${pc.over ? " rx-recv-over" : ""}" data-iid="${esc(v.iid)}" data-recv="${pc.over ? "over" : "ok"}"><strong>${esc(h)}</strong>
     <div class="hint">${esc(nameOf(f.Sku))}${f.BestBy ? " · bb " + esc(f.BestBy) : ""}${f.Location ? " · " + esc(f.Location) : ""}</div>
     <div class="hint rx-fix-po">${esc(poFacts(f))}</div>
+    ${multi}
     ${cartNote}
     <div class="hint">${esc(body)}</div>
     ${retype}
@@ -550,6 +670,7 @@ function recvHtml(v, a){
 P.fixHtml = function(v){
   const f = v.fields || {}; const err = P.state.fixErr;
   const a = P.state.recvAsk; if(a && a.iid === v.iid) return recvHtml(v, a);
+  const la = P.state.lowerAsk; if(la && la.iid === v.iid) return lowerHtml(v, la);
   const facts = poFacts(f);
   return `<div class="rx-fix" data-iid="${esc(v.iid)}"><strong>${esc(t("fix_h"))}</strong>
     <div class="hint">${esc(nameOf(f.Sku))} · ${esc(String(f.Units ?? "?"))}u${f.BestBy ? " · bb " + esc(f.BestBy) : ""}${(v.fin || {}).FinState === "posted" ? " · " + esc(t("fix_in_finale")) : ""}</div>
@@ -565,9 +686,41 @@ P.fixHtml = function(v){
     <button type="button" class="rx-btn" data-act="fix-cancel" data-close="1">${esc(t("fix_cancel"))}</button>
     ${err ? `<div class="rx-note rx-red" role="alert">${esc(err)}</div>` : ""}</div>`;
 };
-RX.registerAct("fix-open", ({el}) => { P.state.fixing = el.dataset.iid; P.state.fixErr = ""; P.state.draft = null; P.state.recvAsk = null; RX.call("drawer", "refresh", true);
+RX.registerAct("fix-open", ({el}) => { P.state.fixing = el.dataset.iid; P.state.fixErr = ""; P.state.draft = null; P.state.recvAsk = null; P.state.lowerAsk = null; RX.call("drawer", "refresh", true);
   setTimeout(() => { const i = document.getElementById("rxFixN"); if(i){ try{ i.focus(); i.select(); }catch(_){} } }, 30); });
-RX.registerAct("fix-cancel", () => { P.state.fixing = null; P.state.fixErr = ""; P.state.recvAsk = null; RX.call("drawer", "refresh", true); });
+RX.registerAct("fix-cancel", () => { P.state.fixing = null; P.state.fixErr = ""; P.state.recvAsk = null; P.state.lowerAsk = null; RX.call("drawer", "refresh", true); });
+/* ⭐ PM-3110 (2026-10-23, misuse review (4)): a LOWER count on a scan Finale has is un-receiving — the buyer's job — and the commonest way
+   to get it wrong is typing CASES into a units box (2 meaning 2 cases of 6). So it is never sent on one tap: a card shows what Finale
+   has and what was typed, BOTH in units and cases, and only [Yes — the count is n] sends the buyer the note. ⛔ The best-by row is NOT
+   changed (it used to be set to n at once): if n was a typo the date would have been under-counted with nothing to show for it, and the
+   cohort engine already caps a SKU at what Finale has, so a row left high costs nothing while the buyer looks. */
+function lowerHtml(v, a){
+  const f = v.fields || {}, cq = +f.CaseQty || 0, err = P.state.fixErr;
+  const oldc = (cq > 0 && a.old % cq === 0) ? t("fix_lower_c", {c:fmtN(a.old / cq) + (a.old / cq === 1 ? " case" : " cases"), cq:fmtN(cq)}) : "";
+  const nc = t("fix_lower_units") + (cq > 0 ? t("fix_lower_cases", {c:fmtN(a.n / cq), cq:fmtN(cq)}) : "");
+  const hint = (cq > 1 && a.n < cq) ? `<div class="rx-note rx-red" role="status">${esc(t("fix_lower_hint", {n:fmtN(a.n), u:fmtN(a.n * cq)}))}</div>` : "";
+  return `<div class="rx-fix rx-lower" data-iid="${esc(v.iid)}"><strong>${esc(t("fix_lower_h", {d:fmtN(a.old - a.n)}))}</strong>
+    <div class="hint">${esc(nameOf(f.Sku))}${f.BestBy ? " · bb " + esc(f.BestBy) : ""}${f.Location ? " · " + esc(f.Location) : ""}</div>
+    <div class="hint">${esc(t("fix_lower_body", {old:fmtN(a.old), oldc, n:fmtN(a.n), nc, d:fmtN(a.old - a.n)}))}</div>
+    ${hint}
+    <button type="button" class="rx-btn primary" data-act="fix-lower" data-iid="${esc(v.iid)}">${esc(t("fix_lower_yes", {n:fmtN(a.n)}))}</button>
+    <button type="button" class="rx-btn" data-act="fix-lower-back" data-iid="${esc(v.iid)}">${esc(t("recv_back"))}</button>
+    ${err ? `<div class="rx-note rx-red" role="alert">${esc(err)}</div>` : ""}</div>`;
+}
+RX.registerAct("fix-lower-back", () => { P.state.lowerAsk = null; P.state.fixErr = ""; RX.call("drawer", "refresh", true); });
+RX.registerAct("fix-lower", ({el}) => { const iid = el.dataset.iid;
+  const a = P.state.lowerAsk; if(!a || a.iid !== iid) return;
+  return run(iid, async () => {
+    const v = findV(iid); const fs = ((v && v.fin) || {}).FinState || "";
+    /* ⛔ re-checked at the tap: the scan moved (the poster, another tablet) ⇒ nothing is sent and the card closes */
+    if(!v || fs !== a.fs || (v.fields || {}).State === "cancelled" || (fs === "posted" ? unitsIn(v) : (+(v.fields || {}).Units || 0)) !== a.old){
+      P.state.lowerAsk = null; P.state.fixErr = t("pb_changed"); return; }
+    P.state.lowerAsk = null; P.state.fixing = null; P.state.fixErr = "";
+    if(fixRowsFor(iid).some(x => +x.FixUnits === a.n)){ say(iid, t("fix_already_sent", {n:String(a.n)})); return; }
+    tellBuyer(v, `crew: the count is ${a.n}, not ${a.old} — correct Finale by ${a.n - a.old}`, a.n);
+    say(iid, t("fix_lower_done", {n:fmtN(a.n)}));
+  });
+});
 RX.registerAct("fix-recv-back", () => { P.state.recvAsk = null; P.state.fixErr = ""; RX.call("drawer", "refresh", true); });
 /* ⭐ 2026-10-23: RECEIVE THE REST. A higher count on a scan Finale already has is the rest of the PO line, not a correction for the buyer:
    ONE new put-away intent for the difference (same PO, item, best-by, shelf, BB row), which the poster posts under its own rules (within
@@ -584,12 +737,12 @@ RX.registerAct("fix-recv", ({el}) => { const iid = el.dataset.iid;
     if(RX.mode() !== "live"){ P.state.recvAsk = null; P.state.fixErr = t("recv_not_live"); return; }
     if(!poRead()){ P.state.fixErr = t("recv_noread"); return; }
     const f = v.fields || {};
-    const c = caseNow(v), pc = RX.po.putCheck(f.Po, f.Sku, a.d);
+    const c = caseNow(v), pk = posterPick(f, a.d), pc = pk && pk.po === a.po ? pk.pc : null;
     /* ⛔ anything moved since the card was drawn (another tablet, the poster, Finale): NOTHING is written and the card closes — a new card
        in its place would put a different meaning under the same finger (misuse review 2026-10-23 (3)) */
-    if(!pc || c.total !== a.base || pc.have !== a.pc.have || pc.cap !== a.pc.cap || pc.over !== a.pc.over){ P.state.recvAsk = null; P.state.fixErr = pc ? t("recv_changed") : t("recv_noread"); return; }
+    if(!pc || c.total !== a.base || pc.have !== a.pc.have || pc.cap !== a.pc.cap || pc.over !== a.pc.over){ P.state.recvAsk = null; P.state.fixErr = pk ? t("recv_changed") : t("recv_noread"); return; }
     const cq = +f.CaseQty || 0;
-    I.create(replacement(v, {Units:a.d, Cases: cq > 0 ? Math.round(a.d / cq * 100) / 100 : null, QtyKind: (cq > 0 && a.d % cq === 0) ? "full" : "part",
+    I.create(replacement(v, {Po:String(a.po || f.Po), FixBin:"rest-of:" + v.iid, Units:a.d, Cases: cq > 0 ? Math.round(a.d / cq * 100) / 100 : null, QtyKind: (cq > 0 && a.d % cq === 0) ? "full" : "part",
                              ScanAt:RX.iso(), OverConfirmed: !!pc.over, TempConfirmed: !!f.TempConfirmed,
                              DamagedUnits:null, RejectedUnits:null, ShortDated:false, FefoOverride: !!f.FefoOverride,
                              /* ⛔ a NEW receipt by whoever is signed in, put straight on the shelf: never the original scanner, never cart fields
@@ -641,11 +794,19 @@ RX.registerAct("fix-save", ({el}) => { const iid = el.dataset.iid;
     const c = caseNow(v);
     if(n <= c.total){ P.state.fixErr = c.more ? t("recv_case_has", {old:fmtN(c.old), more:fmtN(c.more), total:fmtN(c.total)}) : t("fix_same"); return; }
     const d = n - c.total;
-    const pc = RX.po.putCheck(f.Po, f.Sku, d);
+    const pk = posterPick(f, d), pc = pk && pk.pc;
     if(!pc){ P.state.fixErr = t("recv_noread"); return; }
     /* more than one case past what is expected (a typo, 99999, cases typed as units) must be typed twice — derived, never a fixed cap */
     const cq = +f.CaseQty || 0, over = Math.max(0, pc.n - pc.cap);
-    P.state.recvAsk = {iid, n, old, base: c.total, d, pc, big: pc.over && over > (cq > 0 ? cq : Math.max(1, pc.cap))}; P.state.fixErr = ""; P.state.draft = null;
+    P.state.recvAsk = {iid, n, old, base: c.total, d, pc, po: pk.po, k: pk.k, big: pc.over && over > (cq > 0 ? cq : Math.max(1, pc.cap))}; P.state.fixErr = ""; P.state.draft = null;
+    return;
+  }else if(IN_FINALE.has(fs) && n < old){
+    /* ⭐ PM-3110: a LOWER count on a scan in Finale asks first (units AND cases) — nothing is written here, the BB row is left alone */
+    /* ⛔ review (2): the box is "Units in this CASE"; with units received later onto it the case is old + more, and a note for this scan
+       alone would leave the later units in Finale — so the later record is removed first (it has its own Fix) */
+    if(fs === "posted"){ const c = caseNow(v); if(c.more > 0){ P.state.fixErr = t("fix_lower_case", {old:fmtN(c.old), more:fmtN(c.more), total:fmtN(c.total)}); return; } }
+    if(fixRowsFor(iid).some(x => +x.FixUnits === n)){ P.state.fixing = null; P.state.fixErr = ""; say(iid, t("fix_already_sent", {n:String(n)})); return; }
+    P.state.lowerAsk = {iid, n, old, fs}; P.state.fixErr = ""; P.state.draft = null;
     return;
   }else{
     /* ⭐ 2026-10-23 (crew: "it does not save the new 12 count when I press save count"): on a scan already in Finale the tablet sends the
@@ -663,20 +824,37 @@ RX.registerAct("fix-save", ({el}) => { const iid = el.dataset.iid;
   P.state.fixing = null; P.state.fixErr = "";
   say(iid, (fs && !reeval) ? t("fix_saved_finale") : t("fix_saved"));
 }); });
+/* ⭐ PM-3109 (2026-10-23, misuse review (8)): the units received LATER onto this same case through Fix ("receive the rest" — same BB row,
+   its own root, scanned after this one), not already flagged "scanned twice" to the buyer. "Scanned twice" on the original while such a
+   record is live used to tell the buyer to take the ORIGINAL off while the +N still posted, and never mentioned it. */
+const atMs = (x) => { const m = Date.parse(((x && x.fields) || {}).ScanAt); return isNaN(m) ? 0 : m; };
+function laterRest(v){
+  const id = String((v.fields || {}).BbItemId || "");
+  return partners(v).filter(x => (((x.fields || {}).Kind) || "intent") === "intent" && !flaggedTwice(x)
+    && (restLink(x) === v.iid                                   // marked (since 2026-10-23 PM)
+        || (id && String((x.fields || {}).BbItemId || "") === id && rootOf(x) !== rootOf(v) && atMs(x) > atMs(v) && !restLink(x))));   // the two made before the mark
+}
+function restRefusal(v){
+  const r = laterRest(v); if(!r.length) return "";
+  const x = r[0], more = r.reduce((s0, y) => s0 + unitsIn(y), 0), fsx = (x.fin || {}).FinState || "";
+  return t("fix_twice_rest", {more:fmtN(more), when: ageText((x.fields || {}).ScanAt) + " ago", fin: IN_FINALE.has(fsx) ? t("fix_twice_rest_fin") : ""});
+}
 RX.registerAct("fix-twice", ({el}) => { const iid = el.dataset.iid;
   const v0 = findV(iid); if(!v0) return;
   const f0 = v0.fields || {};
+  const no0 = restRefusal(v0); if(no0){ P.state.fixErr = no0; RX.call("drawer", "refresh", true); return; }      // ⛔ before the dialog
   if(!window.confirm(t("fix_rm_q", {name:nameOf(f0.Sku), units:String(f0.Units ?? "?"), bb:f0.BestBy || "none"}))) return;
   return run(iid, async () => {
     const v = findV(iid); if(!v){ P.state.fixErr = t("pb_changed"); return; }
     const f = v.fields || {}, fs = (v.fin || {}).FinState || "";
+    const no = restRefusal(v); if(no){ P.state.fixErr = no; return; }
     if(!WITHDRAWABLE.has(fs)){                               // in Finale, or on its way there: never cancelled from the tablet
+      const plan = bbPlan(v);                                // PM-3108: decided before the note (the note marks this scan "scanned twice")
       tellBuyer(v, `crew: scanned twice — take ${+f.Units || 0} off in Finale`, 0);
-      const shared = bbShared(v);
-      const b = shared ? {ok:true} : await bb(v, {del:true});
+      const b = await bbApply(v, plan);
       if(!b.ok){ P.state.fixErr = t("pb_bb_failed", {why:b.why}); return; }
       P.state.fixing = null; P.state.fixErr = "";
-      say(iid, t("fix_rm_finale", {n: +f.Units || 0})); return;
+      say(iid, b.kept ? t("fix_rm_finale_noread", {n: +f.Units || 0}) : (b.lowered != null ? t("fix_rm_finale_lower", {n:fmtN(b.lowered), d:fmtN(+f.Units || 0)}) : t("fix_rm_finale", {n: +f.Units || 0}))); return;
     }
     const out = await removeScan(v, fs);
     if(!out.ok){ P.state.fixErr = out.msg; return; }
