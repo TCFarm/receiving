@@ -76,7 +76,9 @@ S.state = { asking:null, err:"", msg:{}, busy:new Set() };
    {by, at, edit_id, skus, crew_intent_ids} or null, and `sources.closeouts.error` when the close-out log could not be read.
      closed  — `closed_out` set:  a line whose SKU is in `skus`, or whose short record id is in `crew_intent_ids`, is LOCKED: no record,
                no Undo, no fix-up; the line says who closed it out and to tell the buyer.
-     unknown — `sources.closeouts` missing (an older pack) or its `error` set, or a PO with no `closed_out` key: null is NOT "open";
+     lock_all — `closed_out.lock_all` (a close-out QBO recorded with no shorts): EVERY crew short on the PO is final, named or not.
+     unknown — `closed_out.unknown` (the pack could not tell for THIS PO; it carries lock_all): every short write on the PO is refused.
+     unknown — `sources.closeouts` missing (an older pack), its `error` or `qbo_error` set, or a PO with no `closed_out` key: null is NOT "open";
                an EXISTING short is left alone — Undo, fix-up and re-record are refused with a warning; a line with no short may still
                record one (the card warns that the close-out could not be checked).
      open    — `closed_out` null and no error.
@@ -84,17 +86,28 @@ S.state = { asking:null, err:"", msg:{}, busy:new Set() };
 function coState(poId){
   const d = RX.pack.data; const po = d && RX.pack.poById ? RX.pack.poById(poId) : null;
   const src = d && d.sources && d.sources.closeouts;
-  if(!po || !src || src.error || !Object.prototype.hasOwnProperty.call(po, "closed_out")) return {state:"unknown"};
-  return po.closed_out ? {state:"closed", co:po.closed_out} : {state:"open"};
+  if(!po || !src || !Object.prototype.hasOwnProperty.call(po, "closed_out")) return {state:"unknown"};      // an older pack, a PO without the key
+  const co = po.closed_out;
+  /* null = "not closed out" ONLY when both sources were read; with the portal log (`error`) or QBO-Tools' records (`qbo_error`) unreadable,
+     a null is "can't tell". ⛔ A NON-null answer the pack still reached is honoured even then (review 2026-10-24 (1): QBO can still say
+     "closed, these lines" when only the log failed, and the builder marks POs it cannot tell as {unknown, lock_all}) */
+  if(!co) return (src.error || src.qbo_error) ? {state:"unknown"} : {state:"open"};
+  /* ⭐ 2026-10-24 (pack follow-up): THIS PO cannot be told — {unknown:true, error, lock_all:true, skus:[every line]} */
+  if(co.unknown) return {state:"unknown", co, lockAll: co.lock_all !== false};
+  /* closed out; `lock_all` (e.g. a QBO close-out record with no shorts) = every crew short on the PO is final */
+  return {state:"closed", co, lockAll: !!co.lock_all};
 }
 S.coState = coState;
 /* -> "" (free to change) | the words that refuse the change */
 function locked(poId, sku, recs){
   const c = coState(poId);
-  if(c.state === "unknown") return (recs || []).length ? t("sh_co_unknown") : "";   // an existing short is left alone; a first one may be recorded
+  if(c.state === "unknown"){
+    if(c.lockAll) return t("sh_co_unknown");                              // the pack says THIS PO cannot be told: every short is locked
+    return (recs || []).length ? t("sh_co_unknown") : "";                 // source-wide unknown: an existing short is left alone; a first may be recorded
+  }
   if(c.state !== "closed") return "";
   const co = c.co || {}, skus = (co.skus || []).map(String), ids = (co.crew_intent_ids || []).map(String);
-  const hit = skus.indexOf(String(sku)) >= 0 || (recs || []).some(x => ids.indexOf(String(x.iid)) >= 0);
+  const hit = c.lockAll || skus.indexOf(String(sku)) >= 0 || (recs || []).some(x => ids.indexOf(String(x.iid)) >= 0);
   return hit ? t("sh_closed_no", {who: short_(co.by) || "the buyer", when: whenText(co.at || "")}) : "";
 }
 S.locked = (poId, sku) => locked(poId, sku, records(poId, sku));
