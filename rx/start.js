@@ -200,7 +200,7 @@ RX.registerAct("hdr-staged", () => { if(!RX.hasStep("tray")) return; if(RX.setFl
    nothing. It now opens the explanation IN the banner (what the mini last reported, what is waiting, what to do) and returns "stop" so
    the refocus never runs. A second tap closes it. */
 const DET_COPY = {
-  pdet_last:    "The Mac mini that sends scans to Finale last reported {ago} ago (it normally reports every 5 minutes; a long posting run can stretch that).",
+  pdet_last:    "The Mac mini that sends scans to Finale last reported {ago} ago (it normally reports every 6–7 minutes, at most about 9 when it is posting; this shows after 12).",
   pdet_wait:    "Waiting to go into Finale: {n} scan(s){oldest}.",
   pdet_oldest:  ", oldest {ago}",
   pdet_none:    "Nothing was waiting at that report — every scan it had seen was in Finale.",
