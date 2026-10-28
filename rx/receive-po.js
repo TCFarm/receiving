@@ -134,6 +134,23 @@ PO.classify = function(p, qty){
   const status = after > c.ordered ? "over" : (after === c.ordered ? "complete" : "ok");
   return {status, k:fmt(k), n:fmt(n), unit:cases ? "cases" : "units", over:fmt(k - n), match:m};
 };
+/* ⭐ PM-3297 (Jack, 2026-10-28: "how many cases / qty of that item is expected in total and how many have been received already?"):
+   the line's progress BEFORE this case, for the date screen and the best-by-only quantity card. Same counts as PO.classify — never a
+   second way of counting. Not on a pack PO, or no pack ⇒ "" (nothing shown; the put-away flows say "not on a PO" themselves). */
+PO.progressHtml = function(p){
+  try{
+    if(!RX.active()) return "";
+    const m = PO.matchFor(p); if(!m || m.status === "notpo" || !m.line) return "";
+    const c = m.counts, upc = upcOf(m.line), cases = upc > 0, unit = cases ? "cases" : "units";
+    const q = (x) => fmt(cases ? x / upc : x);
+    const left = c.ordered - c.total;
+    const tail = left > 0 ? t("prog_left", {l:q(left), unit}) : (left === 0 ? t("prog_done") : t("prog_over", {o:q(-left), unit}));
+    const col = left > 0 ? "var(--line)" : (left === 0 ? "var(--go)" : "var(--wait)");
+    const two = PO.pos().filter(po => PO.line(po, p.prod.sku)).length > 1 ? ` <span class="hint" style="display:inline">PO ${RX.esc(m.po.order_id)}</span>` : "";
+    return `<span id="rxProgress" class="rx-progress" data-left="${RX.esc(String(left))}" style="display:block;margin:0 0 9px;padding:8px 12px;border-left:5px solid ${col};background:var(--card);font-size:14px">`
+      + `${RX.esc(t("prog", {k:q(c.total), n:q(c.ordered), unit}))} — <strong>${RX.esc(tail)}</strong>${two}</span>`;
+  }catch(_){ return ""; }
+};
 PO.caseQty = function(p){
   const sku = p.prod.sku, found = {};
   let sess = 0; try{ sess = packs[sku]; }catch(_){}
