@@ -231,6 +231,7 @@
 <script src="rx/short.js"></script>
 <script src="rx/version.js"></script>
 <script src="rx/lotdate.js"></script>
+<script src="rx/feedback.js"></script>
 <script>
 "use strict";
 /* ============================================================================
@@ -645,6 +646,8 @@ function rebuildSkuIndex(){
     const v = CATALOG[k];
     if(v && v.sku && !(v.sku in CATALOG_BY_SKU)) CATALOG_BY_SKU[v.sku] = v;
   }
+  /* PM-3314: a product whose only barcode is shared lives only inside another key's `alt` — it must still be findable by SKU */
+  for(const k in CATALOG){ const v = CATALOG[k]; if(v && Array.isArray(v.alt)) for(const a of v.alt) if(a && a.sku && !(a.sku in CATALOG_BY_SKU)) CATALOG_BY_SKU[a.sku] = Object.assign({}, a, {altOnly: true}); }
   /* ⭐ PM-2919: barcodes the crew LEARNED on any tablet (rx/learn.js) are folded back in after every catalog load */
   if(window.RXLearn) try{ RXLearn.apply(); }catch(_){}
 }
@@ -822,6 +825,7 @@ async function handleScan(raw){
       return askDate();
     }
   }
+  if(pending && $("promptArea").querySelector(".prompt") && !takesDate && lotRoute(v)) return;
   if(pending && $("promptArea").querySelector(".prompt") && !takesDate){
     noteDropped(v, "BUSY");
     showBurstRefusal(v);
@@ -833,7 +837,12 @@ async function handleScan(raw){
      product — often a different carton — was paired with the case for good
      (`10099999999997 -> RDair0761OgV`, reproduced 2026-09-22). Take it here, before
      any branch can return; only the resolved-product path below may USE it. */
-  const armedUnit = unitScanFor;
+  /* ⛔ review 7 (2026-10-28): while "which product is in the box?" is open, the next scan is the NEXT carton — refused and recorded,
+     never a silent replacement of the question. The pick itself re-runs the same code (dupChoice) and passes. */
+  if(dupOpen && $("dupList") && !(dupChoice && dupChoice.raw === v)){ noteDropped(v, "BUSY"); showBurstRefusal(v); return; }
+  if(dupOpen && !$("dupList")) dupOpen = null;
+  /* the re-run after a pick gets back the unit scan the question held (review 7) */
+  const armedUnit = (dupChoice && dupChoice.raw === v && dupChoice.unit) ? dupChoice.unit : unitScanFor;
   if(unitScanFor){ unitScanFor = null; renderArmed(); }
 
   /* ⭐ A location label sets WHERE we are counting — it is never a product.
@@ -956,7 +965,10 @@ async function handleScan(raw){
      CATALOG[<derived consumer upc>]. Every alias the receipt ledger had taught
      was unreachable, so the whole learning loop was inert (86 of them). */
   const rawDigits = v.replace(/\D/g,"");
-  const look = () => CATALOG[upc] || (gtin ? CATALOG[gtin] : null) || CATALOG[rawDigits] || null;
+  /* ⭐ PM-3303: a crew wrong-item fix is stored under the code AS SCANNED and beats the UPC derived from it — otherwise a fixed case
+     code would still open the old product through its consumer UPC */
+  const fixed = (c) => (c && CATALOG[c] && CATALOG[c].reassigned) ? CATALOG[c] : null;
+  const look = () => fixed(gtin) || fixed(rawDigits) || CATALOG[upc] || (gtin ? CATALOG[gtin] : null) || CATALOG[rawDigits] || null;
   let prod = look();
   /* ⭐ KEEP IT CURRENT AT THE POINT OF FAILURE (Jack, 2026-08-18). The catalog is
      rebuilt on a schedule, but "we added it in BigCommerce ten minutes ago" is
@@ -1076,6 +1088,27 @@ async function handleScan(raw){
      guidance, the code-collection hint, the Finale instruction and the
      identification options — all moved onto `askDate`, which now runs first. */
 
+  /* ⭐⭐ PM-3314 (Jack, 2026-10-28): ONE BARCODE, TWO LIVE PRODUCTS. "we need to prioritize selecting the one that is on the purchase
+     order … it should prompt and say this UPC code matches two items, which one should it be? And then we could say, should it always be
+     this item?" The catalog carries every other live product on the barcode as `alt`.
+       • exactly one of them is on an open PO (receiving) → that one, said on the next screen;
+       • otherwise → ask which is in the box (the PO's ones marked), with "Always this product for this barcode".
+     ⛔ Nothing is guessed: no PO match and no answer means no receipt. A crew-settled barcode (`reassigned`) is never asked. */
+  let dupInfo = null;
+  if(prod && Array.isArray(prod.alt) && prod.alt.length && !prod.reassigned){
+    const all = [prod].concat(prod.alt.map(a => Object.assign({}, a, CATALOG_BY_SKU[a.sku] || {}))).filter(x => x && x.sku);
+    const ch = (dupChoice && dupChoice.raw === v && Date.now() - dupChoice.t < 180000) ? dupChoice : null;
+    dupChoice = null;
+    const picked = ch ? all.find(x => x.sku === ch.sku) : null;
+    /* ⛔ review 8: "on this order" = an open order line STILL WAITING for units (RX.po.matchFor: the earliest PO with some left), never a
+       line already fully received or merely present */
+    const onPo = (!isAudit() && window.RX && RX.po && RX.po.matchFor)
+      ? all.filter(x => { try{ const m = RX.po.matchFor(x.sku); return !!(m && m.status === "ok"); }catch(_){ return false; } }) : [];
+    if(picked){ dupInfo = {all, primary: prod.sku, how: "picked", always: !!ch.always}; prod = picked; }
+    else if(onPo.length === 1){ dupInfo = {all, primary: prod.sku, how: "po"}; prod = onPo[0]; }
+    else { dupOpen = {raw: v, unit: armedUnit || null}; return askDup(v, all, onPo); }
+  }
+
   /* source answers "how often did the label do the work for us?" without
      anyone tallying it (Jack, 2026-08-13):
        gs1              → date came encoded in the barcode, zero typing
@@ -1166,9 +1199,33 @@ async function handleScan(raw){
               `fromHeld` forces one confirmation step; `heldRaw` keeps the exact
               string that was scanned so the pairing can be re-examined later. */
            fromHeld: !!fromHeld, heldRaw: fromHeld || "",
-           source: (isAudit()? "audit_" : "") + how};
+           source: (isAudit()? "audit_" : "") + how, dup: dupInfo};
+  /* PM-3314: "Always this product for this barcode" — the same three-tick check as Wrong item, then the barcode is settled everywhere */
+  if(dupInfo && dupInfo.always && window.RXLearn && RXLearn.alwaysThis) return RXLearn.alwaysThis();
   next();
 }
+
+/* ⭐ PM-3314: which of the products on this barcode is in the box? */
+let dupChoice = null, dupOpen = null;
+function askDup(raw, all, onPo){
+  const po = new Set(onPo.map(x => x.sku));
+  const size = (n) => { const m = /\s-\s([^-]*\d[^-]*)$/.exec(String(n || "")); return m ? m[1].trim() : ""; };
+  prompt_("", `This barcode is on ${all.length} products — which is in the box?`,
+    `Look at the case and pick the one in your hand.${onPo.length > 1 ? " Two of them are on an open order." : ""}`,
+    `<div id="dupList">${all.map(x => `<button class="dupPick" data-act="dup-pick" data-sku="${esc(x.sku)}" data-raw="${esc(raw)}"
+        style="display:block;width:100%;text-align:left;margin:0 0 8px;padding:11px 13px">
+        ${x.br ? `<span style="color:var(--ink-2)">${esc(x.br)}</span> ` : ""}<strong>${esc(x.name || x.sku)}</strong>
+        <div class="num" style="font-size:12px;color:var(--ink-3);margin-top:2px">${esc(x.sku)} · size <strong>${esc(size(x.name) || "?")}</strong>${po.has(x.sku) ? ` · <strong style="color:var(--go)">on this order</strong>` : ""}</div>
+      </button>`).join("")}</div>
+     <label style="display:flex;gap:10px;align-items:center;margin:8px 0;font-size:16px">
+       <input type="checkbox" id="dupAlways" style="width:24px;height:24px"> Always this product for this barcode (you open the case and confirm)</label>`);
+}
+if(window.RX && RX.registerAct) RX.registerAct("dup-pick", (a) => {
+  const b = a.el, al = $("dupAlways");
+  dupChoice = {raw: b.getAttribute("data-raw"), sku: b.getAttribute("data-sku"), t: Date.now(), always: !!(al && al.checked),
+               unit: dupOpen && dupOpen.raw === b.getAttribute("data-raw") ? dupOpen.unit : null};
+  dupOpen = null; clearPrompt(); handleScan(dupChoice.raw); return "stop";
+});
 
 /* ⭐ ONE chain, so every branch ends up in the same place. Each step either
    asks a question and returns, or falls through to the next. The click handlers
@@ -1436,11 +1493,20 @@ function askDate(){
        <button class="primary" id="dok">Save</button>
      </div>
      <div id="bbRead" class="bbread" aria-live="polite"></div>
+     ${(!isAudit() && !unnamed) ? `<div id="lotRow" style="margin-top:11px">
+       <button id="lotScanBtn">Scan lot code</button>
+       <span class="hint" style="display:inline;margin-left:9px">the barcode with the lot number — the tablet reads the best-by from it</span>
+       <div id="lotScanBox" hidden style="margin-top:9px">
+         <input id="lotIn" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false"
+                placeholder="Scan the lot barcode now" aria-label="Scan the lot barcode">
+         <div id="lotMsg" aria-live="polite" style="margin-top:8px"></div>
+       </div>
+     </div>` : ""}
      <div style="margin-top:11px">
        ${noDateBtn()}
        <span class="hint" style="display:inline;margin-left:9px">
          soap, paper goods, cleaning supplies — many carry none</span>
-     </div>` +
+     </div>` + (window.RXLearn && RXLearn.wrongBtn ? RXLearn.wrongBtn() : "") +   /* PM-3303: the scan matched the wrong product */
     (unnamed && pending.known
       ? `<div style="margin-top:13px"><button id="pendSkip">Skip this carton</button></div>`
       : unnamed
@@ -1497,7 +1563,105 @@ function askDate(){
       el.addEventListener("keydown",e=>{ if(e.key==="Enter") $("dok").click(); });
       el.addEventListener("input",()=>{ if(pick) pick.value=""; readBack(); }); }
     if(pick) pick.addEventListener("change",()=>{ if(rb) rb.innerHTML = pick.value ? yearFirst(pick.value) : ""; if(el) el.value=""; $("dok").click(); });
+    const lb=$("lotScanBtn"), li=$("lotIn");
+    if(lb) lb.addEventListener("click",()=>{ const bx=$("lotScanBox"); if(bx) bx.hidden=false; if(li){ li.value=""; li.focus(); } });
+    /* ⛔ misuse review 6: a person TYPING (a date, usually) into the lot box is told where it goes — a scanner's characters arrive a
+       few ms apart, a person's 100 ms+ */
+    let lotT = [];
+    if(li) li.addEventListener("input",()=>{ lotT.push(performance.now()); });
+    if(li) li.addEventListener("keydown",e=>{ if(e.key==="Enter"){ e.preventDefault(); e.stopPropagation(); const v=li.value; li.value="";
+      const gaps = lotT.slice(1).map((t,i)=>t-lotT[i]).sort((a,b)=>a-b); lotT = [];
+      if(gaps.length >= 2 && gaps[Math.floor(gaps.length/2)] > 60) return lotScanned(v, {typed:true});
+      lotScanned(v); } });
   },30);
+}
+
+/* ⭐⭐ PM-3304 (Jack, 2026-10-28): "a lot of these boxes just have the GTIN-14 code and a barcode for the lot number … choose a field to
+   say scan a lot code in order to scan the best by date instead of typing it … have it confirm, is this the correct date? Click yes or no."
+   The lot barcode is read as a LOT (never as a new product), decoded with this supplier's learned format (rx/lotdate.js), and the date is
+   ASKED, never entered: Yes saves it (`+lotsuggest+lotscan`), No asks for the printed date, which teaches the format (`+lotscan`).
+   ⛔ A product barcode scanned here is refused (it is not a lot). ⛔ A lot that disagrees with the lot already read off this case's
+   label is refused (it belongs to another case). ⛔ A dated GS1 barcode is handed to the ordinary dated-barcode path. */
+/* ⭐ misuse review 9: a lot barcode scanned while the date screen is open, WITHOUT pressing "Scan lot code", is the lot — not "busy" */
+function lotRoute(v){
+  try{
+    if(!pending || pending.best || !$("lotRow") || upcCandidate(v)) return false;
+    /* ⛔ an all-digit 8-digit code can be an EAN-8 PRODUCT barcode (the next carton) — only a code with a letter, or 4-7 digits, is
+       taken as a lot here; anything else is still refused as "finish this item first" (round-3 regression, 2026-10-28) */
+    const vv = String(v || "").trim();
+    if(/^\d+$/.test(vv) && !(vv.length >= 4 && vv.length <= 7)) return false;
+    const r = lotFromScan(v); if(!r.lot) return false;
+    const bx = $("lotScanBox"); if(bx) bx.hidden = false;
+    lotScanned(v); return true;
+  }catch(_){ return false; }
+}
+function lotFromScan(v){
+  const s = String(v||"").trim();
+  if(!s) return {err:"empty"};
+  /* ⛔ a plain lot ("280508TV") also "looks like" an element string to the GS1 reader — only a code that STARTS with a product (01/02)
+     AI, a symbology prefix, brackets or a separator is read as GS1 here — a bare "10…", "15…" or "17…" is kept whole (review 7: a real lot
+     can start with those digits) */
+  if(looksLikeElementString(s) && /^(\]C1|\]d2|\]Q3|\(|\x1d|0[12]\d{14})/.test(s)){
+    if(dateScanFor(s)) return {gs1:s};
+    const a = parseElementString(s), l = String(a["10"]||"").trim();
+    /* ⛔ misuse review 5: a GS1 label of ANOTHER product is never this case's lot */
+    const g = String(a["01"]||a["02"]||"").replace(/\D/g,"");
+    if(g && pending && !((pending.gtin && g === String(pending.gtin).replace(/\D/g,"")) || (pending.upc && gtin14ToConsumer(g) === pending.upc)))
+      return {err:"other"};
+    return l ? {lot:l} : {err:"product"};
+  }
+  const d = s.replace(/\D/g,"");
+  /* review 12: a product barcode is one the CATALOG knows (an all-digit lot passes a check digit 1 time in 10) */
+  if(CATALOG[s] || (/^\d{12,14}$/.test(s) && (CATALOG[d] || (d.length === 14 && CATALOG[gtin14ToConsumer(d)]))))
+    return {err:"product"};
+  if(s.length < 3 || s.length > 40 || !/\d/.test(s)) return {err:"notlot"};
+  return {lot:s};
+}
+function lotScanned(v, how){
+  const msg = $("lotMsg"); if(!pending || !msg) return;
+  const say = (h) => { msg.innerHTML = h; };
+  const r = (how && how.typed) ? {err:"typed"} : lotFromScan(v);
+  if(r.gs1){ handleScan(r.gs1); return; }
+  if(r.err === "product") return say(`<strong>That is a product barcode, not the lot.</strong> Scan the barcode that shows the lot number.`);
+  if(r.err === "other") return say(`<strong>That barcode is a different product</strong>, not this case's lot. Scan the lot on THIS case.`);
+  if(r.err === "typed") return say(`<strong>This box is for SCANNING the lot barcode.</strong> Type the date in the date box above instead.`);
+  if(r.err) return say(`<strong>That did not read as a lot number.</strong> Scan the lot barcode again, or type the date above.`);
+  if(pending.lot && !pending.splitDate && String(pending.lot).trim() !== r.lot)
+    return say(`<strong>That lot (<span class="num">${esc(r.lot)}</span>) is not the one on this case's label
+               (<span class="num">${esc(pending.lot)}</span>).</strong> Scan the lot on THIS case.`);
+  pending.lot = r.lot; pending.lotScanned = true;
+  /* review 5/8: a guess made BEFORE this lot was known (the label's lot guess, the last case of a different lot) is withdrawn, and the
+     date box emptied, so Save can never keep it as if typed */
+  if(pending.suggest && (pending.suggest.tag === "lotsuggest" ||
+     (pending.suggest.tag === "lastcase" && !(window.LotDate && LotDate.lastCase(pending.prod.sku, rows, r.lot))))) pending.suggest = null;
+  { const tb = $("typed"); if(tb && !pending.suggest) tb.value = ""; const rb = $("bbRead"); if(rb && !pending.suggest) rb.innerHTML = ""; }
+  const sn = $("sugNote"); if(sn && !pending.suggest) sn.remove();
+  const ld = window.LotDate ? LotDate.forLot({brand: pending.prod.br || "", lot: r.lot}, rows) : null;
+  const toType = () => { const el=$("typed"); if(el){ el.value=""; el.focus(); } const rb=$("bbRead"); if(rb) rb.innerHTML=""; };
+  if(!ld || !isRealDate(ld.date) || !plausibleBB(ld.date)){
+    toType();
+    return say(`Lot <span class="num">${esc(r.lot)}</span> saved with this case. We don't know this supplier's lot code yet —
+               <strong>type the date printed on the case</strong> once, and the tablet learns to read it.`);
+  }
+  say(`<div id="lotAsk">Lot <span class="num">${esc(r.lot)}</span> — is the best-by
+         <span class="bbread" style="display:block">${yearFirst(ld.date)}</span>
+         <button class="primary" id="lotYes" data-date="${esc(ld.date)}">Yes</button>
+         <button id="lotNo">No</button></div>`);
+  $("lotYes").addEventListener("click", ()=>{
+    if(!pending) return;
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ld.date);
+    pending.suggest = {date: ld.date, tag: "lotsuggest", why: ld.why};
+    const pk=$("pick"); if(pk) pk.value="";
+    const el=$("typed"); if(el && m) el.value = m[2]+m[3]+m[1].slice(2);
+    const ok=$("dok"); if(ok) ok.click();
+  });
+  $("lotNo").addEventListener("click", ()=>{
+    if(!pending) return;
+    pending.suggest = null; toType();
+    say(`Lot <span class="num">${esc(r.lot)}</span> saved with this case. <strong>Type the date printed on the case</strong> — the
+         tablet learns this supplier's lot code from it.`);
+  });
+  const y=$("lotYes"); if(y) y.focus();
 }
 
 /* ⭐ B4: the pairing question for an unknown CASE whose label already gave the
@@ -1587,7 +1751,7 @@ function askQty(){
               value="${dflt ?? ""}" placeholder="e.g. 12" aria-label="Quantity">
        <button class="primary" id="qok" data-act="qty-save">Save</button>
        <button id="qskip" data-act="qty-dontknow">Don&rsquo;t know</button>
-     </div>` + rxq.after);
+     </div>` + rxq.after + (window.RXLearn && RXLearn.wrongBtn ? RXLearn.wrongBtn() : ""));   /* PM-3303 */
   setTimeout(()=>{
     const el=$("qty");
     if(el){ el.focus(); el.select();
@@ -3225,6 +3389,8 @@ document.addEventListener("click",e=>{
        measured); a changed date is an ordinary keyed date. Re-decided on every Save, so a "Fix it" retype cannot keep a stale mark. */
     pending.source = String(pending.source||"").replace(/\+(lotsuggest|lastcase|datelabel)/g, "");
     if(pending.suggest && !pending.splitDate && !picked && d === pending.suggest.date) pending.source += "+" + pending.suggest.tag;
+    /* ⭐ PM-3304: the lot came from a scanned lot barcode — the nightly learner takes it as evidence whatever the case code was */
+    if(pending.lotScanned && pending.lot && !/\+lotscan/.test(pending.source)) pending.source += "+lotscan";
     pending.best=d; delete pending.dateConfirmed;
     /* ⭐ PM-2797: ask "is this date correct?" the moment it is keyed, while the package is still in the operator's hand
        (commit() re-checks as the last gate for any date that arrives another way, e.g. a GS1 label). */
@@ -3432,7 +3598,7 @@ function showBurstRefusal(code){
 }
 document.addEventListener("keydown", e=>{
   const area = $("promptArea");
-  if(!area || !area.innerHTML || e.target === $("scan")){ kRun = null; return; }
+  if(!area || !area.innerHTML || e.target === $("scan") || e.target === $("lotIn") || e.target === $("rxFbText")){ kRun = null; return; }   /* PM-3304: the lot box takes scans */
   const now = performance.now();
   const printable = typeof e.key === "string" && e.key.length === 1
                     && !e.ctrlKey && !e.metaKey && !e.altKey;
@@ -3456,6 +3622,7 @@ document.addEventListener("keydown", e=>{
         const code = kRun.chars; kRun = null; const m = $("burstMsg"); if(m) m.remove();
         handleScan(code); return;
       }
+      if(e.key === "Enter" && lotRoute(kRun.chars)){ kRun = null; const m = $("burstMsg"); if(m) m.remove(); return; }   // misuse review 9
       showBurstRefusal(kRun.chars);
     }
     return;
@@ -3484,7 +3651,8 @@ $("scan").addEventListener("keydown",e=>{
   if(e.key==="Enter"){ e.preventDefault(); const v=$("scan").value; $("scan").value="";
     if(!v.trim() && window.RX && RX.onEmptyEnter()) return;
     handle(v); }});
-document.addEventListener("click",()=>{ if((!$("promptArea").innerHTML || unitScanFor || (window.RX && RX.keepScan())) && $("app").style.display!=="none") $("scan").focus(); });
+document.addEventListener("click",(ev)=>{ if(ev && ev.target && ev.target.closest && ev.target.closest("#rxFb,#rxFbFab")) return;   /* PM-3305: typing feedback */
+  if((!$("promptArea").innerHTML || unitScanFor || (window.RX && RX.keepScan())) && $("app").style.display!=="none") $("scan").focus(); });
 window.addEventListener("beforeunload",e=>{
   if(leavingForSignIn) return;       // ⭐ B9: the sign-in redirect — everything is persisted
   if(rows.some(r=>r.saved!=="saved" || r.fix) || outbox.length || (window.RX && RX.unsentCount())){ e.preventDefault(); e.returnValue=""; }});
