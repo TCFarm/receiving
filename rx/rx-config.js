@@ -93,6 +93,10 @@ const COPY = {
   over:            "{k} of {n} {unit} — {over} more than ordered. Put it away; the buyer sorts out the extra.",
   complete:        "this completes the line ({k} of {n} {unit})",
   makes:           "this makes {k} of {n} {unit}",
+  prog:            "This order: {k} of {n} {unit} scanned in so far",      // PM-3297: before THIS case (misuse review: "scanned", not "received")
+  prog_left:       "{l} to go",
+  prog_done:       "the line is already complete",
+  prog_over:       "already {o} {unit} over",
   no_po:           "Not on the KeHE order. You will be asked to set it aside.",
   no_po_short:     "Not on the KeHE order.",
   poster_down:     "Finale posting is delayed. Your scans are safe — keep going.",
