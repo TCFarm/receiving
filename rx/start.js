@@ -273,6 +273,7 @@ function renderMenu(){
   const m = $("rxMenu");
   m.innerHTML = `<button class="rx-menuitem" role="menuitem" data-act="menu-sounds">${esc(RX.soundOn() ? t("menu_sounds_on") : t("menu_sounds_off"))}</button>
     <button class="rx-menuitem" role="menuitem" data-act="menu-refresh-pack">${esc(t("menu_refresh"))}</button>
+    <button class="rx-menuitem" role="menuitem" data-act="menu-fixes">${esc(t("menu_fixes"))}</button>
     <button class="rx-menuitem" role="menuitem" data-act="menu-signout">${esc(t("menu_signout"))}</button>
     <button class="rx-menuitem" role="menuitem" data-act="menu-close" data-close="3">${esc(t("menu_close"))}</button>`;
 }
@@ -285,6 +286,7 @@ RX.registerAct("hdr-menu", () => { const m = $("rxMenu"); m.hidden = !m.hidden; 
 RX.registerAct("menu-close", () => { $("rxMenu").hidden = true; const sc = $("scan"); if(sc) sc.focus(); return "stop"; });
 RX.registerAct("menu-sounds", () => { RX.setSound(!RX.soundOn()); renderMenu(); });
 RX.registerAct("menu-refresh-pack", () => { $("rxMenu").hidden = true; RX.pack.load({force:true}); });
+RX.registerAct("menu-fixes", () => { $("rxMenu").hidden = true; if(pend()){ U.toast(t("finish_first")); return "stop"; } if(window.RXLearn && RXLearn.showFixes) RXLearn.showFixes(); return "stop"; });   // PM-3306
 RX.registerAct("menu-signout", () => { $("rxMenu").hidden = true; const b = $("signout"); if(b) b.click(); });
 document.addEventListener("click", (e) => { const m = $("rxMenu"); if(m && !m.hidden && !e.target.closest("#rxMenu") && !e.target.closest("#rxMenuBtn")) m.hidden = true; }, true);
 
