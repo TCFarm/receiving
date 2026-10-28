@@ -80,7 +80,7 @@ const COPY_ADD = {
   binpick_none:    "No matching shelf.",
   binpick_used:    "used before",
   some_title:      "How many go on this shelf?",
-  some_hint:       "The rest stays to be put away. You scan the shelf tag next.",
+  some_hint:       "The rest stays to be put away.",
   cancelrest_q:    "Leave {n} units unreceived? They'll show to the buyer as short.",
   cancelrest_yes:  "Yes, leave them",
   cancelcase_q:    "Cancel this case? The best-by is still saved; it just won't go into Finale.",
@@ -122,6 +122,10 @@ const COPY_ADD = {
   hold_ph:         "Hold spot (optional)",
   hold_flash:      "Set aside in the holding area — waiting for purchasing to add it to the PO.",
   shelf_banner:    "Putting away into {bin}",
+  offer_title:     "Put it on {bin}?",
+  offer_line:      "Shelf {bin} was scanned first. Press Enter or the green button to put it there, or scan another shelf tag.",
+  offer_all:       "Put all {n} on {bin}",
+  offer_some:      "Put {n} on {bin}",
   shelf_hint:      "scan a different shelf tag to switch",
   shelf_n:         "{n} cases here",
   shelf_n1:        "{n} case here",
@@ -336,7 +340,7 @@ RX.registerStep("exceptions", {
   applies(ctx){ ctx.p.rx.exc = exceptionFor(ctx.p); return !!ctx.p.rx.exc; },
   start(ctx){
     const e = ctx.p.rx.exc, p = ctx.p;
-    const head = `<strong>${esc(p.prod.name)}</strong><span class="rx-pa-sub">best by ${yf(p.best)}</span>`;
+    const head = `<strong>${esc(p.prod.name)}</strong>${RX.idLine(p.prod.sku)}<span class="rx-pa-sub">best by ${yf(p.best)}</span>`;
     if(e.kind === "short"){
       prompt_("stop", esc(t("short_title", {days: e.days, cls: e.cls, need: e.need})), head + `<span class="rx-pa-sub">${esc(t("short_body"))}</span>`,
         `<div class="rx-pa-btns">${btn("short-keep", t("short_keep"), "primary", "data-primary")}${btn("short-reject", t("short_reject"))}${btn("step-back", t("btn_back_count"), "", 'data-close="3"')}</div>`);
@@ -378,7 +382,7 @@ PA.HOLD_AREA = "Hold: not on PO";
 const holdCtx = () => { const s = RX.state.step; return s && s.name === "nopo" ? s.ctx : null; };
 function renderHold(ctx, notice){
   const p = ctx.p, h = ctx.hold;
-  const body = (notice ? `<span class="rx-pa-note" role="alert">${esc(notice)}</span>` : "") + `<strong>${esc(p.prod.name)}</strong>` +
+  const body = (notice ? `<span class="rx-pa-note" role="alert">${esc(notice)}</span>` : "") + `<strong>${esc(p.prod.name)}</strong>${RX.idLine(p.prod.sku)}` +
     `<span class="rx-pa-sub">${esc(t("hold_hint"))}</span>` +
     `<input id="rxHoldTag" class="rx-pa-search" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="60" placeholder="${esc(t("hold_ph"))}" aria-label="${esc(t("hold_ph"))}" value="${esc(h.tag)}">`;
   prompt_("stop", esc(t("hold_title")), body,
@@ -428,15 +432,19 @@ function poLine(p, d2){
 }
 function renderMain(ctx, d2){
   const p = ctx.p;
-  const title = (d2.portions.length || d2.late) ? t("split_rest", {n: d2.left}) : t("d2_title");
+  const offer0 = d2.offer && !d2.portions.length ? d2.offer : null;
+  const title = (d2.portions.length || d2.late) ? t("split_rest", {n: d2.left}) : (offer0 ? t("offer_title", {bin: offer0}) : t("d2_title"));
   const bb = p.best ? yf(p.best) : "no date";
   const sub = d2.cases > 1 ? t("d2_cases", {n: d2.left, c: d2.cases, bb: "\u0000"}) : t("d2_units", {n: d2.left, bb: "\u0000"});
-  let body = (d2.notice ? `<span class="rx-pa-note" role="alert">${d2.notice}</span>` : "") + `<strong>${esc(p.prod.name)}</strong>` +
+  let body = (d2.notice ? `<span class="rx-pa-note" role="alert">${d2.notice}</span>` : "") + `<strong>${esc(p.prod.name)}</strong>${RX.idLine(p.prod.sku)}` +
              `<span class="rx-pa-sub">${esc(sub).replace("\u0000", bb)}</span>`;
   const pl = d2.late ? "" : poLine(p, d2);
   if(pl) body += `<span class="rx-pa-po">${esc(t("d2_po", {msg: pl}))}</span>`;
   if(d2.pendingN) body += `<span class="rx-pa-sub"><strong>${esc(t("d2_pending_n", {n: d2.pendingN}))}</strong></span>`;
-  const acts = `<div class="rx-pa-btns">${d2.left > 1 ? btn("bin-some", t("btn_some")) : ""}${btn("bin-cant-scan", t("btn_cant"))}` +
+  const offer = d2.offer && !d2.portions.length ? d2.offer : null;
+  if(offer) body += `<span class="rx-pa-sub" id="rxOffer">${esc(t("offer_line", {bin: "\u0000"})).replace("\u0000", `<strong class="num">${esc(offer)}</strong>`)}</span>`;
+  const acts = `<div class="rx-pa-btns">${offer ? btn("bin-offer-yes", d2.pendingN ? t("offer_some", {n: d2.pendingN, bin: offer}) : t("offer_all", {n: d2.left, bin: offer}), "primary", "data-primary") : ""}` +
+    `${d2.left > 1 ? btn("bin-some", t("btn_some")) : ""}${btn("bin-cant-scan", t("btn_cant"))}` +
     ((d2.portions.length || d2.late) ? btn("bin-cancel-rest", t("btn_leave_rest")) : btn("bin-cancel", t("btn_cancel_case"))) +
     btn("shelf-back", t("btn_back_count"), "", 'data-close="3"') + `</div>`;
   prompt_("go", esc(title), body, acts, {keepScan: true});
@@ -477,13 +485,13 @@ function render(ctx, d2){
   const p = ctx.p;
   switch(d2.sub){
     case "some": {
-      prompt_("go", esc(t("some_title")), `<strong>${esc(p.prod.name)}</strong><span class="rx-pa-sub">${esc(t("some_hint"))}</span>
+      prompt_("go", esc(t("some_title")), `<strong>${esc(p.prod.name)}</strong>${RX.idLine(p.prod.sku)}<span class="rx-pa-sub">${esc(t("some_hint"))}</span>
         <input id="rxSomeN" class="num rx-pa-num" type="text" inputmode="numeric" maxlength="4" autocomplete="off" aria-label="${esc(t("some_title"))}" value="${d2.left}">`,
         `<div class="rx-pa-btns">${btn("bin-some-save", t("btn_save"), "primary")}${btn("bin-cancel-back", t("btn_back"), "", 'data-close="3"')}</div>`);
       setTimeout(() => { const el = $("rxSomeN"); if(el){ el.focus(); el.select(); el.onkeydown = (ev) => { if(ev.key === "Enter"){ ev.preventDefault(); const b = document.querySelector('[data-act="bin-some-save"]'); if(b) b.click(); } }; } }, 25);
       break; }
     case "bins": {
-      prompt_("go", esc(t("binpick_title")), `<strong>${esc(p.prod.name)}</strong>
+      prompt_("go", esc(t("binpick_title")), `<strong>${esc(p.prod.name)}</strong>${RX.idLine(p.prod.sku)}
         <input id="rxBinQ" class="rx-pa-search num" data-act="binpick-search" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="${esc(t("binpick_ph"))}" aria-label="${esc(t("binpick_ph"))}">
         <span id="rxBinRes" class="rx-pa-results" style="display:block"></span>`,
         `<div class="rx-pa-btns">${btn("bin-cancel-back", t("btn_back"), "", 'data-close="3"')}</div>`);
@@ -492,11 +500,11 @@ function render(ctx, d2){
       break; }
     case "temp": {
       const info = RX.pack.binInfo(d2.cand.bin), it = itemOf(p, d2);
-      prompt_("stop", esc(t("temp_title")), `<strong>${esc(PA.tempText(it, info))}</strong>`,
+      prompt_("stop", esc(t("temp_title")), `<strong>${esc(PA.tempText(it, info))}</strong>${RX.idLine(p.prod.sku)}`,
         `<div class="rx-pa-btns">${btn("temp-no", t("temp_no"), "primary", "data-primary")}${btn("temp-yes", t("temp_yes"))}${btn("bin-cancel-back", t("btn_back"), "", 'data-close="3"')}</div>`);
       focusPrimary(); break; }
     case "fefo": {
-      prompt_("stop", esc(t("fefo_title")), `${esc(PA.fefoText(itemOf(p, d2), d2.rank))}`,
+      prompt_("stop", esc(t("fefo_title")), `<strong>${esc(p.prod.name)}</strong>${RX.idLine(p.prod.sku)}${esc(PA.fefoText(itemOf(p, d2), d2.rank))}`,
         `<div class="rx-pa-btns">${btn("fefo-change", t("fefo_change"), "primary", "data-primary")}${btn("fefo-anyway", t("fefo_anyway"))}${btn("bin-cancel-back", t("btn_back"), "", 'data-close="3"')}</div>`);
       focusPrimary(); break; }
     case "cancel": {
@@ -509,13 +517,13 @@ function render(ctx, d2){
       focusPrimary(); break; }
     case "overadd": {       /* ROUND 5: the added case pushed the count past what KeHE shipped (or we ordered) */
       const o = d2.overAdd.o, fm = (x) => String(Math.round(x * 100) / 100), n = fm(o.n), m = fm(o.cap);
-      prompt_("stop", esc(t("overship_title", {n, item: p.prod.name})), `<span class="rx-pa-sub">${esc(t(o.basis === "shipped" ? "overship_body" : "overship_body_ordered", {n, m}))}</span>`,
+      prompt_("stop", esc(t("overship_title", {n, item: p.prod.name})), `${RX.idLine(p.prod.sku)}<span class="rx-pa-sub">${esc(t(o.basis === "shipped" ? "overship_body" : "overship_body_ordered", {n, m}))}</span>`,
         `<div class="rx-pa-btns">${btn("over-add-yes", t("overship_yes", {n}), "primary", "data-primary")}${btn("over-add-undo", t("overadd_undo"), "", 'data-close="3"')}</div>`);
       focusPrimary(); break; }
     case "samesku": {
       const same = d2.same || {};
       prompt_("stop", esc(t("samesku_title", {name: p.prod.name})),
-        same.diff ? `<span class="rx-pa-note">${esc(t("samesku_diff", {date: same.best}))}</span>` : `<span class="rx-pa-sub">${d2.left} units now · +${d2.units0} → ${d2.left + d2.units0}</span>`,
+        RX.idLine(p.prod.sku) + (same.diff ? `<span class="rx-pa-note">${esc(t("samesku_diff", {date: same.best}))}</span>` : `<span class="rx-pa-sub">${d2.left} units now · +${d2.units0} → ${d2.left + d2.units0}</span>`),
         `<div class="rx-pa-btns">${same.diff ? "" : btn("samesku-add", t("samesku_add"), "primary", "data-primary")}${btn("samesku-newdate", t("samesku_new"), same.diff ? "primary" : "", same.diff ? "data-primary" : "")}${btn("bin-cancel-back", t("btn_back"), "", 'data-close="3"')}</div>`);
       focusPrimary(); break; }
     default: renderMain(ctx, d2);
@@ -533,13 +541,18 @@ function startShelf(ctx, opts){
   PA.cur = {ctx, d2}; PA.moreOpen = false;
   recompute(d2, p);
   const a = (!d2.late && !opts.noArmed && ctx.flow === "direct") ? PA.shelf.current() : null;       // round 4: shelf mode (sticky), not one-shot
-  render(ctx, d2);
-  if(a){ PA.shelf.touch(); onTag(ctx, d2, a.bin, "armed"); }
-}
+  /* ⭐⭐ PM-3333 (Jack, 2026-10-28: "a shelf tag scanned first still works the same way including partial quantity"): the current shelf
+     is OFFERED on this card — [Put all N on <shelf>] (Enter) or [Only some go here] — exactly the choices a shelf scanned after the item
+     gets. It used to be placed with no question, so a part case could not be split when the tag came first. */
+  if(a && !d2.portions.length && d2.offer === undefined){ PA.shelf.touch(); d2.offer = a.bin; }
+  render(ctx, d2);       // ⛔ review 2026-10-28: focus STAYS in the scan box (a scanner typing into a button is refused by the burst
+}                        //    guard) — Enter on the empty box accepts the offer (onEmptyEnter below)
 PA.startShelf = startShelf;
 RX.registerStep("shelf", {
   get keepScan(){ const c = PA.cur; return !c || c.d2.sub === "main"; },
   start(ctx){ startShelf(ctx); },
+  onEmptyEnter(ctx){ const c = PA.cur; if(!c || c.ctx !== ctx || c.d2.sub !== "main" || !c.d2.offer || c.d2.portions.length) return false;
+    const b = document.querySelector('[data-act="bin-offer-yes"]'); if(b){ b.click(); return true; } return false; },
   onScan(ctx, raw){
     const c = PA.cur; if(!c || c.ctx !== ctx) return false;
     const d2 = c.d2;
@@ -564,6 +577,9 @@ function onTag(ctx, d2, name, source){
   if(!info) return noticeMain(ctx, d2, `<strong>${esc(t("unknown_tag", {code: name}))}</strong> ${esc(t("unknown_tag_hint"))} ${esc(t("nothing_recorded"))}`, "refused");
   if(!info.active) return noticeMain(ctx, d2, `<strong>${esc(t("inactive", {bin: info.name}))}</strong> ${esc(t("nothing_recorded"))}`, "refused");
   d2.cand = {bin: info.name, source, flags: {}};
+  /* review 2026-10-28: a DIFFERENT tag scanned on the offer card becomes the current shelf, so the next case is offered the shelf the
+     crew is actually at — never the one they just left */
+  if(source === "scanned"){ d2.offer = null; if(ctx.flow === "direct"){ const sh = PA.shelf.get(); if(sh && !sameBin(sh.bin, info.name)){ PA.shelf.set(info.name); RX.toast(t("shelf_switched", {bin: info.name})); } } }
   nextCheck(ctx, d2);
 }
 PA.onTag = onTag;
@@ -602,6 +618,9 @@ function finish(ctx, d2){
 /* ───────────────────────── the acts ───────────────────────── */
 const cs = () => PA.cur;
 RX.registerAct("bin-some", () => { const c = cs(); if(c && c.d2.sub === "main") setSub(c.ctx, c.d2, "some"); });
+/* PM-3333: put this case (or the "only some" part) on the shelf that was scanned first — the same checks as scanning the tag now */
+RX.registerAct("bin-offer-yes", () => { const c = cs(); if(!c || c.d2.sub !== "main" || !c.d2.offer) return;
+  const bin = c.d2.offer; c.d2.offer = null; onTag(c.ctx, c.d2, bin, "armed"); });
 RX.registerAct("bin-some-save", () => {
   const c = cs(); if(!c || c.d2.sub !== "some") return;
   const el = $("rxSomeN"), n = parseInt(((el && el.value) || "").trim(), 10), d2 = c.d2;
