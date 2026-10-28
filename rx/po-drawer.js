@@ -154,11 +154,11 @@ function poHtml(){
       const said = RX.problems && s.scans.some(c => RX.problems.state.msg[c.iid]);
       if(H.poFilter === "problems" ? (s.problems === 0 && s.buyer === 0 && !said) : (H.poFilter !== "all" && H.poFilter !== "notpo" && s.state !== H.poFilter)) return;
       if(H.poFilter === "notpo") return;
-      if(q && !(name.toLowerCase().includes(q) || String(line.sku).toLowerCase().includes(q))) return;
+      if(q && !(name.toLowerCase().includes(q) || String(line.sku).toLowerCase().includes(q) || RX.brandOf(line.sku).toLowerCase().includes(q))) return;   // PM-3332: brand searchable
       n++;
       const key = x.po.order_id+"|"+line.sku, open = !!H.expanded[key] || (H.poFilter === "problems" && H.expanded[key] !== false);
       body += `<div class="rx-line rx-${s.state}"><button class="rx-linebtn" data-act="po-line" data-key="${esc(key)}" aria-expanded="${open}">
-        <span class="rx-lname">${esc(name)}</span><span class="rx-lqty num">${esc(t("po_line_of", {k:s.k, n:s.n, unit:s.unit}))}</span>
+        <span class="rx-lname">${esc(name)}${RX.idLine(line.sku)}</span><span class="rx-lqty num">${esc(t("po_line_of", {k:s.k, n:s.n, unit:s.unit}))}</span>
         <span class="rx-lshelf">${esc(s.shelves.join(", "))}</span>${s.problems ? `<span class="rx-chip rx-red">${s.problems}</span>` : ""}${RX.short ? RX.short.tag(x.po, line) : ""}</button>`;
       /* ⭐ 2026-10-23: "we never got it" lives on the line (rx/short.js) — above its scans, so a line with NO scans still has it */
       if(open) body += `<div class="rx-scans">` + (RX.short ? RX.short.html(x.po, line) : "") + (s.scans.length ? s.scans.map(c => scanLine(c)).join("") : `<div class="hint">No scans yet.</div>`) + `</div>`;
@@ -168,7 +168,7 @@ function poHtml(){
   }
   if(H.poFilter === "all" || H.poFilter === "notpo"){
     const np = notOnPo();
-    if(np.length) body += `<div class="rx-pohead"><strong>${esc(t("po_f_notpo"))}</strong></div>` + np.map(r => `<div class="rx-line"><span class="rx-lname">${esc(r.prod.name)}</span> <span class="num">${r.units ?? "?"}u</span></div>`).join("");
+    if(np.length) body += `<div class="rx-pohead"><strong>${esc(t("po_f_notpo"))}</strong></div>` + np.map(r => `<div class="rx-line"><span class="rx-lname">${esc(r.prod.name)}${RX.idLine(r.prod.sku)}</span> <span class="num">${r.units ?? "?"}u</span></div>`).join("");
     else if(H.poFilter === "notpo") body += `<div class="hint">${esc(t("po_empty"))}</div>`;
   }
   return shell("Delivery", body);
@@ -204,7 +204,7 @@ function rowHtml(){
   if(!row) return shell("Scan", `<div class="hint">That scan is no longer on this list.</div>`);
   const recs = RX.intents.forRow(row);
   const first = recs[0] && recs[0].fields || {};
-  let b = `<div><strong>${esc(row.prod.name)}</strong><div class="num hint">${esc(row.prod.sku)} · ${esc(row.upc || "")}</div></div>`;
+  let b = `<div><strong>${esc(row.prod.name)}</strong><div class="num hint">${esc([RX.brandOf(row.prod.sku), row.prod.sku, row.upc || ""].filter(Boolean).join(" · "))}</div></div>`;
   if(first.Po){ const po = RX.pack.poById(first.Po); const line = po && RX.po.line(po, row.prod.sku);
     const ls = line ? RX.po.lineStatus(po, line) : null;
     b += `<div class="rx-kv"><span>PO</span><span class="num">${esc(first.Po)}${ls ? " · line: "+esc(t("po_line_of", {k:ls.k, n:ls.n, unit:ls.unit})) : ""}</span></div>`; }
