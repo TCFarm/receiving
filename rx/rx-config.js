@@ -78,13 +78,13 @@ const CFG = {
 /* ═══ COPY — UX design §8 plus the chip / pack / start strings ═══ */
 const COPY = {
   /* scan + steps */
-  scan_label_d0:   "Scan a case — or a shelf tag",
+  scan_label_d0:   "Scan the item, then the shelf tag where you put it",   // PM-3333: one instruction, not "this OR that"
   d2_title:        "Now scan the shelf tag",
   split_rest:      "{n} units left — scan the next shelf tag",
   stage_title:     "Which cart? (Enter = top)",
   staged_flash:    "STAGED → {area} ({bin}) — not in Finale yet",
   put_flash:       "✓ {n} × {name} → {bin} · best by {yearFirst}",
-  tray_hint:       "Scan items, then the shelf tag. Or tag first, then one item.",
+  tray_hint:       "Scan the item, then the shelf tag where you put it.",
   wrong_product:   "Finish this case first — scan the shelf tag for {name}.",
   unknown_tag:     "That's not a shelf tag we know: {code}.",
   inactive:        "{bin} is switched off in Finale. Use another shelf, or tell the buyer.",
