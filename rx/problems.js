@@ -751,7 +751,7 @@ function recvHtml(v, a){
   const recvBtn = `<button type="button" class="rx-btn${cart.length ? "" : " primary"}" data-act="fix-recv" data-iid="${esc(v.iid)}">${esc(yes)}</button>`;
   const cartBtn = cart.length ? `<button type="button" class="rx-btn primary" data-act="pb-putaway" data-iid="${esc(v.iid)}">${esc(t("recv_cart_go"))}</button>` : "";
   return `<div class="rx-fix rx-recv${pc.over ? " rx-recv-over" : ""}" data-iid="${esc(v.iid)}" data-recv="${pc.over ? "over" : "ok"}"><strong>${esc(h)}</strong>
-    <div class="hint">${esc(nameOf(f.Sku))}${f.BestBy ? " · bb " + esc(f.BestBy) : ""}${f.Location ? " · " + esc(f.Location) : ""}</div>
+    <div class="hint">${esc(nameOf(f.Sku))} · ${esc([RX.brandOf(f.Sku), f.Sku].filter(Boolean).join(" · "))}${f.BestBy ? " · bb " + esc(f.BestBy) : ""}${f.Location ? " · " + esc(f.Location) : ""}</div>
     <div class="hint rx-fix-po">${esc(poFacts(f))}</div>
     ${multi}
     ${cartNote}
@@ -768,7 +768,7 @@ P.fixHtml = function(v){
   const la = P.state.lowerAsk; if(la && la.iid === v.iid) return lowerHtml(v, la);
   const facts = poFacts(f);
   return `<div class="rx-fix" data-iid="${esc(v.iid)}"><strong>${esc(t("fix_h"))}</strong>
-    <div class="hint">${esc(nameOf(f.Sku))} · ${esc(String(f.Units ?? "?"))}u${f.BestBy ? " · bb " + esc(f.BestBy) : ""}${(v.fin || {}).FinState === "posted" ? " · " + esc(t("fix_in_finale")) : ""}</div>
+    <div class="hint">${esc(nameOf(f.Sku))} · ${esc([RX.brandOf(f.Sku), f.Sku].filter(Boolean).join(" · "))} · ${esc(String(f.Units ?? "?"))}u${f.BestBy ? " · bb " + esc(f.BestBy) : ""}${(v.fin || {}).FinState === "posted" ? " · " + esc(t("fix_in_finale")) : ""}</div>
     ${facts ? `<div class="hint rx-fix-po">${esc(facts)}</div>` : ""}
     ${(() => { if((v.fin || {}).FinState !== "posted") return ""; const c = caseNow(v); if(!c.more) return "";
       return `<div class="hint rx-fix-case">${esc(t("recv_case", {old:fmtN(c.old), more:fmtN(c.more), total:fmtN(c.total)}))}</div>`; })()}
@@ -796,7 +796,7 @@ function lowerHtml(v, a){
   const nc = t("fix_lower_units") + (cq > 0 ? t("fix_lower_cases", {c:fmtN(a.n / cq), cq:fmtN(cq)}) : "");
   const hint = (cq > 1 && a.n < cq) ? `<div class="rx-note rx-red" role="status">${esc(t("fix_lower_hint", {n:fmtN(a.n), u:fmtN(a.n * cq)}))}</div>` : "";
   return `<div class="rx-fix rx-lower" data-iid="${esc(v.iid)}"><strong>${esc(t("fix_lower_h", {d:fmtN(a.old - a.n)}))}</strong>
-    <div class="hint">${esc(nameOf(f.Sku))}${f.BestBy ? " · bb " + esc(f.BestBy) : ""}${f.Location ? " · " + esc(f.Location) : ""}</div>
+    <div class="hint">${esc(nameOf(f.Sku))} · ${esc([RX.brandOf(f.Sku), f.Sku].filter(Boolean).join(" · "))}${f.BestBy ? " · bb " + esc(f.BestBy) : ""}${f.Location ? " · " + esc(f.Location) : ""}</div>
     <div class="hint">${esc(t("fix_lower_body", {old:fmtN(a.old), oldc, n:fmtN(a.n), nc, d:fmtN(a.old - a.n)}))}</div>
     ${hint}
     <button type="button" class="rx-btn primary" data-act="fix-lower" data-iid="${esc(v.iid)}">${esc(t("fix_lower_yes", {n:fmtN(a.n)}))}</button>
