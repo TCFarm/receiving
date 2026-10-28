@@ -166,6 +166,7 @@ const COPY = {
   menu_sounds_off: "Sounds off",
   menu_refresh:    "Refresh delivery list",
   menu_signout:    "Sign out",
+  menu_fixes:      "Barcode corrections",
   menu_flow:       "Change how I'm receiving",
   /* chips (UX §3.4) */
   chip_ontablet:   "On tablet",
