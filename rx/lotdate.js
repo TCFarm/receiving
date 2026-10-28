@@ -106,7 +106,7 @@ function todaysEvidence(key, rows){
     const src = String(r.source||"");
     if(r.audit || /^audit_/.test(src) || /\+lastcase/.test(src)) continue;
     const b = baseOf(src);
-    if(b === "keyed_gs1nodate" || /\+lotsuggest/.test(src) || b === "gs1_lot") out.push(r);
+    if(b === "keyed_gs1nodate" || /\+lotsuggest/.test(src) || /\+lotscan/.test(src) || b === "gs1_lot") out.push(r);   // +lotscan: PM-3304
   }
   return out;
 }
