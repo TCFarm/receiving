@@ -86,6 +86,8 @@ const COPY_ADD = {
   tray_clear:      "Clear tray",
   tray_remove:     "Remove",
   tray_some:       "Only some go here",
+  tray_offer:      "Put {name} on {bin}",
+  tray_offer_hint: "the shelf you scanned first — or scan another shelf tag",
   tray_some_q:     "How many go on this shelf?",
   tray_some_save:  "Save",
   tray_in:         "in tray",
@@ -261,12 +263,15 @@ function trayBar(){
     h += ` ${btn("tray-clear", t("tray_clear"), "", 'style="margin-left:8px"')}`;
     for(const {x, r} of ti){
       const u = x.take || r.units;
-      h += `<div class="rx-st-tline" data-iid="${esc(r.iid)}"><span>${esc(nameOf(r.sku))}</span><span class="num">${u}${x.take && x.take < r.units ? " of " + r.units : ""} u</span>
+      h += `<div class="rx-st-tline" data-iid="${esc(r.iid)}"><span>${esc(nameOf(r.sku))}${RX.idLine(r.sku)}</span><span class="num">${u}${x.take && x.take < r.units ? " of " + r.units : ""} u</span>
         ${S.some && S.some.iid === r.iid
           ? `<input id="rxTrayN" class="num rx-st-n" type="text" inputmode="numeric" maxlength="4" autocomplete="off" aria-label="${esc(t("tray_some_q"))}" placeholder="${esc(t("tray_some_q"))}">${btn("tray-some-save", t("tray_some_save"), "primary", `data-iid="${esc(r.iid)}"`)}${btn("tray-some-cancel", t("btn_cancel"), "", 'data-close="1"')}`
           : (r.units > 1 ? btn("tray-some", t("tray_some"), "", `data-iid="${esc(r.iid)}"`) : "")}
         ${btn("tray-remove", "✕", "", `data-iid="${esc(r.iid)}" aria-label="${esc(t("tray_remove"))} ${esc(nameOf(r.sku))}"`)}</div>`;
     }
+    const of = offerNow();
+    if(of) h += `<div class="rx-st-offer" id="rxTrayOffer">${btn("tray-offer-place", t("tray_offer", {bin: of.bin, name: nameOf(byIid(of.iid).sku)}), "primary", "data-primary")}
+      <span class="hint" style="display:inline">${esc(t("tray_offer_hint"))}</span></div>`;
     h += `<div class="hint">${esc(t("tray_hint"))}</div></div>`;
   }
   return h;
@@ -279,7 +284,7 @@ function rowsHtml(all){
     if(sel !== "all" && groupOf(r) !== sel) continue;
     const open = S.expanded === r.iid;
     h += `<div class="rx-st-row" data-iid="${esc(r.iid)}"><button type="button" class="rx-st-rowbtn" data-act="staged-row" data-iid="${esc(r.iid)}" aria-expanded="${open}">
-      <span class="bin">${esc(r.bin || r.area || "—")}</span><span class="nm">${esc(nameOf(r.sku))}</span><span class="num">${r.units} u</span><span class="bb">${r.best ? yf(r.best) : "no date"}</span>
+      <span class="bin">${esc(r.bin || r.area || "—")}</span><span class="nm">${esc(nameOf(r.sku))}${RX.idLine(r.sku)}</span><span class="num">${r.units} u</span><span class="bb">${r.best ? yf(r.best) : "no date"}</span>
       <span class="by">${esc(t("staged_by", {at: r.at ? RX.hhmm(r.at) : "", who: whoText(r)}))}${r.device && r.by !== acct() ? " (" + esc(String(r.device).slice(0, 4)) + ")" : ""}</span>${holdWaiting(r) ? `<span class="by rx-holdwait" style="flex-basis:100%;font-weight:700;color:var(--ink)">${esc(t("hold_wait"))}</span>` : ""}</button>`;
     if(open){
       h += `<div class="rx-st-x">${r.po ? "PO " + esc(r.po) + " · " : ""}${r.reasons ? esc(String(r.reasons)) + " · " : ""}${esc(r.area || "")}`;
@@ -327,7 +332,15 @@ RX.registerAct("leftovers-open", () => { if(RX.setFlow("staged")) RX.refresh(); 
 
 /* ───────────────────────── the tray ───────────────────────── */
 function trayTouch(){ S.tray.at = RX.now(); saveTray(); }
-function clearTray(notice){ S.tray = {items: [], at: 0}; S.some = null; saveTray(); S.notice = notice || ""; ST.render(); try{ maybeReturn(); }catch(_){} }
+/* PM-3333 + review 2026-10-28: the shelf scanned first is offered for the ONE item taken after it, by the person who scanned it. It lapses
+   the moment that item leaves the tray (placed, removed, cancelled) or another account is on the tablet — never a stale "Put … on X" */
+const meNow = () => { try{ return (typeof account !== "undefined" && account && (account.username || account.homeAccountId)) || ""; }catch(_){ return ""; } };
+function offerNow(){
+  const o = S.tray.offer; if(!o) return null;
+  if(typeof o !== "object" || !o.iid || o.by !== meNow() || !S.tray.items.some(x => x.iid === o.iid) || !byIid(o.iid)){ S.tray.offer = null; saveTray(); return null; }
+  return o;
+}
+function clearTray(notice){ S.tray = {items: [], at: 0, offer: null}; S.some = null; saveTray(); S.notice = notice || ""; ST.render(); try{ maybeReturn(); }catch(_){} }
 function addToTray(r, take){
   if(inTray(r.iid)) return;
   S.tray.items.push({iid: r.iid, take: take || null}); trayTouch(); S.notice = ""; S.some = null;
@@ -498,16 +511,16 @@ function showDecCard(){
   const c = S.dec.card, info = S.dec.info;
   if(c.kind === "over"){
     const o = c.o, v = {item: c.item.name, have: fmtU(o.have), n: fmtU(o.n), cap: fmtU(o.cap), add: fmtU(o.add)};
-    prompt_("stop", esc(t("putover_title", v)), `<span class="rx-pa-sub">${esc(t(o.basis === "shipped" ? "putover_body" : "putover_body_ord", v))}</span>`,
+    prompt_("stop", esc(t("putover_title", v)), `${RX.idLine(c.item.sku)}<span class="rx-pa-sub">${esc(t(o.basis === "shipped" ? "putover_body" : "putover_body_ord", v))}</span>`,
       `<div class="rx-pa-btns">${btn("putover-yes", t("putover_yes", v))}${btn("putover-no", t("putover_no"))}${btn("dec-back", t("btn_back"), "", 'data-close="3"')}</div>`);
     /* ⛔ no primary: Enter must not decide between "extra" and "remove" (review 2026-10-23 PM (4)) — a person taps one */
     RX.sound("decide"); return;
   }
   if(c.kind === "temp"){
-    prompt_("stop", esc(t("temp_title")), `<strong>${esc(PA.tempText(c.item, info))}</strong>`,
+    prompt_("stop", esc(t("temp_title")), `<strong>${esc(PA.tempText(c.item, info))}</strong>${RX.idLine(c.item.sku)}`,
       `<div class="rx-pa-btns">${btn("temp-no", t("temp_no"), "primary", "data-primary")}${btn("temp-yes", t("temp_yes"))}${btn("dec-back", t("btn_back"), "", 'data-close="3"')}</div>`);
   }else{
-    prompt_("stop", esc(t("fefo_title")), esc(PA.fefoText(c.item, c.rank)),
+    prompt_("stop", esc(t("fefo_title")), `<strong>${esc(c.item.name)}</strong>${RX.idLine(c.item.sku)}` + esc(PA.fefoText(c.item, c.rank)),
       `<div class="rx-pa-btns">${btn("fefo-change", t("fefo_change"), "primary", "data-primary")}${btn("fefo-anyway", t("fefo_anyway"))}${btn("dec-back", t("btn_back"), "", 'data-close="3"')}</div>`);
   }
   setTimeout(() => { const b = document.querySelector("#promptArea [data-primary]"); if(b) b.focus(); }, 30);
@@ -565,7 +578,7 @@ async function onItemScan(id, raw){
   const all = mineAll.filter(r => !holdWaiting(r));
   const armed = PA.armed.take();                                                      // ⛔ single-shot: this item consumes it
   if(!all.length && mineAll.length){                                                  // round 4: on hold — put-away is disabled until the PO line exists
-    prompt_("stop", esc(t("hold_wait_card", {name: id.prod.name})), "", `<div class="rx-pa-btns">${btn("hold-wait-close", t("hold_wait_close"), "primary", 'data-close="3"')}</div>`, {keepScan: true});
+    prompt_("stop", esc(t("hold_wait_card", {name: id.prod.name})), RX.idLine(id.sku), `<div class="rx-pa-btns">${btn("hold-wait-close", t("hold_wait_close"), "primary", 'data-close="3"')}</div>`, {keepScan: true});
     RX.sound("refused"); return true;
   }
   if(!all.length){
@@ -582,16 +595,26 @@ async function onItemScan(id, raw){
   take(pick, armed); return true;
 }
 function take(r, armed){
-  if(armed){ const info = RX.pack.binInfo(armed.bin || armed); if(info && info.active){ trayTouch(); startPlace(info, "armed", [{r, x: null}]); return; } }
+  /* ⭐ PM-3333: a shelf tag scanned FIRST no longer places the item at once (no "Only some" was possible) — the item goes in the tray and
+     the shelf is OFFERED there: [Put the tray on <shelf>] or "Only some go here" first, the same as item-then-tag */
   addToTray(r);
+  if(armed){ const info = RX.pack.binInfo(armed.bin || armed); S.tray.offer = info && info.active ? {bin: info.name, iid: r.iid, by: meNow()} : null; }
+  saveTray(); ST.render();          // an item scanned with no tag joins the tray and leaves the earlier item's offer alone
 }
 function openLotPick(all, armed){
   const byLot = new Map(); for(const r of oldestFirst(all)) if(!byLot.has(r.best || "")) byLot.set(r.best || "", r);
   S.lot = {lots: [...byLot.values()], armed};
   const btns = S.lot.lots.map((r, i) => `<button type="button" class="rx-btn rx-st-lot${i === 0 ? " primary" : ""}" data-act="lot-pick" data-iid="${esc(r.iid)}"${i === 0 ? " data-primary" : ""}>${r.best ? yf(r.best) : "no date"} · ${r.units} u · ${esc(t("staged_by", {at: r.at ? RX.hhmm(r.at) : "", who: whoText(r)}))}</button>`).join("");
-  prompt_("go", esc(t("lot_h")), `<strong>${esc(nameOf(all[0].sku))}</strong>`, `<div>${btns}</div><div class="rx-pa-btns">${btn("lot-close", t("btn_close"), "", 'data-close="3"')}</div>`, {keepScan: true});
+  prompt_("go", esc(t("lot_h")), `<strong>${esc(nameOf(all[0].sku))}</strong>${RX.idLine(all[0].sku)}`, `<div>${btns}</div><div class="rx-pa-btns">${btn("lot-close", t("btn_close"), "", 'data-close="3"')}</div>`, {keepScan: true});
   RX.sound("decide");
 }
+RX.registerAct("tray-offer-place", () => {   // PM-3333: place the tray on the shelf that was scanned first
+  const o = offerNow(); if(!o) { ST.render(); return; } const bin = o.bin, info = RX.pack.binInfo(bin);
+  S.tray.offer = null; saveTray();
+  if(!info || !info.active){ ST.render(); RX.toast(t("unknown_tag", {code: bin})); return; }
+  const entries = trayItems().filter(({r}) => r.iid === o.iid).map(({x, r}) => ({x, r})); if(!entries.length){ ST.render(); return; }
+  trayTouch(); startPlace(info, "armed", entries);
+});
 RX.registerAct("hold-wait-close", () => { try{ clearPrompt(); }catch(_){} });
 RX.registerAct("lot-close", () => { S.lot = null; try{ clearPrompt(); }catch(_){} });
 RX.registerAct("staged-close", () => { if(pend()){ RX.toast(t("finish_first")); return; } const prev = RX.state.prevFlow; RX.state.prevFlow = null; if(RX.setFlow(prev && prev !== "staged" ? prev : "direct")) RX.refresh(); });
@@ -624,6 +647,7 @@ RX.registerIdle("tray", {
   },
   onEmptyEnter(){
     if(RX.flow() === "staged" && S.lot && S.lot.lots.length){ const r = S.lot.lots[0], armed = S.lot.armed; S.lot = null; try{ clearPrompt(); }catch(_){} take(r, armed); return true; }
+    if(RX.flow() === "staged" && !S.dec && !S.some && offerNow()){ const b = document.querySelector('[data-act="tray-offer-place"]'); if(b){ b.click(); return true; } }   // Enter = the offered shelf
     return false;
   },
 });
@@ -774,7 +798,7 @@ function stageRows(p){
 function renderStage(ctx, notice){
   const p = ctx.p, st = p.rx.stage;
   const bb = p.best ? yf(p.best) : "no date";
-  let body = (notice ? `<span class="rx-pa-note" role="alert">${esc(notice)}</span>` : "") + `<strong>${esc(p.prod.name)}</strong><span class="rx-pa-sub">${esc(t("d2_units", {n: p.qty, bb: "\u0000"})).replace("\u0000", bb)}</span>`;
+  let body = (notice ? `<span class="rx-pa-note" role="alert">${esc(notice)}</span>` : "") + `<strong>${esc(p.prod.name)}</strong>${RX.idLine(p.prod.sku)}<span class="rx-pa-sub">${esc(t("d2_units", {n: p.qty, bb: "\u0000"})).replace("\u0000", bb)}</span>`;
   let acts = "";
   if(st.sub === "other"){
     acts += `<div class="rx-pa-sub"><strong>${esc(t("stage_choose"))}</strong></div>` + st.areas.map(a => `<button type="button" class="rx-st-pick" data-act="stage-area" data-area="${esc(a)}"><span class="area">${esc(a)}</span></button>`).join("") +
