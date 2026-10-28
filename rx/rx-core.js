@@ -186,6 +186,13 @@ RX.dayKey = (ms) => { const d = new Date(ms == null ? RX.now() : ms);
 RX.today = () => RX.dayKey();
 RX.iso   = (ms) => new Date(ms == null ? RX.now() : ms).toISOString();
 RX.esc   = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+/* ⭐ PM-3332 (Jack, 2026-10-28: "We need Finale skus showing on the receiving app … prob also brand"): the BRAND and the FINALE SKU of
+   an item, as one small line under its name — two products that read alike (Powdered Sugar 16oz from two brands) are told apart, and an
+   error names the exact SKU. ONE helper, used by every card and list that shows an item. */
+RX.brandOf = (sku) => { try{ const c = (typeof CATALOG_BY_SKU === "object" && CATALOG_BY_SKU && CATALOG_BY_SKU[sku]) || null; if(c && c.br) return c.br;
+  const i = RX.pack && RX.pack.skuInfo ? RX.pack.skuInfo(sku) : null; return (i && (i.brand || i.br)) || ""; }catch(_){ return ""; } };
+RX.idLine = (sku) => { if(!sku || String(sku).startsWith("!")) return "";
+  return `<span class="rx-idl num" data-sku="${RX.esc(sku)}" style="display:block;font-size:13px;color:var(--ink-3);font-weight:400">${RX.esc([RX.brandOf(sku), sku].filter(Boolean).join(" · "))}</span>`; };
 RX.clock = (ms) => { const s = Math.max(0, Math.floor(ms/1000)); const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), x = s%60;
   return (h ? h+":"+String(m).padStart(2,"0") : String(m))+":"+String(x).padStart(2,"0"); };
 RX.ago = (ms) => { const s = Math.max(0, Math.floor(ms/1000));
