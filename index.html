@@ -230,6 +230,7 @@
 <script src="rx/problems.js"></script>
 <script src="rx/short.js"></script>
 <script src="rx/version.js"></script>
+<script src="rx/lotdate.js"></script>
 <script>
 "use strict";
 /* ============================================================================
@@ -344,6 +345,29 @@ function renderHeld(){
    a hyphen and digits, so no UPC/GTIN (all digits) can ever match. */
 const LOCATION_RE = /^[A-Z]{2}-\d{1,3}(-[A-Z0-9]{1,4}){1,3}$/i;
 const looksLikeLocation = v => LOCATION_RE.test(String(v||"").trim());
+
+/* ⭐⭐ PM-3297: is this scan the DATE for the item whose date screen is open?
+     same     — a GS1 code whose (01) is the open item's (same case code, or the same consumer UPC) and that carries a date
+     dateonly — a GS1 code with a (15)/(17) date but NO product code; its lot, if any, must match the open case's lot
+   ⛔ Anything else is not this item's date (a different product, an implausible date) → null, and the caller refuses it as usual.
+   Used by handleScan AND by the scanner-burst guard (a real scanner types into the focused date box, not the scan box). */
+function dateScanFor(v){
+  try{
+    if(!pending || pending.best || !looksLikeElementString(String(v||""))) return null;
+    const a2 = parseElementString(v), g2 = String(a2["01"] || a2["02"] || "").replace(/\D/g, "");
+    const raw = labelDate(a2).date || labelDate(a2).split;
+    const d = raw ? parseGs1Date(raw) : null;
+    if(!d || !plausibleBB(d)) return null;
+    if(g2){
+      const ok = g2.length === 14 && checkDigit(g2.slice(0,-1)) === g2.slice(-1)
+        && ((pending.gtin && g2 === String(pending.gtin).replace(/\D/g, "")) || (pending.upc && gtin14ToConsumer(g2) === pending.upc));
+      return (ok && labelDate(a2).date) ? {kind:"same", date:d, ais:a2, gtin:g2} : null;
+    }
+    const lot = String(a2["10"] || "").trim();
+    if(pending.lot && lot && lot !== String(pending.lot).trim()) return null;
+    return {kind:"dateonly", date:d, ais:a2};
+  }catch(_){ return null; }
+}
 
 /* ⭐ MASTER-PLAN §9.7: a date that came from the GS1 lot-swallow SPLIT is only PREFILLED (one Enter to confirm) until the
    replay proves it (window.GS1_SPLIT_AUTOFILL, flag gs1_split_autofill, default false). An AMBIGUOUS split carries no date. */
@@ -550,6 +574,8 @@ async function bootstrap(){
   renderCatalogState();
   /* ⛔ NOT awaited: boot (and the outbox flush that follows it) must never wait on an optional file; a 404 costs two retries. */
   loadCeilings().catch(()=>{});
+  /* ⭐ PM-3297: the learned lot-number date formats (rx/lotdate.js). Same rule as the ceilings: optional, never awaited. */
+  if(window.LotDate) LotDate.load().catch(()=>{});
 }
 
 /* ⭐ PM-2797 (Jack, 2026-10-18): the longest believable shelf life per SKU, from Procurement & Merchandising's
@@ -775,6 +801,27 @@ async function handleScan(raw){
      to finish (only "Find it by name", which drops it). */
   const takesDate = !!(pending && !pending.best && /[\/-]/.test(v) && !upcCandidate(v)
                        && parseGs1Date(v) && plausibleBB(parseGs1Date(v)));
+  /* ⭐⭐ PM-3297: THE DATED BARCODE OF THE SAME CASE IS THE ANSWER, NOT A NEW SCAN. The date screen now tells the crew to scan the
+     barcode showing (15)/(17); doing so used to be refused as "busy". ⛔ Only when its GTIN is the OPEN item's (same case code, or the
+     same consumer UPC) and it really carries a date — any other product's barcode is still refused below. */
+  if(pending && !pending.best && $("promptArea").querySelector(".prompt") && !takesDate){
+    const ds = dateScanFor(v);
+    if(ds && ds.kind === "same"){
+      pending.best = ds.date; pending.suggest = null; pending.lotAuto = null; pending.noDate = false; delete pending.dateConfirmed;
+      if(!pending.lot && ds.ais["10"]) pending.lot = ds.ais["10"];
+      if(!pending.gtin) pending.gtin = ds.gtin;
+      pending.source = (isAudit() ? "audit_" : "") + "gs1";
+      const dc2 = dateCheck(pending.prod.sku, ds.date);
+      if(dc2) return askDateCheck(dc2);
+      return next();
+    }
+    if(ds && ds.kind === "dateonly"){
+      /* a date label with no product code in it: nothing proves it belongs to THIS case, so it is shown pre-typed for one Enter */
+      pending.suggest = {date: ds.date, tag: "datelabel", why: "from the date barcode you just scanned"};
+      pending.noDate = false;
+      return askDate();
+    }
+  }
   if(pending && $("promptArea").querySelector(".prompt") && !takesDate){
     noteDropped(v, "BUSY");
     showBurstRefusal(v);
@@ -1093,7 +1140,27 @@ async function handleScan(raw){
     /* ⛔ single-shot, fresh or stale — already disarmed at the top of handleScan */
   }
   if(unresolved) unresolved = null;
-  pending={upc,prod,gtin:gtin||"",lot:ais["10"]||"",best,splitDate:labelDate(ais).split,
+  /* ⭐⭐ PM-3297 (Jack, 2026-10-28): A DATE NOBODY HAS TO TYPE. After the label's own date and a held date:
+       1. the lot number, read with THIS SUPPLIER's learned format (rx/lotdate.js) — ENTERED when the format is proven on 3 different
+          lots (`auto`, source gs1_lot), otherwise pre-typed for one Enter;
+       2. the same product's last case today on this tablet — ALWAYS pre-typed, never entered (mixed-date pallets happen).
+     ⛔ A lot-swallow split guess outranks both (its lot is not a clean lot). ⛔ Every date still meets dateCheck() at commit. */
+  let suggest = null, lotAuto = null;
+  const _split = labelDate(ais).split;
+  if(!best && !_split && !isAudit() && window.LotDate){
+    const ld = LotDate.forLot({brand: prod.br || "", lot: ais["10"]||""}, rows);
+    if(ld && isRealDate(ld.date) && plausibleBB(ld.date)){
+      if(ld.mode === "auto"){ best = ld.date; how = "gs1_lot"; lotAuto = ld; }
+      else suggest = {date: ld.date, tag: "lotsuggest", why: ld.why};
+    }
+  }
+  if(!best && !_split && !suggest && !isAudit() && window.LotDate){
+    const lc = LotDate.lastCase(prod.sku, rows, ais["10"]||"");
+    if(lc && isRealDate(lc.date) && plausibleBB(lc.date))
+      suggest = {date: lc.date, tag: "lastcase",
+                 why: "same as the last case of this item" + (lc.at ? ", scanned " + new Date(lc.at).toLocaleTimeString([], {hour:"numeric", minute:"2-digit"}) : "")};
+  }
+  pending={upc,prod,gtin:gtin||"",lot:ais["10"]||"",best,splitDate:_split,suggest,lotAuto,
            /* ⛔ A held date came off a DIFFERENT barcode than the item, so nothing
               proves the two belong to the same case — only the operator can say.
               `fromHeld` forces one confirmation step; `heldRaw` keeps the exact
@@ -1332,11 +1399,27 @@ function askDate(){
          The label's date ran into its lot number, so we <strong>guessed</strong> it:
          <span class="bbread" style="display:block">${yearFirst(pending.splitDate)}</span>
          Check it against the label. <strong>Enter</strong> if it is right, or fix it.</span>` : "";
-  prompt_("", pending.splitDate ? "Check this date"
+  /* ⭐ PM-3297: a pre-typed date from the lot number or the last case — said WHERE it came from, read back year-first, one Enter */
+  const sug = (!pending.splitDate && pending.suggest) || null;
+  const sugNote = sug
+    ? `<span id="sugNote" data-tag="${esc(sug.tag)}" style="display:block;margin:0 0 10px;padding:9px 12px;background:var(--card);border-left:5px solid var(--go)">
+         ${sug.tag === "lastcase" ? "Same date as the last case? (different date? type it)"
+           : sug.tag === "datelabel" ? "From the date barcode — is this the date on THIS case?"
+           : "Our guess from the lot number — check the printed date:"}
+         <span class="bbread" style="display:block">${yearFirst(sug.date)}</span>
+         <span class="hint" style="display:inline">${esc(sug.why)}.</span>
+         Check it against the case. <strong>Enter</strong> if it is right, or type the right date.</span>` : "";
+  /* ⭐ PM-3297: the big case barcode (ITF-14, 14 bare digits) can never hold a date — say which barcode can */
+  const itf = !unnamed && pending.gtin && /keyed_bare$/.test(String(pending.source||""));
+  const itfNote = itf
+    ? `<span id="itfNote" style="display:block;margin:0 0 10px;padding:9px 12px;background:var(--card);border-left:5px solid var(--wait)">
+         This big case barcode never carries a date. Look for a barcode with <strong>(15)</strong> or <strong>(17)</strong> in the
+         numbers under it — that one holds the best-by. <strong>Scan it now</strong> and the date fills in; if there isn't one, type the date.</span>` : "";
+  prompt_("", (pending.splitDate || sug) ? "Check this date"
               : (unnamed && pending.known ? "Being set up — what is the best-by?"
               : unnamed ? "We do not know this code — what is the best-by?"
                       : "No date on the label — enter it"),
-    splitNote + (unnamed && pending.known
+    splitNote + sugNote + itfNote + ((!isAudit() && window.RX && RX.po && RX.po.progressHtml) ? RX.po.progressHtml(pending) : "") + (unnamed && pending.known
       ? `<strong>${esc(pending.known.name || pending.known.sku || rawCode)}</strong> is still being set up. The date
          attaches to it automatically once it exists — hold the case.`
       : unnamed
@@ -1407,7 +1490,8 @@ function askDate(){
       const d = /^\d{6}$/.test(t) ? parseGs1Date(t.slice(4,6)+t.slice(0,4)) : null;
       rb.innerHTML = d ? yearFirst(d) : "";
     };
-    if(el && pending && pending.splitDate){ const m=/^(\d{4})-(\d{2})-(\d{2})$/.exec(pending.splitDate);
+    const pre = pending && (pending.splitDate || (pending.suggest && pending.suggest.date));
+    if(el && pre){ const m=/^(\d{4})-(\d{2})-(\d{2})$/.exec(pre);
       if(m){ el.value = m[2]+m[3]+m[1].slice(2); readBack(); } }
     if(el){ el.focus();
       el.addEventListener("keydown",e=>{ if(e.key==="Enter") $("dok").click(); });
@@ -1479,8 +1563,17 @@ function askQty(){
            click here to change that and pick the best-by date</button>
        </span>`
     : "";
+  /* ⭐ PM-3297: a date ENTERED from the lot number says so here, with one tap to type it instead (that typed date is what tells
+     the learner the format was wrong, so the next case of this supplier is only suggested) */
+  const lotNote = (p.lotAuto && p.best === p.lotAuto.date)
+    ? `<span id="lotNote" style="display:block;margin:0 0 13px;padding:9px 12px;background:var(--card);border-left:5px solid var(--go)">
+         Best-by <span class="bbread" style="display:inline">${yearFirst(p.best)}</span> was ${esc(p.lotAuto.why)}.
+         <button id="lotWrong" style="margin:7px 0 0;padding:9px 14px;min-height:0">Not the date on the case? Type it</button></span>`
+    : "";
+  /* ⭐ PM-3297: received-so-far on the PO in every receiving flow — the put-away flows already show "this makes k of n" (rxq.body) */
+  const prog = (!isAudit() && window.RX && RX.po && RX.po.progressHtml && !(RX.flowActive && RX.flowActive())) ? RX.po.progressHtml(p) : "";
   prompt_("", loose ? "How many units at this date?" : "How many units in this case?",
-    ndNote + rxq.body +
+    ndNote + lotNote + prog + rxq.body +
     `<strong>${esc(p.prod.name)}</strong> &mdash; best by
      <strong>${p.best || "no date"}</strong>.<br><br>` +
     (loose
@@ -1683,6 +1776,11 @@ function commit(){
 
 function commit_(){
   const p=pending; pending=null;
+  /* ⛔⛔ PM-3297 review (the ONE invariant, at the one place every path passes): `gs1_lot` means "this date IS what the lot decodes
+     to". A lot date replaced by ANY route — Fix it on the date check, a date barcode, a retype — is a typed date
+     (`keyed_gs1nodate`), so the nightly learner sees the disagreement and restarts that format. */
+  if(/^(audit_)?gs1_lot/.test(String(p.source||"")) && !(p.lotAuto && p.best === p.lotAuto.date))
+    p.source = String(p.source).replace(/gs1_lot/, "keyed_gs1nodate");
   /* Storage class comes from __Storage_Location, falling back to the SKU
      prefix — R=Refrigerated, D=Dry, F=Frozen (Jack, 2026-08-11). That
      resolves every product in the current catalog, so this default should
@@ -2999,14 +3097,20 @@ document.addEventListener("click",e=>{
     const dchk = dateCheck(row.prod.sku, d);
     const applyDateFix = (confirmed) => {
       if(confirmed){ row.dateConfirmed = true; row.source = String(row.source||"").replace(/\+confirmed$/, "") + "+confirmed"; }
+      /* ⛔ PM-3297 review: a date READ FROM THE LOT that a person corrects is a TYPED date — the learner must see it, or the wrong
+         format stays `auto` every night. Same rule as srcForSave(). */
+      const relot = d !== row.best && /^(audit_)?gs1_lot/.test(String(row.source||""));
+      if(relot) row.source = String(row.source).replace(/gs1_lot/, "keyed_gs1nodate");
+      const unmark = d !== row.best && /\+(lotsuggest|lastcase|datelabel)/.test(String(row.source||""));
+      if(unmark) row.source = String(row.source).replace(/\+(lotsuggest|lastcase|datelabel)/g, "");
       row.best=d; render();
       /* ⛔ A FAILED row has NO id, so `patchDate` was a NO-OP on exactly the rows
          that needed fixing — the operator types the missing date and nothing
          happens (2026-08-26). ⭐ If it never saved, SAVE it now; the date is
          usually the very thing that was missing. */
-      if(row.id){ patchRow(row, confirmed ? {best_by: row.best, source: row.source} : {best_by: row.best}); }
+      if(row.id){ patchRow(row, (confirmed || relot || unmark) ? {best_by: row.best, source: row.source} : {best_by: row.best}); }
       /* ⛔ REVIEW FIX: the first save is in flight — send the date as a correction the moment it lands */
-      else if(row.inflight){ row.dirty = {...(row.dirty||{}), best_by:true, ...(confirmed ? {source:true} : {})}; persistPending(); }
+      else if(row.inflight){ row.dirty = {...(row.dirty||{}), best_by:true, ...((confirmed || relot || unmark) ? {source:true} : {})}; persistPending(); }
       /* ⛔⛔ ONLY AN EXHAUSTED ROW. The guard was `!== "saved"`, which INCLUDES a
          row currently inside `save()`'s retry loop (up to ~4.2 s of backoff plus
          network, longer on the flaky wifi this queue exists for). Tapping the date
@@ -3103,6 +3207,12 @@ document.addEventListener("click",e=>{
   }
   const f=e.target.closest("[data-flag]");
   if(f && pending){ flags[pending.prod.sku]= f.dataset.flag==="yes"; return next(); }
+  if(e.target.id==="lotWrong" && pending && pending.lotAuto){
+    /* ⭐ PM-3297: back to an ordinary typed date — no suggestion, so the person reads the case */
+    pending.best = null; pending.lotAuto = null; pending.suggest = null; delete pending.dateConfirmed;
+    pending.source = (isAudit() ? "audit_" : "") + "keyed_gs1nodate";
+    return askDate();
+  }
   if(e.target.id==="dok" && pending){
     const picked=($("pick")||{}).value||"", typed=($("typed")||{}).value||"";
     let d = picked || (typed ? parseGs1Date(typed.length===6? typed.slice(4,6)+typed.slice(0,4) : typed) : null);
@@ -3111,6 +3221,10 @@ document.addEventListener("click",e=>{
        needed (keyed_gs1nodate vs keyed_bare); flattening both to "manual"
        throws away the only signal that separates a supplier who does not
        encode dates from a label format that cannot carry one. */
+    /* ⭐ PM-3297: a suggestion accepted UNCHANGED is marked on the source (`+lotsuggest` teaches the nightly learner; `+lastcase` is
+       measured); a changed date is an ordinary keyed date. Re-decided on every Save, so a "Fix it" retype cannot keep a stale mark. */
+    pending.source = String(pending.source||"").replace(/\+(lotsuggest|lastcase|datelabel)/g, "");
+    if(pending.suggest && !pending.splitDate && !picked && d === pending.suggest.date) pending.source += "+" + pending.suggest.tag;
     pending.best=d; delete pending.dateConfirmed;
     /* ⭐ PM-2797: ask "is this date correct?" the moment it is keyed, while the package is still in the operator's hand
        (commit() re-checks as the last gate for any date that arrives another way, e.g. a GS1 label). */
@@ -3336,7 +3450,14 @@ document.addEventListener("keydown", e=>{
   if(kRun && kRun.refused && gap <= BURST_END_MS){
     if(printable) kRun.chars += e.key;
     kRun.last = now; e.preventDefault(); e.stopImmediatePropagation();
-    if(!printable) showBurstRefusal(kRun.chars);    // the whole code is known by its Enter
+    if(!printable){                                  // the whole code is known by its Enter
+      /* ⭐ PM-3297 (misuse review): the date screen tells the crew to scan the dated barcode; a real scanner types it HERE */
+      if(e.key === "Enter" && dateScanFor(kRun.chars)){
+        const code = kRun.chars; kRun = null; const m = $("burstMsg"); if(m) m.remove();
+        handleScan(code); return;
+      }
+      showBurstRefusal(kRun.chars);
+    }
     return;
   }
   if(e.key === "Enter"){
