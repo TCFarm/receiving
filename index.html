@@ -1483,7 +1483,7 @@ function askDate(){
       ? `<span class="num">${esc(rawCode)}</span> is not in the catalog.
          <strong>The date is worth more than the code</strong> — record it here and we
          will attach it to the product once the UPC is known.`
-      : `<strong>${esc(pending.prod.name)}</strong>`) +
+      : `<strong>${esc(pending.prod.name)}</strong>${window.RX && RX.idLine ? RX.idLine(pending.prod.sku) : ""}`) +
     ` — tap for a calendar, or type six digits MMDDYY.`,
     `<div class="dateRow">
        <input id="pick" type="date" aria-label="Pick best by date">
@@ -1738,7 +1738,7 @@ function askQty(){
   const prog = (!isAudit() && window.RX && RX.po && RX.po.progressHtml && !(RX.flowActive && RX.flowActive())) ? RX.po.progressHtml(p) : "";
   prompt_("", loose ? "How many units at this date?" : "How many units in this case?",
     ndNote + lotNote + prog + rxq.body +
-    `<strong>${esc(p.prod.name)}</strong> &mdash; best by
+    `<strong>${esc(p.prod.name)}</strong>${window.RX && RX.idLine ? RX.idLine(p.prod.sku) : ""} &mdash; best by
      <strong>${p.best || "no date"}</strong>.<br><br>` +
     (loose
       ? `Count what is on the shelf <strong>at this date only</strong>. Scan the same
@@ -2672,7 +2672,7 @@ function setCount(c){
 
 /* ---------- UI ---------- */
 function flash(r){
-  $("lastArea").innerHTML=`<div class="last"><div class="nm">✓ ${esc(r.prod.name)}</div>
+  $("lastArea").innerHTML=`<div class="last"><div class="nm">✓ ${esc(r.prod.name)}${window.RX && RX.idLine ? RX.idLine(r.prod.sku) : ""}</div>
     <div class="meta">${r.upc} · ${r.best
         ? `best by ${r.best} · order by ${addDays(r.best,-6)}`
         : `no date printed`}${r.lot?" · lot "+esc(r.lot):""}</div></div>`;
@@ -3408,7 +3408,7 @@ function render(){
     const bad = (r.saved==="FAILED" || r.saved==="UNSAVEABLE");
     const cls = r.saved==="saved"?"t-gs1":(bad?"t-q":"t-man");
     return `<tr data-act="hist-row" data-n="${r.n}">
-      <td>${esc(r.prod.name)}<div class="num" style="font-size:11px;color:var(--ink-3)">${esc(r.prod.sku)} · ${r.upc}</div>
+      <td>${esc(r.prod.name)}<div class="num" style="font-size:11px;color:var(--ink-3)">${esc([(window.RX && RX.brandOf ? RX.brandOf(r.prod.sku) : ""), r.prod.sku].filter(Boolean).join(" · "))} · ${r.upc}</div>
         ${r.audit?'<span class="tag t-man">AUDIT</span>':""}
         ${r.soft?'<span class="tag t-man">soft date</span>':""}
         ${r.unknownCls?'<span class="tag t-q">no storage class — assumed 14d</span>':""}</td>
