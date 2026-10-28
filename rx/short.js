@@ -224,7 +224,7 @@ S.html = function(po, line){
 function askHtml(po, line, L){
   const k = keyOf(po.order_id, line.sku), me = whoAmI();
   const val = A.asking.val != null ? A.asking.val : String(L.missing);
-  return `<div class="rx-fix rx-short-ask" data-short="${esc(k)}"><strong>${esc(t("sh_h", {name:nameOf(line.sku)}))}</strong>
+  return `<div class="rx-fix rx-short-ask" data-short="${esc(k)}"><strong>${esc(t("sh_h", {name:nameOf(line.sku)}))}</strong>${RX.idLine(line.sku)}
     <div class="hint rx-fix-po">${esc(facts(po, line, L))}</div>
     <div class="hint">${esc(t("sh_look"))}</div>
     ${coState(po.order_id).state === "unknown" ? `<div class="rx-note" role="status" data-k="sh-co-unknown">${esc(t("sh_co_unknown_new"))}</div>` : ""}
