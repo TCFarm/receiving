@@ -82,6 +82,10 @@ const COPY_ADD = {
   pb_none:        "Nothing is holding this truck.",
   fix_btn:        "Fix",
   fix_h:          "Fix this scan",
+  fix_over_h:     "The purchase order expects {cap}. Is {after} right?",
+  fix_over_body:  "{n} on this scan makes {after} of this item on PO {po}. A typo here changes our inventory.",
+  fix_over_yes:   "Yes, {n} is right",
+  fix_over_no:    "No — fix the number",
   fix_units:      "Units on this scan",
   fix_save:       "Save count",
   fix_twice:      "Scanned twice — remove this scan",
@@ -683,7 +687,8 @@ function poFacts(f){
   const cq = +f.CaseQty || 0, ord = +cf.ordered || 0;
   const cases = (cq > 0 && ord > 0 && ord % cq === 0) ? t("fix_po_cases", {c:String(ord / cq), cq:fmtN(cq)}) : "";
   const coming = pc.have - (+cf.units || 0);
-  return t("fix_po", {po:String(f.Po), ordered:fmtN(ord), cases, shipped: cp.known ? fmtN(cp.cap) : t("fix_po_unk"), have:fmtN(cf.units),
+  const sh = RX.po.shippedInfo ? RX.po.shippedInfo(f.Po, f.Sku) : null;               // PM-3345: information only — the limit is the PO
+  return t("fix_po", {po:String(f.Po), ordered:fmtN(ord), cases, shipped: sh != null ? fmtN(sh) : t("fix_po_unk"), have:fmtN(cf.units),
                       coming: coming > 0 ? t("fix_po_coming", {n:fmtN(coming)}) : ""});
 }
 /* the other live records of the SAME case (split parts, or units received later through Fix — they share the BB row): the case total
@@ -734,7 +739,7 @@ function posterPick(f, d){
 function recvHtml(v, a){
   const f = Object.assign({}, v.fields || {}, {Po: a.po || (v.fields || {}).Po}), pc = a.pc, after = pc.n, over = Math.max(0, pc.n - pc.cap);
   const basis = pc.basis === "shipped" ? "shipped" : "ordered";
-  const basisLong = pc.basis === "shipped" ? `KeHE shipped (${fmtN(pc.cap)})` : `we ordered (${fmtN(pc.cap)})`;
+  const basisLong = pc.basis === "shipped" ? `KeHE shipped (${fmtN(pc.cap)})` : `the purchase order expects (${fmtN(pc.cap)})`;
   const h = pc.over ? t("recv_over_h", {over:fmtN(over), basis_long:basisLong}) : t("recv_h", {d:fmtN(a.d)});
   const body = pc.over ? t("recv_over_body", {base:fmtN(a.base), n:fmtN(a.n), after:fmtN(after)})
                        : t("recv_body", {base:fmtN(a.base), n:fmtN(a.n), d:fmtN(a.d), bb: f.BestBy || "no best-by", loc: f.Location || "the same shelf",
@@ -766,6 +771,10 @@ P.fixHtml = function(v){
   const f = v.fields || {}; const err = P.state.fixErr;
   const a = P.state.recvAsk; if(a && a.iid === v.iid) return recvHtml(v, a);
   const la = P.state.lowerAsk; if(la && la.iid === v.iid) return lowerHtml(v, la);
+  const oa = P.state.overAsk; if(oa && oa.iid === v.iid) return `<div class="rx-fix rx-fixover" data-iid="${esc(v.iid)}"><strong>${esc(t("fix_over_h", {cap:fmtN(oa.cap), after:fmtN(oa.after)}))}</strong>
+    <div class="hint">${esc(t("fix_over_body", {n:fmtN(oa.n), after:fmtN(oa.after), po:String(f.Po || "")}))}</div>
+    <button type="button" class="rx-btn primary" data-act="fix-over-yes" data-iid="${esc(v.iid)}">${esc(t("fix_over_yes", {n:fmtN(oa.n)}))}</button>
+    <button type="button" class="rx-btn" data-act="fix-over-no" data-iid="${esc(v.iid)}" data-close="1">${esc(t("fix_over_no"))}</button></div>`;
   const facts = poFacts(f);
   return `<div class="rx-fix" data-iid="${esc(v.iid)}"><strong>${esc(t("fix_h"))}</strong>
     <div class="hint">${esc(nameOf(f.Sku))} · ${esc([RX.brandOf(f.Sku), f.Sku].filter(Boolean).join(" · "))} · ${esc(String(f.Units ?? "?"))}u${f.BestBy ? " · bb " + esc(f.BestBy) : ""}${(v.fin || {}).FinState === "posted" ? " · " + esc(t("fix_in_finale")) : ""}</div>
@@ -781,9 +790,15 @@ P.fixHtml = function(v){
     <button type="button" class="rx-btn" data-act="fix-cancel" data-close="1">${esc(t("fix_cancel"))}</button>
     ${err ? `<div class="rx-note rx-red" role="alert">${esc(err)}</div>` : ""}</div>`;
 };
-RX.registerAct("fix-open", ({el}) => { P.state.fixing = el.dataset.iid; P.state.fixErr = ""; P.state.draft = null; P.state.recvAsk = null; P.state.lowerAsk = null; RX.call("drawer", "refresh", true);
+RX.registerAct("fix-open", ({el}) => { P.state.fixing = el.dataset.iid; P.state.fixErr = ""; P.state.draft = null; P.state.recvAsk = null; P.state.lowerAsk = null; P.state.overAsk = null; P.state.overOk = null; RX.call("drawer", "refresh", true);
   setTimeout(() => { const i = document.getElementById("rxFixN"); if(i){ try{ i.focus(); i.select(); }catch(_){} } }, 30); });
-RX.registerAct("fix-cancel", () => { P.state.fixing = null; P.state.fixErr = ""; P.state.recvAsk = null; P.state.lowerAsk = null; RX.call("drawer", "refresh", true); });
+RX.registerAct("fix-cancel", () => { P.state.fixing = null; P.state.fixErr = ""; P.state.recvAsk = null; P.state.lowerAsk = null; P.state.overAsk = null; P.state.overOk = null; RX.call("drawer", "refresh", true); });
+/* PM-3345 review (1): the answer to "the purchase order expects … is n right?" on a Fix */
+RX.registerAct("fix-over-no", () => { P.state.overAsk = null; P.state.overOk = null; RX.call("drawer", "refresh", true);
+  setTimeout(() => { const i = document.getElementById("rxFixN"); if(i){ try{ i.focus(); i.select(); }catch(_){} } }, 30); });
+RX.registerAct("fix-over-yes", ({el}) => { const a = P.state.overAsk; if(!a || a.iid !== el.dataset.iid) return;
+  P.state.overAsk = null; P.state.overOk = {iid: a.iid, n: a.n}; P.state.draft = {iid: a.iid, val: String(a.n)}; RX.call("drawer", "refresh", true);
+  setTimeout(() => { const b = document.querySelector(`[data-act="fix-save"][data-iid="${a.iid}"]`); if(b) b.click(); }, 30); });
 /* ⭐ PM-3110 (2026-10-23, misuse review (4)): a LOWER count on a scan Finale has is un-receiving — the buyer's job — and the commonest way
    to get it wrong is typing CASES into a units box (2 meaning 2 cases of 6). So it is never sent on one tap: a card shows what Finale
    has and what was typed, BOTH in units and cases, and only [Yes — the count is n] sends the buyer the note. ⭐ The best-by row is set
@@ -890,7 +905,19 @@ RX.registerAct("fix-save", ({el}) => { const iid = el.dataset.iid;
   const reeval = fs === "held" && /^NOT_ON_PO\b/.test(String((v.fin || {}).FinReason || ""));
   if(!fs || reeval){
     const cq = +f.CaseQty || 0;
-    const r = await patchIntent(v, cq > 0 ? {Units:n, Cases: Math.round(n / cq * 100) / 100} : {Units:n}, fs);
+    /* ⛔ PM-3345 review (1), 2026-10-29: a HIGHER number here is a new count Finale will receive — past the purchase order it is asked
+       first ("a simple typo can't change our inventory"), and an earlier Yes is never carried to a bigger number (OverConfirmed is set
+       from THIS answer only). putCheck already counts this record when it is ready and unsent; a cart or held record is added whole. */
+    const cur = +f.Units || 0, counted = f.State === "ready" && !fs;
+    const ok = P.state.overOk && P.state.overOk.iid === iid && P.state.overOk.n === n;
+    let extra = {};
+    if(n > cur && f.Po && RX.po && RX.po.putCheck){
+      const pc = RX.po.putCheck(f.Po, f.Sku, counted ? n - cur : n);
+      if(pc && pc.over && !ok){ P.state.overAsk = {iid, n, cap: pc.cap, after: pc.n}; P.state.fixErr = ""; P.state.draft = {iid, val: String(n)}; return; }
+      extra = {OverConfirmed: !!(pc && pc.over && ok)};
+    }
+    P.state.overOk = null;
+    const r = await patchIntent(v, Object.assign(cq > 0 ? {Units:n, Cases: Math.round(n / cq * 100) / 100} : {Units:n}, extra), fs);
     if(!r.ok){ P.state.fixErr = whyText(r.why); return; }
   }else if(fs === "posted" && n > old && f.Po && f.Kind !== "fix" && RX.mode() === "live" && RX.po && RX.po.putCheck && RX.po.capOf && RX.po.capOf(f.Po, f.Sku)){
     /* ⭐ 2026-10-23 RECEIVE THE REST: a higher count on a scan Finale has is the rest of the PO line — show the numbers and ask (fix-recv).
