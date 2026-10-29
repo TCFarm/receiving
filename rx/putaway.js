@@ -277,6 +277,8 @@ RX.registerAct("binarmed-discard", () => { PA.armed.clear(); RX.sound("decide");
    Put away here (the one-shot `PA.armed` stays for the staged tray). ═══ */
 const SHELF_KEY = "rx_shelf_v1";
 const shelfIdle = () => RX.CFG.SHELF_IDLE || 10 * 60 * 1000;
+/* PM-3361: the current shelf works the same in Put away here and in Put away staged (the second scan of Sort first) */
+const shelfFlow = () => RX.flow() === "direct" || RX.flow() === "staged";
 const sameBin = (a, b) => String(a || "").toUpperCase() === String(b || "").toUpperCase();
 PA.shelf = {
   notice: "",
@@ -296,19 +298,21 @@ PA.shelf = {
 };
 function renderShelf(){
   const el = $("rxShelfBar"); if(!el) return;
-  const x = RX.active() && RX.flow() === "direct" ? PA.shelf.get() : null;
+  const x = RX.active() && shelfFlow() ? PA.shelf.get() : null;
   let h = "";
   if(x) h = `<div class="banner rx-banner rx-shelfbar" role="status" style="border-left-color:var(--go)"><strong>${esc(t("shelf_banner", {bin: "\u0000"})).replace("\u0000", `<span class="num" id="rxShelfBin">${esc(x.bin)}</span>`)}</strong>
       <span class="hint" style="display:inline"> · ${esc(t("shelf_hint"))} · <span id="rxShelfN">${esc(t((x.n || 0) === 1 ? "shelf_n1" : "shelf_n", {n: x.n || 0}))}</span></span>
       <button type="button" class="rx-btn" data-act="shelf-done" data-close="3" style="margin-left:8px">${esc(t("shelf_done"))}</button></div>`;
-  else if(PA.shelf.notice && RX.active() && RX.flow() === "direct") h = `<div class="banner rx-banner" role="status" id="rxShelfNote" style="border-left-color:var(--wait)">${esc(PA.shelf.notice)}</div>`;
+  else if(PA.shelf.notice && RX.active() && shelfFlow()) h = `<div class="banner rx-banner" role="status" id="rxShelfNote" style="border-left-color:var(--wait)">${esc(PA.shelf.notice)}</div>`;
   if(el.dataset.h !== h){ el.innerHTML = h; el.dataset.h = h; }
 }
 RX.on("tick", () => { const x = PA.shelf.get(); if(x && !pend() && RX.now() - (x.at || 0) > shelfIdle()) PA.shelf.expire(); renderShelf(); });
-RX.on("flow", () => { if(RX.flow() !== "direct") RX.store.del(SHELF_KEY); renderShelf(); });
+/* ⛔ PM-3361 review (3): changing how you receive ends the current shelf — the crew is somewhere else now (re-scan the tag) */
+let lastFlow = null;
+RX.on("flow", () => { const f = RX.flow(); if(lastFlow !== null && f !== lastFlow) RX.store.del(SHELF_KEY); if(!shelfFlow()) RX.store.del(SHELF_KEY); lastFlow = f; renderShelf(); });
 RX.on("day", () => { RX.store.del(SHELF_KEY); PA.shelf.notice = ""; renderShelf(); });
-RX.onBoot(() => { PA.shelf.current(); renderShelf(); });
-RX.registerAct("shelf-done", () => { PA.shelf.clear(); RX.toast(t("shelf_cleared")); RX.sound("decide"); });
+RX.onBoot(() => { lastFlow = RX.flow(); PA.shelf.current(); renderShelf(); });
+RX.registerAct("shelf-done", () => { PA.shelf.clear(); RX.toast(t("shelf_cleared")); RX.sound("decide"); try{ if(RX.staging && RX.staging.render) RX.staging.render(); }catch(_){} });   // PM-3361: the tray offer for that shelf goes with it
 
 RX.registerIdle("putaway", {
   get keepScan(){ return true; },
