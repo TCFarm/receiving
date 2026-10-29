@@ -184,6 +184,7 @@ function scanLine(c){
   let h = `<div class="rx-scan${cancelled ? " rx-strike" : ""}" data-iid="${esc(c.iid)}"><span class="num">${esc(day)} ${esc(RX.hhmm(c.at))} ${esc(String(c.op).split("@")[0])} · ${c.units}u${c.bb ? " · bb "+esc(c.bb) : ""}${c.bin ? " · "+esc(c.bin) : (f.StagedArea ? " · "+esc(f.StagedArea) : "")} · ${esc(st)}</span>`;
   if(!cancelled && c.v && f.Kind !== "fix") h += ` <button type="button" class="rx-btn" data-act="fix-open" data-iid="${esc(c.iid)}">${esc(t("fix_btn"))}</button>`;
   const ph = (!cancelled && c.v && RX.problems) ? RX.problems.html(c.v) : "";
+  if(!cancelled && RX.problems && RX.problems.fixStatusHtml) h += RX.problems.fixStatusHtml(c.iid);     // PM-3347: the correction's progress
   if(ph) h += ph;
   else if(RX.problems && RX.problems.state.msg[c.iid]) h += `<div class="hint rx-pb-msg" role="status">${esc(RX.problems.state.msg[c.iid])}</div>`;
   if(c.v && RX.problems && RX.problems.state.fixing === c.iid) h += RX.problems.fixHtml(c.v);
@@ -220,6 +221,7 @@ function rowHtml(){
         ${fin.FinReason ? `<div class="hint">${esc(fin.FinReason)}</div>` : ""}
         ${(!rec.sent && rec.err) ? `<div class="rx-note rx-red">${esc(rec.err)}</div>` : ""}
         ${fin.FinShipment ? `<div class="hint num">Finale shipment ${esc(fin.FinShipment)}</div>` : ""}
+        ${(RX.problems && RX.problems.fixStatusHtml) ? RX.problems.fixStatusHtml(rec.iid) : ""}
         ${(fixable(rec) && RX.problems && RX.problems.state.fixing !== rec.iid) ? `<button type="button" class="rx-btn" data-act="fix-open" data-iid="${esc(rec.iid)}">${esc(t("fix_btn"))}</button>` : ""}
         ${(RX.problems && RX.problems.state.fixing === rec.iid) ? RX.problems.fixHtml(viewOf(rec)) : ""}</div>`;
     }
