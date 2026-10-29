@@ -850,16 +850,16 @@ const heldShort = (fin) => {
   const sentence = reason.indexOf(":") >= 0 ? reason.slice(reason.indexOf(":")+1).trim() : "";
   const map = { OVER_ORDERED: () => ((+fin.FinUnitsHeld || 0) ? (+fin.FinUnitsHeld)+" extra" : "extra"),
     NOT_ON_PO: () => "not on a PO", FINALE_APP_OVERLAP: () => "Finale app got it too", EXPIRED: () => "expired",
-    DAMAGED: () => "damaged", STALE: () => "too old — the buyer can post it", TEMP_UNCONFIRMED: () => "temperature not confirmed",
+    DAMAGED: () => "damaged", STALE: () => "too old — purchasing can post it", TEMP_UNCONFIRMED: () => "temperature not confirmed",
     LOT_FORM_UNPROVEN: () => "lot not proven yet" };
   if(map[code]) return map[code]();
-  return (sentence || code.toLowerCase().replace(/_/g, " ") || "see the buyer").slice(0, 40);
+  return (sentence || code.toLowerCase().replace(/_/g, " ") || "see purchasing").slice(0, 40);
 };
 const refusedShort = (fin) => {
   const reason = String(fin.FinReason || ""); const code = (reason.split(":")[0] || "").trim().toUpperCase();
   const sentence = reason.indexOf(":") >= 0 ? reason.slice(reason.indexOf(":")+1).trim() : "";
   const map = { UNKNOWN_BIN: "shelf not recognised", BIN_DISABLED: "shelf switched off", RECEIVING_DISABLED: "shelf switched off", NOT_ON_PO: "not on a PO" };
-  return map[code] || (sentence || code.toLowerCase().replace(/_/g, " ") || "see the buyer").slice(0, 40);
+  return map[code] || (sentence || code.toLowerCase().replace(/_/g, " ") || "see purchasing").slice(0, 40);
 };
 function chipOf(rec){
   const f = rec.fields, fin = rec.fin || {}, now = RX.now();
