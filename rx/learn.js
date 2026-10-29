@@ -21,7 +21,7 @@
    ⛔ A learned code never REPLACES a code the catalog already maps to a different product (apply skips it), and a code that
       fails its own check digit is never offered (a mis-read would pair junk with a real product).
    ⛔ A Revoked row is ignored everywhere (the person who fixes a wrong learning sets Revoked in the list).
-   ⭐ BUILD WAVE R4 (Jack, 2026-10-21 — an ambiguous code is asked "in BOTH places": the buyer's list AND "the tablet the next time
+   ⭐ BUILD WAVE R4 (Jack, 2026-10-21 — an ambiguous code is asked "in BOTH places": purchasing's list AND "the tablet the next time
    that code is scanned"): the mini publishes `app/receiving/past_scans.json` (Procurement & Merchandising/scripts/receiving_past_scans.py)
    — per code the crew gave up on, the products sharing its brand prefix, those on that truck first. When an unknown code has
    candidates the unknown card asks "Is this one of these?"; a tap still goes through OPEN THE CASE and the three ticks (the tablet's
@@ -226,7 +226,7 @@ const learnBtn = () => {
   if(!S.cand) return "";
   const asks = asksFor(S.cand.code);
   const q = asks.length ? `<div id="lnAsk" style="margin:0 0 10px;padding:10px;border:1px solid var(--line);border-radius:4px">
-      <strong>Is this one of these?</strong> <span class="hint" style="display:inline">The buyer's list suggests them${asks.some(a => a.truck) ? " — the first was on that truck" : ""}. You still open the case and check.</span>
+      <strong>Is this one of these?</strong> <span class="hint" style="display:inline">Purchasing's list suggests them${asks.some(a => a.truck) ? " — the first was on that truck" : ""}. You still open the case and check.</span>
       <div style="margin-top:8px">${asks.map(a => `<button class="lnask" data-act="learn-ask" data-sku="${e_(a.sku)}" style="display:block;width:100%;text-align:left;margin:0 0 6px">${e_(a.name || a.sku)} <span class="num" style="font-size:12px;color:var(--ink-3)">${e_(a.sku)}${a.truck ? " · on that truck" : ""}</span></button>`).join("")}</div></div>` : "";
   return q + `<button class="primary" id="learnStart" data-act="learn-start">Product we carry, new barcode? Learn it</button>`;
 };
