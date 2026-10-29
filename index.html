@@ -232,6 +232,7 @@
 <script src="rx/version.js"></script>
 <script src="rx/lotdate.js"></script>
 <script src="rx/feedback.js"></script>
+<script src="rx/offline.js"></script>
 <script>
 "use strict";
 /* ============================================================================
@@ -478,7 +479,7 @@ async function getToken(){
   if(refreshTok){
     const body=new URLSearchParams({client_id:CFG.clientId,grant_type:"refresh_token",
       refresh_token:refreshTok,scope:CFG.scopes.join(" ")});
-    const r=await fetch(`${AUTH}/token`,{method:"POST",
+    const r=await netFetch(`${AUTH}/token`,{method:"POST",
       headers:{"Content-Type":"application/x-www-form-urlencoded"},body});
     const j=await r.json().catch(()=>({}));
     if(r.ok){ setToken(j); return token; }
@@ -492,9 +493,19 @@ async function getToken(){
   throw err;
 }
 
+/* ⭐ PM-3372 review (2, 8): every Graph call has a TIME LIMIT (weak Wi-Fi in the freezer hangs rather than fails), and what really
+   happened is recorded — NET.ok / NET.fail — because navigator.onLine stays true on Wi-Fi with no internet. */
+const NET = {ok: 0, fail: 0};
+const GRAPH_LIMIT_MS = 20000;
+async function netFetch(url, init){
+  const ctl = new AbortController(), tm = setTimeout(() => ctl.abort(), GRAPH_LIMIT_MS);
+  try{ const r = await fetch(url, {...init, signal: ctl.signal}); NET.ok = Date.now(); return r; }
+  catch(e){ NET.fail = Date.now(); throw e; }
+  finally{ clearTimeout(tm); }
+}
 async function graph(path, opts={}, _retried=false){
   const t = await getToken();
-  const r = await fetch(GRAPH+path, {...opts,
+  const r = await netFetch(GRAPH+path, {...opts,
     headers:{...(opts.headers||{}), Authorization:"Bearer "+t, "Content-Type":"application/json"}});
   const txt = await r.text();
   let j=null; try{ j = txt ? JSON.parse(txt) : null; }catch(_){}
@@ -533,7 +544,32 @@ function flagSignIn(){ if(!needsSignIn){ needsSignIn = true; } renderPending(); 
 /* ---------- startup: resolve site + list, VALIDATE columns ---------- */
 let siteId=null, listId=null, driveId=null, CATALOG={}, CATALOG_BY_SKU={};
 
+/* ⭐ PM-3372 (Jack, 2026-10-29: the frozen team "dont have good internet there"): the ids below are saved after every good start and
+   used when the network is down, so the page can start offline (scans queue and send later). ⛔ Only a NETWORK failure falls back —
+   a sign-in that is no longer valid, a missing list or missing columns still stop here with their own message. */
+const BOOT_KEY = "rx_boot_v1";
+let offlineBoot = null;
+const readBoot = () => { let c = null; try{ c = JSON.parse(localStorage.getItem(BOOT_KEY) || "null"); }catch(_){}
+  /* ⛔ review (6): a saved map missing a column today's code writes would turn queued scans UNSAVEABLE — not usable */
+  return (c && c.siteId && c.listId && c.FIELD && REQUIRED.every(k => c.FIELD[k])) ? c : null; };
+const saveBoot = () => { try{ localStorage.setItem(BOOT_KEY, JSON.stringify({at: Date.now(), siteId, listId, driveId, FIELD, account})); }catch(_){} };
+let noTokenOffline = false;      // review (1): a closed tab lost the session pass — started offline under the last account
 async function bootstrap(){
+  try{
+    if(noTokenOffline){ const err = new Error("no signal and no session pass — started offline"); throw err; }
+    await bootstrapOnline();
+    offlineBoot = null;
+    saveBoot();
+  }catch(e){
+    const c = readBoot();
+    const net = noTokenOffline || (!!e && !e.auth && !e.status && !/not found|missing these columns/i.test(String(e.message || "")));
+    if(!(net && c)) throw e;
+    siteId = c.siteId; listId = c.listId; driveId = c.driveId || null; FIELD = c.FIELD;
+    offlineBoot = {at: c.at || 0, why: String((e && e.message) || "no network")};
+  }
+  await bootstrapLocal();
+}
+async function bootstrapOnline(){
   const site = await graph(`/sites/${CFG.hostname}:${CFG.sitePath}`);
   siteId = site.id;
   const lists = await graph(`/sites/${siteId}/lists?$filter=displayName eq '${CFG.listName}'`);
@@ -543,17 +579,18 @@ async function bootstrap(){
 
   const cols = await graph(`/sites/${siteId}/lists/${listId}/columns?$select=name,displayName`);
   const byLower = new Map((cols.value||[]).map(c=>[c.name.toLowerCase(), c.name]));
-  FIELD = {};
+  const F = {};                                // PM-3372 review (10): assigned only once it validates — never half-filled
   const missing = [];
   for(const want of REQUIRED){
     const actual = byLower.get(want);          // case-insensitive match
-    if(actual) FIELD[want] = actual; else missing.push(want);
+    if(actual) F[want] = actual; else missing.push(want);
   }
   if(missing.length)
     throw new Error(`The list is missing these columns: ${missing.join(", ")}. `+
       `Matching ignores capitalisation, so these are genuinely absent rather than `+
       `differently cased. Columns found: `+
       `${[...byLower.values()].filter(n=>!n.startsWith("_")).join(", ")}`);
+  FIELD = F;
 
   /* ⭐ PHOTO UPLOAD TARGET — resolved here, and the button does not exist
      without it (fixed 2026-08-27). ⛔ It was previously read as `CFG.driveId`,
@@ -569,7 +606,8 @@ async function bootstrap(){
     const dr = await graph(`/sites/${siteId}/drive?$select=id`);
     driveId = dr && dr.id ? dr.id : null;
   }catch(_){ driveId = null; }
-
+}
+async function bootstrapLocal(){
   CATALOG = await loadCatalog();
   rebuildSkuIndex();
   renderCatalogState();
@@ -3494,7 +3532,20 @@ function render(){
 async function start(){
   try{
     const returned = await completeLogin();
-    if(!returned && !loadToken()){ $("gate").style.display=""; return; }
+    /* ⭐ PM-3372: an EXPIRED pass with a saved account is not a sign-out — start, and let the first call refresh it (or, with no
+       network, start offline; a sign-in that is no longer valid still lands on this screen with its message) */
+    const tokOk = loadToken();
+    if(!returned && !tokOk && !(refreshTok && account)){
+      /* ⭐ PM-3372 review (1): the session pass lives only as long as the TAB — a tab closed in the freezer came back to the sign-in
+         screen, which needs signal. With no signal and a good earlier start on this tablet, start offline under the account saved
+         then: scans queue (stamped with that account) and are sent once someone signs in again in signal. */
+      const c = readBoot();
+      let noNet = !navigator.onLine;
+      if(!noNet && c){ try{ const ctl = new AbortController(), tm = setTimeout(() => ctl.abort(), 5000);
+        await fetch("version.json?t=" + Date.now(), {cache: "no-store", signal: ctl.signal}); clearTimeout(tm); }catch(_){ noNet = true; } }
+      if(!(noNet && c && c.account)){ $("gate").style.display=""; return; }
+      account = c.account; noTokenOffline = true;
+    }
     await bootstrap();
     $("gate").style.display="none"; $("app").style.display="";
     $("dot").className="dot ok"; $("who").textContent=account;
