@@ -45,7 +45,7 @@ const COPY_ADD = {
   sh_changed:     "The numbers changed on another tablet or in Finale. Nothing was saved — look again.",
   sh_noread:      "The PO could not be read — try again in a minute. Nothing was saved.",
   sh_who:         "Signed in as {who}.",
-  sh_done:        "Recorded: {n} short. The buyer sees it at close-out — nothing else to do.",
+  sh_done:        "Recorded: {n} short. Purchasing sees it at close-out — nothing else to do.",
   sh_tag:         "short {n}",
   sh_rec:         "Short {n} — {who} said it never arrived ({when}).",
   sh_undo:        "Undo",
@@ -53,7 +53,7 @@ const COPY_ADD = {
   sh_stale:       "{m} scanned since then — {left} still missing.",
   sh_stale_cap:   "The PO changed since (KeHE's shipped figure) — {left} still missing.",
   sh_hold:        "{n} case(s) on this tablet are still To identify (HOLD shelf). Check none of them is this item first.",
-  sh_denied:      "Not saved — this tablet was not allowed to record it ({why}). Tell the buyer.",
+  sh_denied:      "Not saved — this tablet was not allowed to record it ({why}). Tell purchasing.",
   sh_stale_set:   "Change the short to {n}",
   sh_stale_rm:    "It all came — remove the short",
   sh_sending:     " (still sending from this tablet)",
@@ -62,11 +62,11 @@ const COPY_ADD = {
   sh_fin_go:      "Open it",
   sh_fin_none:    "Every line on PO {po} is scanned or recorded short.",
   po_f_short:     "Short",
-  sh_closed:      "PO closed out by {who} ({when}) with this line short — the short is final here. To change it, tell the buyer.",
-  sh_closed_no:   "Not changed — this PO was closed out by {who} ({when}). Tell the buyer.",
-  sh_gone:        "PO {po} is no longer open for receiving — ask the buyer to change it.",
+  sh_closed:      "PO closed out by {who} ({when}) with this line short — the short is final here. To change it, tell purchasing.",
+  sh_closed_no:   "Not changed — this PO was closed out by {who} ({when}). Tell purchasing.",
+  sh_gone:        "PO {po} is no longer open for receiving — ask purchasing to change it.",
   sh_co_unknown_new:"Close-out status could not be read just now. Record it only if you are sure this PO has not been closed out yet.",
-  sh_co_unknown:  "Close-out status could not be read just now, so shorts on this PO cannot be changed from the tablet. Try again later or tell the buyer.",
+  sh_co_unknown:  "Close-out status could not be read just now, so shorts on this PO cannot be changed from the tablet. Try again later or tell purchasing.",
 };
 for(const k of Object.keys(COPY_ADD)) if(!(k in RX.COPY)) RX.COPY[k] = COPY_ADD[k];
 
@@ -82,14 +82,14 @@ S.state = { asking:null, err:"", msg:{}, busy:new Set() };
      unknown — `sources.closeouts` missing (an older pack), its `error` or `qbo_error` set, or a PO with no `closed_out` key: null is NOT "open";
                an EXISTING short is left alone — Undo, fix-up and re-record are refused with a warning; a line with no short may still
                record one (the card warns that the close-out could not be checked).
-     gone    — the PO is not in the current pack at all (left receiving): every short write refused, "ask the buyer" (§5b).
+     gone    — the PO is not in the current pack at all (left receiving): every short write refused, "ask purchasing" (§5b).
      open    — `closed_out` null and no error.
    Checked again at the moment of every tap (the pack may have refreshed). -> {state, co?} */
 function coState(poId){
   const d = RX.pack.data; const po = d && RX.pack.poById ? RX.pack.poById(poId) : null;
   const src = d && d.sources && d.sources.closeouts;
   /* ⭐ PM-3126 §5b (plan 2026-10-23-closeout-crew-intent, decided 2026-10-24): a PO the current pack does not list has LEFT receiving
-     (fully received or closed out — the builder only packs OPEN POs): every short write on it is refused, "ask the buyer" */
+     (fully received or closed out — the builder only packs OPEN POs): every short write on it is refused, "ask purchasing" */
   if(d && !po) return {state:"gone", po:String(poId)};
   /* review (1): a NEWER pack already fetched but not yet applied (applied at an idle moment) that no longer lists the PO wins too */
   const q = RX.pack.queued && RX.pack.queued.data;
@@ -119,7 +119,7 @@ function locked(poId, sku, recs){
      crew short on it, named in `skus` / `crew_intent_ids` or not. ⛔ No reopen path from the tablet ("we may need a way to re-open/adjust
      this in the future, but not now"). */
   const co = c.co || {};
-  return t("sh_closed_no", {who: short_(co.by) || "the buyer", when: whenText(co.at || "")});
+  return t("sh_closed_no", {who: short_(co.by) || "purchasing", when: whenText(co.at || "")});
 }
 S.locked = (poId, sku) => locked(poId, sku, records(poId, sku));
 const A = S.state;
@@ -200,7 +200,7 @@ S.html = function(po, line){
     const c = coState(po.order_id);
     if(!L.rec && !(L.missing > 0)) return msg;
     const head = L.rec ? `<strong>${esc(t("sh_rec", {n:fmtN(L.recorded), who:short_((L.rec.fields || {}).Operator) || "someone", when:whenText((L.rec.fields || {}).ScanAt)}))}</strong> ` : "";
-    const why = c.state === "closed" ? t("sh_closed", {who: short_((c.co || {}).by) || "the buyer", when: whenText((c.co || {}).at || "")}) : t("sh_co_unknown");
+    const why = c.state === "closed" ? t("sh_closed", {who: short_((c.co || {}).by) || "purchasing", when: whenText((c.co || {}).at || "")}) : t("sh_co_unknown");
     return `<div class="rx-short rx-short-locked" data-short="${esc(k)}" data-co="${esc(c.state)}">${head}<div class="hint" role="status">${esc(why)}</div>${msg}</div>`;
   }
   if(L.rec){
