@@ -87,7 +87,7 @@ D.afterRender = function(){
 RX.registerAct("hist-filter", ({el}) => { H.hist = el.dataset.f || "all"; H.showAll = false; RX.refresh(); });
 RX.registerAct("hist-show-all", () => { H.showAll = true; RX.refresh(); });
 RX.registerAct("hist-row", ({el, ev}) => {
-  if(ev.target.closest(".datecell,.unitcell,.delcell,.rx-pb")) return;      // their own correction cells (and a problem's button) win
+  if(ev.target.closest(".datecell,.unitcell,.delcell,.rx-pb,.rx-rowfix")) return;      // their own correction cells (and a problem's button) win
   if(!showShelf()) return;
   const row = pageRows().find(r => String(r.n) === el.dataset.n); if(row) D.openRow(row);
 });
@@ -219,7 +219,9 @@ function rowHtml(){
         ${f.RecommendedBin && f.RecommendedBin !== f.Location ? `<div class="hint">Suggested: ${esc(f.RecommendedBin)}</div>` : ""}
         ${fin.FinReason ? `<div class="hint">${esc(fin.FinReason)}</div>` : ""}
         ${(!rec.sent && rec.err) ? `<div class="rx-note rx-red">${esc(rec.err)}</div>` : ""}
-        ${fin.FinShipment ? `<div class="hint num">Finale shipment ${esc(fin.FinShipment)}</div>` : ""}</div>`;
+        ${fin.FinShipment ? `<div class="hint num">Finale shipment ${esc(fin.FinShipment)}</div>` : ""}
+        ${(fixable(rec) && RX.problems && RX.problems.state.fixing !== rec.iid) ? `<button type="button" class="rx-btn" data-act="fix-open" data-iid="${esc(rec.iid)}">${esc(t("fix_btn"))}</button>` : ""}
+        ${(RX.problems && RX.problems.state.fixing === rec.iid) ? RX.problems.fixHtml(viewOf(rec)) : ""}</div>`;
     }
   }
   const basis = row.qtyBasis ? ` · case size ${esc(row.qtyShown)} (${esc(row.qtyBasis.replace(/_/g, " "))})` : "";
@@ -243,6 +245,25 @@ function rowHtml(){
   actions += `<button class="rx-btn" data-act="drawer-close">${esc(t("drawer_close"))}</button>`;
   return shell(row.prod.name, b + `<div class="rx-actions">${actions}</div>`);
 }
+/* ⭐ PM-3346 (Julia, 2026-10-29: "We need to have the Fix option visible on the main receiving screen instead of hunting for it … a
+   history of our current receiving scans … we can review/edit/fix anything we need to before confirming all counts"): every history row
+   that has a put-away record shows [Fix], which opens THIS row with the same Fix panel the Delivery list has (wrong count, scanned twice).
+   ⛔ On such a row the units cell and × used to change only the best-by record — never what goes into Finale — so they open Fix too. */
+const viewOf = (rec) => ({iid:rec.iid, fields:rec.fields, fin:rec.fin || {}, itemId:rec.itemId, etag:rec.etag, local:true});
+const fixable = (rec) => { const f = rec.fields || {}; return f.Kind !== "fix" && f.State !== "cancelled" && !rec.cancelled; };
+D.fixRow = function(row){
+  if(!RX.active() || !RX.intents) return false;
+  const recs = RX.intents.forRow(row).filter(fixable); if(!recs.length) return false;
+  H.open = "row"; H.rowN = row.n; H.editing = null; H.err = "";
+  /* ⛔ review (4): a case split over shelves has one Fix per part — none is preselected, so a whole-case count is never typed into one part */
+  if(RX.problems){ const P = RX.problems.state; P.fixing = recs.length === 1 ? recs[0].iid : null; P.fixErr = ""; P.draft = null; P.recvAsk = null; P.lowerAsk = null; P.overAsk = null; P.overOk = null; }
+  D.refresh(true);
+  setTimeout(() => { const i = document.getElementById("rxFixN"); if(i){ try{ i.focus(); i.select(); }catch(_){} } }, 30);
+  return true;
+};
+RX.fixRow = (row) => D.fixRow(row);
+RX.rowFixable = (row) => { try{ return RX.active() && !!RX.intents && RX.intents.forRow(row).some(fixable); }catch(_){ return false; } };
+RX.registerAct("row-fix", ({el}) => { const row = pageRows().find(r => String(r.n) === el.dataset.n); if(row) D.fixRow(row); });
 function startEdit(kind){ H.editing = kind; H.err = ""; D.refresh(true); }
 RX.registerAct("row-change-bin", () => startEdit("change"));
 RX.registerAct("row-tell-julia", () => startEdit("tell"));
