@@ -156,6 +156,8 @@ U.renderStart = function(){
     /* ⭐ PM-3348 (Jack, 2026-10-29): two ways, each saying how many scans a case takes. The Best-by-only link is gone in live. */
     h += `<div class="rx-h" style="margin-top:12px">${esc(t("start_how"))}</div><div class="rx-tiles">${avail.map(f => tileHtml(f, flow === f)).join("")}</div>`;
   }
+  /* ⭐ PM-3372: the frozen team's way in — the one full download, by hand (Jack: "a manual 'switch to offline mode' option") */
+  if(RX.CFG.flags && RX.offline) h += `<div class="rx-aux"><button type="button" class="rx-btn" data-act="offline-ready" style="min-height:48px">${esc(t("off_btn"))}</button></div>`;
   h += `<div class="rx-aux">${esc("Counting a shelf?")} <button class="rx-link" data-act="start-audit">${esc(t("audit_link"))}</button>` +
        (RX.CFG.floorcount_url ? ` · <a class="rx-link" data-act="start-floorcount" href="${esc(RX.CFG.floorcount_url)}" target="_blank" rel="noopener">${esc(t("floorcount_link"))}</a>` : "") + `</div>`;
   el.innerHTML = h;
@@ -274,6 +276,7 @@ function renderMenu(){
   m.innerHTML = `<button class="rx-menuitem" role="menuitem" data-act="menu-sounds">${esc(RX.soundOn() ? t("menu_sounds_on") : t("menu_sounds_off"))}</button>
     <button class="rx-menuitem" role="menuitem" data-act="menu-refresh-pack">${esc(t("menu_refresh"))}</button>
     <button class="rx-menuitem" role="menuitem" data-act="menu-fixes">${esc(t("menu_fixes"))}</button>
+    ${RX.offline ? `<button class="rx-menuitem" role="menuitem" data-act="offline-ready">${esc(t("off_menu"))}</button>` : ""}
     <button class="rx-menuitem" role="menuitem" data-act="menu-signout">${esc(t("menu_signout"))}</button>
     <button class="rx-menuitem" role="menuitem" data-act="menu-close" data-close="3">${esc(t("menu_close"))}</button>`;
 }
