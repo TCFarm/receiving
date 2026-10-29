@@ -272,7 +272,10 @@ RX.flow = function(){
   /* ⭐ ROUND 3 (Jack, 2026-10-19): GO LIVE FOR EVERYONE. In live the default is "Put away here" (one tap to change); the
      operator's own choice (incl. the "Best-by only (no shelf scan)" fallback link) holds for FLOW_STALE. null only when
      the shelf step itself is not available. */
-  if(fresh && CFG.flows[st.flow] && RX.flowAvailable(st.flow)) return st.flow;
+  /* ⛔ PM-3348 (Jack, 2026-10-29: "if you're receiving something, the intention is that it goes through the receiving step"): there is
+     no Best-by-only receiving in live any more — it skipped the count check, so a typo reached Finale unquestioned (Nixie, PO 2026102501).
+     A stored "bestby" choice reads as the default. */
+  if(fresh && CFG.flows[st.flow] && st.flow !== "bestby" && RX.flowAvailable(st.flow)) return st.flow;
   return RX.flowAvailable("direct") ? "direct" : null;
 };
 /* ⭐ round 3: has the crew CHOSEN a flow (fresh), as opposed to the live default ("Put away here")? */
@@ -409,7 +412,9 @@ RX.beforeCommit = function(p){
       rxs.done = true;
       /* ⭐ ROUND 4 (D16): Best-by only in LIVE also writes a STAGED intent ("Not put away yet"): the date is saved, the case is
          received only when it is later put away from the staged list. No prompt is added — the per-case speed is unchanged. */
-      if(flow === "bestby" && RX.mode() === "live" && !receivable(p)){
+      /* ⛔ PM-3348 review (5): live with no put-away step available (flow null) still writes the staged record — never a date with no
+         receipt behind it and nothing said */
+      if((flow === "bestby" || flow == null) && RX.mode() === "live" && !receivable(p)){
         rxs.flow = "bestby"; rxs.fields = Object.assign({}, rxs.fields, {state:"staged", workflow:"staged", stagedArea:RX.t("notput_area")});
       }else{ const w = receivable(p); if(w) rxs.note = w; }          // ⛔ review 2026-10-22 (3): no count / no name ⇒ no intent here either
       return false;
