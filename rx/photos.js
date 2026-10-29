@@ -36,7 +36,7 @@ const COPY_ADD = {
   ph_up:       "Uploading…",
   ph_wait:     "Waiting for signal — kept on this tablet",
   ph_noqueue:  "No signal, and this tablet cannot keep a photo. Wait for signal, then press Continue.",
-  ph_all_flash:"Nothing to put away — recorded as damaged for the buyer.",
+  ph_all_flash:"Nothing to put away — recorded as damaged for purchasing.",
 };
 for(const k of Object.keys(COPY_ADD)) if(!(k in RX.COPY)) RX.COPY[k] = COPY_ADD[k];
 const t = RX.t;
