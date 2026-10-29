@@ -3309,6 +3309,8 @@ document.addEventListener("click",e=>{
   const dl=e.target.closest(".delcell");
   if(dl){
     const row=rows.find(r=>String(r.n)===dl.dataset.n); if(!row) return;
+    /* ⭐ PM-3346: a scan with a put-away record is corrected through Fix (it reaches Finale); delete here only touched the date row */
+    if(window.RX && RX.fixRow && RX.fixRow(row)) return;
     /* ⛔ Never touch a row inside `save()`'s retry loop — its POST is still in
        flight and would land after the delete, recreating the row with an id
        nothing is tracking. Same reasoning as the date-cell `inflight` guard. */
@@ -3322,6 +3324,7 @@ document.addEventListener("click",e=>{
   const u=e.target.closest(".unitcell");
   if(u){
     const row=rows.find(r=>String(r.n)===u.dataset.n); if(!row) return;
+    if(window.RX && RX.fixRow && RX.fixRow(row)) return;          // ⭐ PM-3346: the units of a put-away scan are fixed where Finale hears it
     const val=window.prompt(`Units in this case of ${row.prod.name}?`, row.units ?? "");
     if(val===null) return;
     const n=parseInt(val,10);
@@ -3429,10 +3432,10 @@ function render(){
           r.fix ? ` <span class="tag t-q">${r.fixDead ? "fix refused" : "fix not sent"}</span>` : ""}${
           r.err&&bad?`<div style="font-size:11px;color:var(--stop)">${esc(r.err)}</div>`:""}${
           r.fix&&r.fixErr?`<div style="font-size:11px;color:var(--stop)">${esc(r.fixErr)}</div>`:""}</td>
-      <td class="num"><button class="delcell" data-act="row-delete" data-n="${r.n}" title="delete this scan"
+      <td class="num">${(window.RX && RX.rowFixable && RX.rowFixable(r)) ? `<button class="rx-btn rx-rowfix" data-act="row-fix" data-n="${r.n}" style="margin:0;min-height:48px;min-width:48px">Fix</button>` : `<button class="delcell" data-act="row-delete" data-n="${r.n}" title="delete this scan"
           aria-label="Delete this scan"
           style="margin:0;padding:9px 14px;min-height:0;font-size:17px;line-height:1;
-                 color:var(--stop);font-weight:700">&times;</button></td>
+                 color:var(--stop);font-weight:700">&times;</button>`}</td>
     </tr>`;}).join("");
   /* AUDIT roll-up: units per (sku, best by). This is the actual deliverable of
      a sweep — "how many units do we hold at each date" — and showing it live
