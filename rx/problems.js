@@ -49,8 +49,17 @@ const COPY_ADD = {
   pb_staged_dup:  "Finale already has all of this line ({n} of {m}) — this cart record ({area}, {age} ago) looks like the same case scanned again.",
   pb_dup_rm:      "Same case — remove this record",
   pb_dup_keep:    "It's a second case — put it away",
-  fix_pending:    "Sent to the buyer: the count is {n} — the line shows the old count until the buyer corrects Finale.",
-  fix_already_sent:"Already sent to the buyer: the count is {n}. Nothing else to do — the buyer corrects Finale.",
+  fix_pending:    "Correcting Finale to {n} — the line shows the old count until it is done.",
+  /* PM-3347: what happened to a correction, read from its fix row (the poster writes FinState / FinReason) */
+  fx_sent:        "Correction sent: Finale to {n}. The scan shows here when it is done.",
+  fx_fixing:      "Correcting Finale to {n}…",
+  fx_done:        "✓ This scan now has {n} in Finale",
+  fx_locked:      "Locked — {why}. Purchasing adjusts it by hand (they have the exact steps).",
+  fx_refused:     "Could not correct: {why}. Sent to purchasing.",
+  fx_person:      "Stopped — purchasing is checking it in Finale.",
+  fx_plan:        "With purchasing: corrections are not automatic yet, so purchasing corrects Finale to {n} by hand.",
+  fx_plan_no:     "Would not correct: {why}. Sent to purchasing.",
+  fix_already_sent:"Already sent: Finale to {n}. Nothing else to do.",
   pb_temp_ok:     "{cls} item on a {cls} shelf ({bin}) — sending it to Finale, nothing to answer.",
   pb_dup_auto:    "Same case as one already put away — nothing to do, this record clears itself.",
   pb_auto_dup:    "Counted as a duplicate automatically: the same item and best-by was put away later and Finale has the whole line.",
@@ -62,10 +71,10 @@ const COPY_ADD = {
   pb_refused:     "{why}. It did not go into Finale.",
   pb_rm_rescan:   "Remove it — I'll scan it again",
   pb_denied:      "This tablet was not allowed to send it to Finale.",
-  pb_buyer:       "With the buyer — flagged by mistake (being fixed). Nothing for you to do.",
+  pb_buyer:       "With purchasing — flagged by mistake (being fixed). Nothing for you to do.",
   pb_held:        "Held: {why}.",
-  pb_tell:        "Tell the buyer",
-  pb_told:        "Sent to the buyer ✓",
+  pb_tell:        "Send to purchasing",
+  pb_told:        "Sent to purchasing ✓",
   pb_busy:        "Working…",
   pb_changed:     "It changed on another tablet or in Finale — the list is refreshed. Look again.",
   pb_offline:     "Not saved — no signal or the sign-in expired. Try again.",
@@ -73,12 +82,12 @@ const COPY_ADD = {
   pb_done_temp:   "Sent again with your yes. It goes into Finale in a few minutes.",
   pb_done_rm:     "Removed.",
   pb_done_rm_bb:  "Removed. The best-by stays — another part of the same case uses it.",
-  pb_done_more:   "The buyer will add the extra to the PO in Finale.",
+  pb_done_more:   "Purchasing will add the extra to the PO in Finale.",
   pb_bb_failed:   "The scan is fixed, but the best-by list did not update ({why}). Tap again.",
   pb_holding:     "What's holding this truck",
   pb_sum_staged:  "{n} on a cart",
   pb_sum_crew:    "{n} need you",
-  pb_sum_buyer:   "{n} with the buyer",
+  pb_sum_buyer:   "{n} with purchasing",
   pb_none:        "Nothing is holding this truck.",
   fix_btn:        "Fix",
   fix_h:          "Fix this scan",
@@ -92,7 +101,7 @@ const COPY_ADD = {
   fix_cancel:     "Cancel",
   fix_bad_n:      "Type a whole number of units (1 or more).",
   fix_same:       "That is the count it already has.",
-  fix_in_finale:  "Already in Finale. A higher count receives the rest of the PO here; a lower count goes to the buyer.",
+  fix_in_finale:  "Already in Finale. A higher count receives the rest of the PO here; a lower count corrects Finale.",
   fix_po:         "PO {po}: ordered {ordered}{cases} · KeHE shipped {shipped} · Finale has received {have}{coming}.",
   fix_po_cases:   " ({c} cases of {cq})",
   fix_po_coming:  " · {n} more scanned, going into Finale now",
@@ -102,50 +111,50 @@ const COPY_ADD = {
   recv_over_h:    "That is {over} more than {basis_long}.",
   recv_over_body: "This case: {base} → {n}. Finale would then have {after} for this PO line. Only if you really have {n} in this case.",
   recv_case:      "This case: {old} on this scan + {more} received later = {total}.",
-  recv_case_has:  "This case already has {total} ({old} on this scan + {more} received later). If it is still wrong, tell the buyer.",
+  recv_case_has:  "This case already has {total} ({old} on this scan + {more} received later). If it is still wrong, tell purchasing.",
   recv_cart:      "{n} of this item is still on a cart ({area}, {age} ago). If that is the case you mean, put it away instead.",
   recv_cart_go:   "Put it away",
   recv_retype:    "That is a lot more than one case. Type {n} again to confirm:",
   recv_retype_bad:"The numbers don't match — type {n} to confirm, or Back.",
   recv_who:       "Signed in as {who}.",
-  recv_not_live:  "This tablet is not sending to Finale right now — tell the buyer. Nothing was saved.",
+  recv_not_live:  "This tablet is not sending to Finale right now — tell purchasing. Nothing was saved.",
   fix_units_case: "Units in this case (1 case = {cq})",
   recv_yes:       "Receive {d} more",
   recv_yes_over:  "Yes — we got {over} extra",
   recv_back:      "Back",
   recv_done:      "Receiving {d} more — it goes into Finale in a few minutes.",
-  recv_withdrawn: " The earlier note to the buyer was withdrawn.",
-  recv_left:      " Tell the buyer to ignore the earlier note (it could not be withdrawn).",
+  recv_withdrawn: " The earlier note to purchasing was withdrawn.",
+  recv_left:      " Tell purchasing to ignore the earlier note (it could not be withdrawn).",
   recv_noread:    "The PO could not be read — try again in a minute. Nothing was saved.",
-  recv_bb_failed: "The best-by list did not update ({why}) — tell the buyer. Do NOT receive it again.",
+  recv_bb_failed: "The best-by list did not update ({why}) — tell purchasing. Do NOT receive it again.",
   recv_changed:   "The numbers changed on another tablet or in Finale. Nothing was saved — check them, then Save count again.",
   fix_saved:      "Count saved.",
-  fix_saved_noBb: "Count saved. The best-by list was not changed (the rest of this case could not be read) — tell the buyer.",
-  fix_saved_finale:"Count fixed on the best-by list. The buyer will correct Finale.",
+  fix_saved_noBb: "Count saved. The best-by list was not changed (the rest of this case could not be read) — tell purchasing.",
+  fix_saved_finale:"Count fixed on the best-by list. Purchasing will correct Finale.",
   fix_rm_q:       "Remove this scan?\n\n{name}\n{units} units · best-by {bb}\n\nOnly if the SAME case was scanned twice.",
-  fix_rm_finale:  "Removed from the best-by list. The buyer will take {n} off in Finale.",
+  fix_rm_finale:  "Removed from the best-by list. Finale will be corrected ({n} off); the scan shows when it is done.",
   /* PM-3108: a part of a case removed — the case's best-by row keeps the date and now counts only the parts still there */
   pb_done_rm_lower:"Removed. The best-by stays — another part of the same case uses it — and now counts {n} units.",
-  pb_done_rm_noread:"Removed. The best-by list was not changed (the rest of this case could not be read) — tell the buyer.",
-  fix_rm_finale_lower:"Taken off this case's best-by count ({n} left). The buyer will take {d} off in Finale.",
+  pb_done_rm_noread:"Removed. The best-by list was not changed (the rest of this case could not be read) — tell purchasing.",
+  fix_rm_finale_lower:"Taken off this case's best-by count ({n} left). Finale will be corrected ({d} off).",
   /* PM-3109: "Scanned twice" on a scan whose rest was received later through Fix */
   fix_twice_rest: "This case also has {more} received later through Fix ({when}{fin}). Remove that one first — Fix on the {more}-unit scan → Scanned twice — then this one if it is still wrong. Nothing was changed.",
   fix_twice_rest_fin:" — already in Finale",
-  fix_lower_sending:"The count {n} is going to the buyer (the note is still sending). The best-by list was not changed yet — tell the buyer.",
-  fix_rm_finale_sending:"The buyer will take {n} off in Finale (the note is still sending). The best-by list was not changed yet — tell the buyer.",
-  fix_rm_finale_noread:"The buyer will take {n} off in Finale. The best-by list was not changed (the rest of this case could not be read) — tell the buyer.",
+  fix_lower_sending:"The count {n} is going to purchasing (the note is still sending). The best-by list was not changed yet — tell purchasing.",
+  fix_rm_finale_sending:"Finale will be corrected ({n} off) — the note is still sending. The best-by list was not changed yet — tell purchasing.",
+  fix_rm_finale_noread:"Finale will be corrected ({n} off). The best-by list was not changed (the rest of this case could not be read) — tell purchasing.",
   /* PM-3110: a LOWER count on a scan in Finale asks first, with units AND cases */
-  fix_lower_h:    "Take {d} off in Finale?",
-  fix_lower_body: "Finale has {old}{oldc} from this scan. You typed {n}{nc}. The buyer takes {d} off in Finale, and the best-by list is set to {n}.",
+  fix_lower_h:    "Correct Finale — take {d} off?",
+  fix_lower_body: "Finale has {old}{oldc} from this scan. You typed {n}{nc}. Finale will be corrected to {n} — the scan shows when it is done — and the best-by list is set to {n}.",
   fix_lower_c:    " ({c} of {cq})",
   fix_lower_cases:" = {c} case(s) of {cq}",
   fix_lower_units:" unit(s)",
   fix_lower_hint: "Counting CASES? {n} cases = {u} units. This box takes units.",
   fix_lower_yes:  "Yes — the count is {n}",
-  fix_lower_case: "This case has {total} ({old} on this scan + {more} received later). To lower it, first remove the later {more} (Fix on that scan → Scanned twice), then fix this one — or tell the buyer. Nothing was saved.",
-  fix_lower_done: "Sent to the buyer: the count is {n}. The best-by list now says {n} for this case.",
-  fix_lower_done_noBb:"Sent to the buyer: the count is {n}. The best-by list was not changed (the rest of this case could not be read) — tell the buyer.",
-  fix_lower_bbfail:"Sent to the buyer: the count is {n}.",
+  fix_lower_case: "This case has {total} ({old} on this scan + {more} received later). To lower it, first remove the later {more} (Fix on that scan → Scanned twice), then fix this one — or tell purchasing. Nothing was saved.",
+  fix_lower_done: "Sent — Finale will be corrected to {n}; the scan shows when it is done. The best-by list now says {n} for this case.",
+  fix_lower_done_noBb:"Sent to purchasing: the count is {n}. The best-by list was not changed (the rest of this case could not be read) — tell purchasing.",
+  fix_lower_bbfail:"Sent to purchasing: the count is {n}.",
   /* PM-3111: the SKU is on more than one open PO — say which one Finale will fill */
   recv_po_multi:  "This item is on {k} open POs. Finale fills the oldest PO that has room first, so these go on PO {po}.",
   recv_po_multi_over:"This item is on {k} open POs. A confirmed extra goes on the OLDEST one: PO {po}.",
@@ -176,6 +185,33 @@ function fixRowsFor(iid){
   return out;
 }
 P.fixRowsFor = fixRowsFor;
+/* ⭐ PM-3347: the newest COUNT correction of a scan (FixUnits set — a shelf-move note has none) and what became of it */
+const FX_WHY = {STOCK_MOVED:"the stock was already moved or sold", FOREIGN:"someone else received this item on the PO",
+  NOT_OURS:"that receipt was not made by the tablet", NOT_RECEIVED:"that receipt is not received in Finale", RECORDS_DISAGREE:"the records disagree",
+  NO_LINE:"the item is no longer on the PO", NO_CANCEL:"Finale would not cancel that receipt", FINALE_REFUSED:"Finale refused the change",
+  NOT_STAFF:"it was not sent by a signed-in staff member", BAD_SHAPE:"the correction was incomplete",
+  PARTLY_HELD:"part of this scan was held or posted separately", TOO_OLD:"the delivery is too old to correct by itself"};
+function fxLockWhy(r){ return /invoice is in/i.test(r) ? "KeHE's invoice is in" : /earlier month/i.test(r) ? "the receipt is from an earlier month"
+  : /no longer open/i.test(r) ? "the PO is closed in Finale" : "it could not be checked"; }
+function fxWhy(r){ const m = /^([A-Z_]+):\s*(.*)$/.exec(String(r || "")); if(!m) return String(r || "").slice(0, 120);
+  return FX_WHY[m[1]] || m[2].slice(0, 120) || m[1].toLowerCase().replace(/_/g, " "); }
+P.fixStatus = function(iid){
+  const fr = fixRowsFor(iid).filter(x => x.FixUnits != null && x.FixUnits !== ""); if(!fr.length) return null;
+  const f = fr[fr.length - 1], st = String(f.FinState || ""), r = String(f.FinReason || ""), n = fmtN(+f.FixUnits || 0);
+  if(st === "fixed") return {tone:"go", text:t("fx_done", {n: fmtN(f.FinUnitsPosted != null && f.FinUnitsPosted !== "" ? +f.FinUnitsPosted : +f.FixUnits || 0)})};
+  if(st === "locked") return {tone:"wait", text:t("fx_locked", {why: fxLockWhy(r)})};
+  if(st === "refused") return {tone:"stop", text:t("fx_refused", {why: fxWhy(r)})};
+  if(st === "uncertain" && /^(NEEDS_PERSON|READBACK_MISMATCH)/.test(r)) return {tone:"stop", text:t("fx_person")};
+  if(st === "posting" || st === "uncertain") return {tone:"wait", text:t("fx_fixing", {n})};
+  if(/^PLAN: would correct/.test(r)) return {tone:"wait", text:t("fx_plan", {n: fmtN(f.FinUnitsWould != null && f.FinUnitsWould !== "" ? +f.FinUnitsWould : +f.FixUnits || 0)})};
+  if(/^PLAN: would not correct/.test(r)) return {tone:"stop", text:t("fx_plan_no", {why: fxWhy(r.replace(/^PLAN: would not correct\s*[—-]\s*/, ""))})};
+  return {tone:"wait", text:t("fx_sent", {n})};
+};
+P.fixStatusHtml = function(iid){
+  const s0 = P.fixStatus(iid); if(!s0) return "";
+  const col = s0.tone === "go" ? "var(--go)" : s0.tone === "stop" ? "var(--stop)" : "var(--wait)";
+  return `<div class="hint rx-fxstatus" role="status" data-tone="${s0.tone}" style="border-left:4px solid ${col};padding-left:8px"><strong>${esc(s0.text)}</strong></div>`;
+};
 function fixSentFor(iid){
   for(const x of (I.allPo ? I.allPo() : I.allToday())){ const f = x.fields || {}; if(f.Kind === "fix" && f.SplitOf === iid) return true; }
   return false;
@@ -220,7 +256,7 @@ P.of = function(v){
       return {kind:"over", owner:"crew", text:t("pb_over", {n: m ? m[1].replace(/\.0+$/, "") : "the units"}),
               act:"pb-remove", label:t("pb_over_rm"), act2:"pb-tell", label2:t("pb_over_more")};
     }
-    return {kind:"held", owner:"crew", text:t("pb_held", {why: sentence(fin) || c.toLowerCase().replace(/_/g, " ") || "see the buyer"}),
+    return {kind:"held", owner:"crew", text:t("pb_held", {why: sentence(fin) || c.toLowerCase().replace(/_/g, " ") || "see purchasing"}),
             act:"pb-tell", label:t("pb_tell")};
   }
   if(fs === "refused"){
@@ -781,8 +817,7 @@ P.fixHtml = function(v){
     ${facts ? `<div class="hint rx-fix-po">${esc(facts)}</div>` : ""}
     ${(() => { if((v.fin || {}).FinState !== "posted") return ""; const c = caseNow(v); if(!c.more) return "";
       return `<div class="hint rx-fix-case">${esc(t("recv_case", {old:fmtN(c.old), more:fmtN(c.more), total:fmtN(c.total)}))}</div>`; })()}
-    ${(() => { const fr = fixRowsFor(v.iid).filter(x => x.FixUnits != null && +x.FixUnits > 0); if(!fr.length) return "";
-      const last = fr[fr.length - 1]; return `<div class="hint rx-pb-msg" role="status"><strong>${esc(t("fix_pending", {n:String(+last.FixUnits)}))}</strong></div>`; })()}
+    ${P.fixStatusHtml(v.iid)}
     <label class="hint" for="rxFixN">${esc((v.fin || {}).FinState === "posted" && +f.CaseQty > 0 ? t("fix_units_case", {cq:fmtN(f.CaseQty)}) : t("fix_units"))}</label>
     <input id="rxFixN" class="num" type="text" inputmode="numeric" maxlength="5" autocomplete="off" value="${esc(P.state.draft && P.state.draft.iid === v.iid ? P.state.draft.val : String(f.Units ?? ""))}" aria-label="${esc(t("fix_units"))}">
     <button type="button" class="rx-btn primary" data-act="fix-save" data-iid="${esc(v.iid)}">${esc(t("fix_save"))}</button>
@@ -959,7 +994,7 @@ RX.registerAct("fix-save", ({el}) => { const iid = el.dataset.iid;
   say(iid, (fs && !reeval) ? t("fix_saved_finale") : t("fix_saved"));
 }); });
 /* ⭐ PM-3109 (2026-10-23, misuse review (8)): the units received LATER onto this same case through Fix ("receive the rest" — same BB row,
-   its own root, scanned after this one), not already flagged "scanned twice" to the buyer. "Scanned twice" on the original while such a
+   its own root, scanned after this one), not already flagged "scanned twice" to purchasing. "Scanned twice" on the original while such a
    record is live used to tell the buyer to take the ORIGINAL off while the +N still posted, and never mentioned it. */
 const atMs = (x) => { const m = Date.parse(((x && x.fields) || {}).ScanAt); return isNaN(m) ? 0 : m; };
 function laterRest(v){
