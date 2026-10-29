@@ -178,7 +178,8 @@ S.line = function(po, line){
 function facts(po, line, L){
   const cf = RX.po.confirmed ? RX.po.confirmed(po.order_id, line.sku) : null;
   const have = cf ? +cf.units || 0 : 0, coming = Math.max(0, L.got - have);
-  return t("sh_facts", {po:String(po.order_id), ordered:fmtN(L.ordered), shipped: L.known ? fmtN(L.cap) : t("sh_unk"), have:fmtN(have),
+  const sh = RX.po.shippedInfo ? RX.po.shippedInfo(po.order_id, line.sku) : null;      // PM-3345: information only — the limit is the PO
+  return t("sh_facts", {po:String(po.order_id), ordered:fmtN(L.ordered), shipped: sh != null ? fmtN(sh) : t("sh_unk"), have:fmtN(have),
                         coming: coming > 0 ? t("sh_facts_coming", {n:fmtN(coming)}) : ""});
 }
 const whenText = (iso) => { const d = new Date(Date.parse(iso)); if(isNaN(d)) return ""; return (iso ? String(iso).slice(5, 10) + " " : "") + RX.hhmm(iso); };
