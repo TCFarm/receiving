@@ -85,11 +85,18 @@ PO.confirmed = function(poId, sku){
    shipped (else what we ordered) — the same confirm the receive ladder has (overship), so nothing is left HELD for someone to find.
    Counted: what Finale has (PO.confirmed) + scans already placed and on their way (ready, not yet posted, or a cold-shelf hold that
    becomes a receipt once someone says yes) + `adding`. ⛔ A confirm, never a cap (hard boundary 6). -> {n, cap, basis, over} | null */
-/* the limit the poster uses: what KeHE SHIPPED when the shipped file is known, else what we ordered (review 2026-10-23 PM (3)) */
+/* the limit the poster uses. ⭐ PM-3345 (Jack, 2026-10-29: "We should be expecting the information that's in the finale purchase
+   order, which should be correct at that point"): the Finale PO line — KeHE's ship confirmation, out-of-stock emails and invoices
+   already set it to what is coming. ⛔ Never KeHE's shipped FILE: an add-on order missing from it read "KeHE shipped 0" and every
+   case of it was questioned (Spindrift, PO 2026102501). */
 PO.capOf = function(poId, sku){
   const po = RX.pack.poById(poId), line = po && PO.line(po, sku); if(!line) return null;
-  const sh = line.shipped_units, known = (typeof sh === "number" && isFinite(sh));
-  return {cap: known ? sh : num(line.ordered_units != null ? line.ordered_units : line.qty), basis: known ? "shipped" : "ordered", known};
+  return {cap: num(line.ordered_units != null ? line.ordered_units : line.qty), basis: "ordered", known: true};
+};
+/* PM-3345: what KeHE's paperwork says it shipped, for the PO-facts line ONLY (information, never the expectation) — null = not known */
+PO.shippedInfo = function(poId, sku){
+  const po = RX.pack.poById(poId), line = po && PO.line(po, sku); if(!line) return null;
+  const sh = line.shipped_units; return (typeof sh === "number" && isFinite(sh)) ? sh : null;
 };
 PO.putCheck = function(poId, sku, adding){
   const cp = PO.capOf(poId, sku); if(!cp) return null;
@@ -104,7 +111,7 @@ PO.putCheck = function(poId, sku, adding){
     if(fs === "" || fs === "posting" || fs === "uncertain" || (fs === "held" && /^TEMP_UNCONFIRMED/.test(String(v.fin.FinReason || "")))) coming += num(f.Units);
   }
   const n = num(cf.units) + coming + num(adding);
-  return {n, have: num(cf.units) + coming, cap, basis: known ? "shipped" : "ordered", over: n > cap};
+  return {n, have: num(cf.units) + coming, cap, basis: "ordered", over: n > cap};          // PM-3345: the PO line
 };
 PO.counts = function(po, line){
   const ordered = num(line.ordered_units != null ? line.ordered_units : line.qty);
@@ -213,21 +220,19 @@ PO.summary = function(){
 /* ───────────────────────── the over-shipment confirm (round 3, Jack 2026-10-19) ─────────────────────────
    Before the shelf / stage step, when the units received for this SKU on its matched PO — what Finale held when the pack was built
    + every intent today (all tablets, the list read) + this tablet's unsent ones (all inside PO.counts) + THIS case — would be MORE
-   than KeHE shipped (the pack line's `shipped_units`) or, when the shipped file is not known (null), more than we ordered, the crew
-   is asked once: "You've now received {n} of {item}. KeHE says it shipped {m}. Is {n} right?"
+   than the Finale PO line expects (PM-3345: the PO, never KeHE's shipped file), the crew is asked once: "You've now received {n}
+   of {item}. The purchase order expects {m}. Is {n} right?"
    [Yes, {n} is right] (primary; the intent carries OverConfirmed = true) · [Fix the count] (back to the quantity, nothing recorded).
    ⛔ A CONFIRM, never a cap (hard boundary 6: no hard-coded maximums) and ⛔ never in Best-by-only (that flow runs no steps).
    ⛔ Not for a SKU that is on no PO (there is nothing to exceed). Enter = the primary; a stray scan is refused (the page's
    "finish this item first — scan NOT recorded"). */
 PO.overCap = function(p, qty){
   const m = PO.matchFor(p); if(!m || !m.po || !m.line || !m.counts) return null;
-  const line = m.line, c = m.counts;
-  const sh = line.shipped_units;
-  const known = (typeof sh === "number" && isFinite(sh));
-  const cap = known ? sh : num(c.ordered);
-  if(!(cap > 0) && !known) return null;
+  const c = m.counts;
+  const cap = num(c.ordered);                              // PM-3345: the Finale PO line, the same number the poster checks
+  if(!(cap > 0)) return null;
   const n = c.total + num(qty);
-  return {n, cap, basis: known ? "shipped" : "ordered", over: n > cap, match: m};
+  return {n, cap, basis: "ordered", over: n > cap, match: m};
 };
 RX.registerStep("overship", {
   keepScan: false,
