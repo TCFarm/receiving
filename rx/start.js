@@ -153,8 +153,8 @@ U.renderStart = function(){
   }else if(avail.length){
     /* ⭐ ROUND 3 (Jack, 2026-10-19): LIVE FOR EVERYONE — two tiles, "Put away here" pre-selected (RX.flow() defaults to it), and a
        small secondary link as the fallback. No practice toggle, no practice copy. */
-    h += `<div class="rx-h" style="margin-top:12px">${esc(t("start_how"))}</div><div class="rx-tiles">${avail.map(f => tileHtml(f, flow === f)).join("")}</div>
-      <div class="rx-aux"><button class="rx-link" data-act="start-bestby" aria-pressed="${flow === "bestby"}">${esc(t("link_bestby_live"))}</button>${flow === "bestby" ? ` <span class="hint" style="display:inline">${esc(t("bestby_live_on"))}</span>` : ""}</div>`;
+    /* ⭐ PM-3348 (Jack, 2026-10-29): two ways, each saying how many scans a case takes. The Best-by-only link is gone in live. */
+    h += `<div class="rx-h" style="margin-top:12px">${esc(t("start_how"))}</div><div class="rx-tiles">${avail.map(f => tileHtml(f, flow === f)).join("")}</div>`;
   }
   h += `<div class="rx-aux">${esc("Counting a shelf?")} <button class="rx-link" data-act="start-audit">${esc(t("audit_link"))}</button>` +
        (RX.CFG.floorcount_url ? ` · <a class="rx-link" data-act="start-floorcount" href="${esc(RX.CFG.floorcount_url)}" target="_blank" rel="noopener">${esc(t("floorcount_link"))}</a>` : "") + `</div>`;
