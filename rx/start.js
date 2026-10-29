@@ -210,7 +210,7 @@ const DET_COPY = {
   pdet_finale:  "Finale is not answering the mini right now.",
   pdet_budget:  "The mini is pausing to stay under Finale's hourly limit — it catches up on its own.",
   pdet_tablet:  "This tablet still holds {n} scan(s) it has not sent — keep this page open with signal.",
-  pdet_do:      "Your scans are saved. Keep scanning. If this stays over 30 minutes, tell the buyer.",
+  pdet_do:      "Your scans are saved. Keep scanning. If this stays over 30 minutes, tell purchasing.",
   btn_hide:     "Hide",
 };
 for(const k of Object.keys(DET_COPY)) if(!(k in RX.COPY)) RX.COPY[k] = DET_COPY[k];
