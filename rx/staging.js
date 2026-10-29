@@ -72,12 +72,12 @@ const COPY_ADD = {
   oncart_row:      "Yes — this is it: {units} u · best-by {bb} · {area} · staged {when} by {who}",
   oncart_no:       "No — this is another case (we got extra)",
   oncart_sub:      "This would make {n} — KeHE says it shipped {cap}.",
-  oncart_sub_ord:  "This would make {n} — we ordered {cap}.",
+  oncart_sub_ord:  "This would make {n} — the purchase order expects {cap}.",
   oncart_sort:     "{name} is already on the cart — nothing new recorded.",
   oncart_intray:   "{name} from the cart is in your hand. Now scan the SHELF TAG where you put it — nothing new was recorded.",
   putover_title:   "Already received: {have} of {item} — this makes {n}.",
   putover_body:    "KeHE says it shipped {cap}. Did we really get {add} more?",
-  putover_body_ord:"We ordered {cap}. Did we really get {add} more?",
+  putover_body_ord:"The purchase order expects {cap}. Did we really get {add} more?",
   putover_yes:     "Yes — we got {add} extra",
   putover_no:      "No — same case counted twice, remove it",
   putover_removed: "Removed {name} — it was the same case counted twice. Nothing went into Finale.",
@@ -87,7 +87,8 @@ const COPY_ADD = {
   tray_remove:     "Remove",
   tray_some:       "Only some go here",
   tray_offer:      "Put {name} on {bin}",
-  tray_offer_hint: "the shelf you scanned first — or scan another shelf tag",
+  tray_offer_n:    "Put these {n} on {bin}",
+  tray_offer_hint: "Enter puts it there — or scan another shelf tag",
   tray_some_q:     "How many go on this shelf?",
   tray_some_save:  "Save",
   tray_in:         "in tray",
@@ -270,7 +271,7 @@ function trayBar(){
         ${btn("tray-remove", "✕", "", `data-iid="${esc(r.iid)}" aria-label="${esc(t("tray_remove"))} ${esc(nameOf(r.sku))}"`)}</div>`;
     }
     const of = offerNow();
-    if(of) h += `<div class="rx-st-offer" id="rxTrayOffer">${btn("tray-offer-place", t("tray_offer", {bin: of.bin, name: nameOf(byIid(of.iid).sku)}), "primary", "data-primary")}
+    if(of) h += `<div class="rx-st-offer" id="rxTrayOffer">${btn("tray-offer-place", of.iids.length === 1 ? t("tray_offer", {bin: of.bin, name: nameOf(byIid(of.iids[0]).sku)}) : t("tray_offer_n", {bin: of.bin, n: of.iids.length}), "primary", "data-primary")}
       <span class="hint" style="display:inline">${esc(t("tray_offer_hint"))}</span></div>`;
     h += `<div class="hint">${esc(t("tray_hint"))}</div></div>`;
   }
@@ -332,12 +333,18 @@ RX.registerAct("leftovers-open", () => { if(RX.setFlow("staged")) RX.refresh(); 
 
 /* ───────────────────────── the tray ───────────────────────── */
 function trayTouch(){ S.tray.at = RX.now(); saveTray(); }
-/* PM-3333 + review 2026-10-28: the shelf scanned first is offered for the ONE item taken after it, by the person who scanned it. It lapses
-   the moment that item leaves the tray (placed, removed, cancelled) or another account is on the tablet — never a stale "Put … on X" */
+/* PM-3333 + review 2026-10-28: the shelf scanned first is offered for the items taken AFTER it (while it is the current shelf), by the
+   person who scanned it — never an item already in the tray before the tag. It lapses for an item the moment that item leaves the tray
+   (placed, removed, cancelled), and wholly when another account is on the tablet — never a stale "Put … on X" */
 const meNow = () => { try{ return (typeof account !== "undefined" && account && (account.username || account.homeAccountId)) || ""; }catch(_){ return ""; } };
 function offerNow(){
   const o = S.tray.offer; if(!o) return null;
-  if(typeof o !== "object" || !o.iid || o.by !== meNow() || !S.tray.items.some(x => x.iid === o.iid) || !byIid(o.iid)){ S.tray.offer = null; saveTray(); return null; }
+  /* ⛔ review (3): the offer lives only while its shelf is still the CURRENT one (not expired, not Done, not switched) */
+  const sh = PA.shelf.current();
+  const iids = (typeof o === "object" && Array.isArray(o.iids) && o.by === meNow() && sh && String(sh.bin).toUpperCase() === String(o.bin).toUpperCase())
+    ? o.iids.filter(i => S.tray.items.some(x => x.iid === i) && byIid(i)) : [];
+  if(!iids.length){ S.tray.offer = null; saveTray(); return null; }
+  if(iids.length !== o.iids.length){ o.iids = iids; saveTray(); }
   return o;
 }
 function clearTray(notice){ S.tray = {items: [], at: 0, offer: null}; S.some = null; saveTray(); S.notice = notice || ""; ST.render(); try{ maybeReturn(); }catch(_){} }
@@ -482,6 +489,7 @@ async function executePlace(dec){
     const units = placed.reduce((a, x) => a + (x.take || x.r.units || 0), 0);
     const head = placed.length === 1 ? t("placed_flash1", {n: units, name: nameOf(placed[0].r.sku), bin: dec.info.name}) : t("placed_flash", {n: placed.length, bin: dec.info.name});
     S.placed = {items: placed, bin: dec.info.name};
+    { const sh = PA.shelf.get(); if(sh && String(sh.bin).toUpperCase() === String(dec.info.name).toUpperCase()) for(let i = 0; i < placed.length; i++) PA.shelf.bump(); }   // PM-3361: the shelf bar counts them
     RX.flash(`<div class="last rx-last" role="status"><div class="nm">✓ ${esc(head)}</div><div class="rx-lastbtns">${btn("placed-undo", t("placed_undo"))}</div></div>`);
     RX.sound("saved");
   }
@@ -566,17 +574,25 @@ const oldestFirst = (a) => a.slice().sort((x, y) => String(x.best || "9999").loc
 function onTagScan(id){
   const info = id.info;
   if(!info.active){ prompt_("stop", esc(t("inactive_card", {bin: info.name})), esc(t("nothing_recorded")), undefined, {keepScan: true}); RX.sound("refused"); return true; }
+  /* ⭐ PM-3361 (Jack, 2026-10-29: "those paths should … work the same for the same step"): a shelf tag here does what it does in Put
+     away here — it becomes the CURRENT shelf until another tag, Done or 10 min idle (PA.shelf). Items in the tray go there now; every
+     item scanned after it is offered for it (Enter). It used to arm ONE item, so the crew scanned tag, item, tag, item. */
+  const sw = PA.shelf.set(info.name);
+  if(sw.had && !sw.same) RX.toast(t("shelf_switched", {bin: info.name}));
   if(S.tray.items.length){
     const entries = trayItems().map(({x, r}) => ({x, r}));
     if(!entries.length){ clearTray(""); return true; }
     trayTouch(); startPlace(info, "scanned", entries); return true;
   }
-  PA.armed.set(info.name); RX.sound("staged"); return true;                         // tag first: arms ONE item
+  RX.sound("staged"); ST.render(); return true;
 }
 async function onItemScan(id, raw){
   const mineAll = ST.records().filter(r => r.sku === id.sku && !inTray(r.iid));
   const all = mineAll.filter(r => !holdWaiting(r));
-  const armed = PA.armed.take();                                                      // ⛔ single-shot: this item consumes it
+  /* PM-3361: the current shelf, else a one-shot arm. ⛔ review (3): an item going into the TRAY does not keep the shelf alive — only a
+     placement does (PA.shelf.bump) — so the 10-min idle ends a shelf the crew walked away from */
+  const sh = PA.shelf.current();
+  const armed = sh ? {bin: sh.bin} : PA.armed.take();
   if(!all.length && mineAll.length){                                                  // round 4: on hold — put-away is disabled until the PO line exists
     prompt_("stop", esc(t("hold_wait_card", {name: id.prod.name})), RX.idLine(id.sku), `<div class="rx-pa-btns">${btn("hold-wait-close", t("hold_wait_close"), "primary", 'data-close="3"')}</div>`, {keepScan: true});
     RX.sound("refused"); return true;
@@ -598,7 +614,9 @@ function take(r, armed){
   /* ⭐ PM-3333: a shelf tag scanned FIRST no longer places the item at once (no "Only some" was possible) — the item goes in the tray and
      the shelf is OFFERED there: [Put the tray on <shelf>] or "Only some go here" first, the same as item-then-tag */
   addToTray(r);
-  if(armed){ const info = RX.pack.binInfo(armed.bin || armed); S.tray.offer = info && info.active ? {bin: info.name, iid: r.iid, by: meNow()} : null; }
+  if(armed){ const info = RX.pack.binInfo(armed.bin || armed);
+    if(!(info && info.active)) S.tray.offer = null;
+    else{ const o = offerNow(); S.tray.offer = (o && o.bin === info.name) ? Object.assign(o, {iids: o.iids.concat(o.iids.includes(r.iid) ? [] : [r.iid])}) : {bin: info.name, iids: [r.iid], by: meNow()}; } }
   saveTray(); ST.render();          // an item scanned with no tag joins the tray and leaves the earlier item's offer alone
 }
 function openLotPick(all, armed){
@@ -612,7 +630,7 @@ RX.registerAct("tray-offer-place", () => {   // PM-3333: place the tray on the s
   const o = offerNow(); if(!o) { ST.render(); return; } const bin = o.bin, info = RX.pack.binInfo(bin);
   S.tray.offer = null; saveTray();
   if(!info || !info.active){ ST.render(); RX.toast(t("unknown_tag", {code: bin})); return; }
-  const entries = trayItems().filter(({r}) => r.iid === o.iid).map(({x, r}) => ({x, r})); if(!entries.length){ ST.render(); return; }
+  const entries = trayItems().filter(({r}) => o.iids.includes(r.iid)).map(({x, r}) => ({x, r})); if(!entries.length){ ST.render(); return; }
   trayTouch(); startPlace(info, "armed", entries);
 });
 RX.registerAct("hold-wait-close", () => { try{ clearPrompt(); }catch(_){} });
