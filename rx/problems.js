@@ -151,6 +151,13 @@ const COPY_ADD = {
   fix_lower_units:" unit(s)",
   fix_lower_hint: "Counting CASES? {n} cases = {u} units. This box takes units.",
   fix_lower_yes:  "Yes — the count is {n}",
+  /* PM-3384 (Jack, 2026-10-29: "yes do that and have the confirm for sure"): WHY the count is lower decides whether KeHE owes a credit */
+  fix_lower_why:  "Why is it {d} lower?",
+  fix_lower_short:"{d} never arrived",
+  fix_lower_count:"Miscounted / scanned twice",
+  fix_lower_need: "Pick why first — it decides whether KeHE owes us a credit. Nothing was sent.",
+  fix_lower_short_ok:" Recorded as never arrived ({n} short on this line) — purchasing claims the credit.",
+  fix_lower_short_fail:" Recording it as never arrived did not work ({why}) — mark it with “We never got it” on the PO line.",
   fix_lower_case: "This case has {total} ({old} on this scan + {more} received later). To lower it, first remove the later {more} (Fix on that scan → Scanned twice), then fix this one — or tell purchasing. Nothing was saved.",
   fix_lower_done: "Sent — Finale will be corrected to {n}; the scan shows when it is done. The best-by list now says {n} for this case.",
   fix_lower_done_noBb:"Sent to purchasing: the count is {n}. The best-by list was not changed (the rest of this case could not be read) — tell purchasing.",
@@ -849,13 +856,23 @@ function lowerHtml(v, a){
     <div class="hint">${esc(nameOf(f.Sku))} · ${esc([RX.brandOf(f.Sku), f.Sku].filter(Boolean).join(" · "))}${f.BestBy ? " · bb " + esc(f.BestBy) : ""}${f.Location ? " · " + esc(f.Location) : ""}</div>
     <div class="hint">${esc(t("fix_lower_body", {old:fmtN(a.old), oldc, n:fmtN(a.n), nc, d:fmtN(a.old - a.n)}))}</div>
     ${hint}
-    <button type="button" class="rx-btn primary" data-act="fix-lower" data-iid="${esc(v.iid)}">${esc(t("fix_lower_yes", {n:fmtN(a.n)}))}</button>
+    <div class="hint"><strong>${esc(t("fix_lower_why", {d:fmtN(a.old - a.n)}))}</strong></div>
+    <div class="rx-row" role="radiogroup">
+      <button type="button" class="rx-btn${a.why === "short" ? " primary" : ""}" aria-pressed="${a.why === "short"}" data-act="fix-lower-short" data-iid="${esc(v.iid)}">${esc(t("fix_lower_short", {d:fmtN(a.old - a.n)}))}</button>
+      <button type="button" class="rx-btn${a.why === "count" ? " primary" : ""}" aria-pressed="${a.why === "count"}" data-act="fix-lower-count" data-iid="${esc(v.iid)}">${esc(t("fix_lower_count"))}</button>
+    </div>
+    <button type="button" class="rx-btn primary" data-act="fix-lower" data-iid="${esc(v.iid)}"${a.why ? "" : ' aria-disabled="true"'}>${esc(t("fix_lower_yes", {n:fmtN(a.n)}))}</button>
     <button type="button" class="rx-btn" data-act="fix-lower-back" data-iid="${esc(v.iid)}">${esc(t("recv_back"))}</button>
     ${err ? `<div class="rx-note rx-red" role="alert">${esc(err)}</div>` : ""}</div>`;
 }
 RX.registerAct("fix-lower-back", () => { P.state.lowerAsk = null; P.state.fixErr = ""; RX.call("drawer", "refresh", true); });
+const lowerWhy = (why) => ({el}) => { const a = P.state.lowerAsk; if(!a || a.iid !== el.dataset.iid) return;
+  a.why = why; P.state.fixErr = ""; RX.call("drawer", "refresh", true); };
+RX.registerAct("fix-lower-short", lowerWhy("short"));
+RX.registerAct("fix-lower-count", lowerWhy("count"));
 RX.registerAct("fix-lower", ({el}) => { const iid = el.dataset.iid;
   const a = P.state.lowerAsk; if(!a || a.iid !== iid) return;
+  if(a.why !== "short" && a.why !== "count"){ P.state.fixErr = t("fix_lower_need"); RX.call("drawer", "refresh", true); return; }   // ⛔ PM-3384: never sent without a why
   return run(iid, async () => {
     const v = findV(iid); const fs = ((v && v.fin) || {}).FinState || "";
     /* ⛔ re-checked at the tap: the scan moved (the poster, another tablet) ⇒ nothing is sent and the card closes */
@@ -863,19 +880,26 @@ RX.registerAct("fix-lower", ({el}) => { const iid = el.dataset.iid;
       P.state.lowerAsk = null; P.state.fixErr = t("pb_changed"); return; }
     P.state.lowerAsk = null; P.state.fixing = null; P.state.fixErr = "";
     if(fixRowsFor(iid).some(x => +x.FixUnits === a.n)){ say(iid, t("fix_already_sent", {n:String(a.n)})); return; }
-    const note = tellBuyer(v, `crew: the count is ${a.n}, not ${a.old} — correct Finale by ${a.n - a.old}`, a.n);
+    const note = tellBuyer(v, `crew: the count is ${a.n}, not ${a.old} — correct Finale by ${a.n - a.old}` + (a.why === "short" ? " — never arrived" : " — miscounted"), a.n);
     const f = v.fields || {};
+    /* ⭐ PM-3384: "never arrived" also becomes the line's crew short (→ an expected credit from KeHE); its outcome is added to what is said */
+    let sx = "";
+    if(a.why === "short"){
+      const r = RX.short && RX.short.addFromFix ? await RX.short.addFromFix(String(f.Po || ""), f.Sku, a.old - a.n, iid) : {ok:false, msg:t("pb_noread")};
+      sx = r.ok ? t("fix_lower_short_ok", {n:fmtN(r.n)}) : t("fix_lower_short_fail", {why:r.msg});
+    }
+    const say1 = (i, m) => say(i, m + sx);
     if(String(f.BbItemId || "")){
-      if(!(await noteSent(note))){ say(iid, t("fix_lower_sending", {n:fmtN(a.n)})); return; }
+      if(!(await noteSent(note))){ say1(iid, t("fix_lower_sending", {n:fmtN(a.n)})); return; }
       const b = await bbApply(v, (m) => {                   // PM-3169: the case total from the list at write time
         if(!poRead()) return {op:"keep"};
         const parts = partsIn(m, v).filter(x => (((x.fields || {}).Kind) || "intent") === "intent" && !flaggedIn(m, x));
         return {op:"units", n: parts.reduce((s0, x) => s0 + countOf(m, x), 0) + a.n};
       });
-      if(b.kept){ say(iid, t("fix_lower_done_noBb", {n:fmtN(a.n)})); return; }
-      if(!b.ok){ say(iid, t("fix_lower_bbfail", {n:fmtN(a.n)}) + " " + t("pb_bb_failed", {why:b.why})); return; }
+      if(b.kept){ say1(iid, t("fix_lower_done_noBb", {n:fmtN(a.n)})); return; }
+      if(!b.ok){ say1(iid, t("fix_lower_bbfail", {n:fmtN(a.n)}) + " " + t("pb_bb_failed", {why:b.why})); return; }
     }
-    say(iid, t("fix_lower_done", {n:fmtN(a.n)}));
+    say1(iid, t("fix_lower_done", {n:fmtN(a.n)}));
   });
 });
 RX.registerAct("fix-recv-back", () => { P.state.recvAsk = null; P.state.fixErr = ""; RX.call("drawer", "refresh", true); });
