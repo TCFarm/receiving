@@ -278,6 +278,25 @@ async function cancelAll(L){
   return "";
 }
 
+/* ⭐ PM-3384 (Jack, 2026-10-29): a lower count through Fix that the crew says NEVER ARRIVED also becomes the line's crew short, so it
+   reaches expected credits like "We never got it". A line's short is ONE absolute number (the newest live record; the older ones are
+   cancelled), so the new record is the existing short PLUS these d units, never beyond the PO line. Same guards as "We never got it":
+   live mode, the PO readable, not closed out. -> {ok:true, n} | {ok:false, msg} */
+S.addFromFix = async function(poId, sku, d, scanIid){
+  const c = find(keyOf(poId, sku)); if(!c) return {ok:false, msg:t("sh_noread")};
+  if(!usable()) return {ok:false, msg:t("sh_noread")};
+  if(A.busy.has(c.k)) return {ok:false, msg:t("sh_changed")};
+  const L = S.line(c.po, c.line); if(!L) return {ok:false, msg:t("sh_noread")};
+  const lk = locked(c.po.order_id, c.line.sku, L.recs); if(lk) return {ok:false, msg:lk};
+  A.busy.add(c.k);
+  try{
+    const why = await cancelAll(L); if(why) return {ok:false, msg:why};
+    const lk2 = locked(c.po.order_id, c.line.sku, L.recs); if(lk2) return {ok:false, msg:lk2};
+    const n = Math.min(L.cap > 0 ? L.cap : Infinity, (L.recorded || 0) + (+d || 0));
+    record(c.po, c.line, n, "never arrived (Fix on scan " + scanIid + ")", Math.max(0, L.got - (+d || 0)));
+    return {ok:true, n};
+  }finally{ A.busy.delete(c.k); refresh(); }
+};
 RX.registerAct("short-ask", ({el}) => {
   if(goneTap(el.dataset.key)) return;
   const c = find(el.dataset.key); if(!c) return;
