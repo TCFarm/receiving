@@ -164,7 +164,10 @@ const isHold = (r) => String(r.area || "").indexOf(PA.HOLD_AREA || "Hold: not on
 const numOf = (v) => (typeof v === "number" ? (isFinite(v) ? v : null) : (typeof v === "string" && /^\s*-?\d+(\.\d+)?\s*$/.test(v) ? +v : null));
 const openLine = (sku) => {
   if(!RX.pack.data) return null;
-  for(const x of RX.pack.poLinesBySku(sku)){ const l = x.line || {};
+  /* PM-2907 review (2026-11-02): newest PO first, the same order as the tablet and the poster */
+  const ek = (po) => String((po && po.eta) || "9999");
+  const xs = RX.pack.poLinesBySku(sku).slice().sort((a, b) => ek(b.po).localeCompare(ek(a.po)) || String(b.po.order_id).localeCompare(String(a.po.order_id)));
+  for(const x of xs){ const l = x.line || {};
     const o = numOf(l.open_units) != null ? numOf(l.open_units) : (numOf(l.ordered_units) != null && numOf(l.received_units) != null ? numOf(l.ordered_units) - numOf(l.received_units) : null);
     if(o != null && o > 0) return x; }
   return null;
@@ -453,7 +456,7 @@ function copyFields(r, take, f){
 }
 async function placeOne(r, take, info, source, extra){
   const f = Object.assign({State: "ready", Location: info.name, BinSource: source, PlacedBy: acct(), ReadyAt: RX.iso()}, extra || {});
-  if(isHold(r)){ if(holdWaiting(r)) return {ok: false, gone: true}; try{ const ol = openLine(r.sku); if(ol && ol.po) f.Po = String(ol.po.order_id); }catch(_){} }   // a released hold now has its PO (the line with open units)
+  if(isHold(r)){ if(holdWaiting(r)) return {ok: false, gone: true}; try{ const ol = openLine(r.sku); if(ol && ol.po){ f.Po = String(ol.po.order_id); f.PoPinned = true; } }catch(_){} }   // PM-2907: the card named that PO ⇒ booked there   // a released hold now has its PO (the line with open units)
   if(take && take < r.units){
     /* ⛔ round-2 (1): the shrink carries the ACK (SplitOf = its own id); the portion exists only after it landed, or GATED on it */
     const rest = r.units - take, upd = {Units: rest, SplitOf: r.iid}; if(r.caseQty > 0) upd.Cases = Math.round(rest / r.caseQty * 100) / 100;
