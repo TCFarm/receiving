@@ -163,8 +163,8 @@ const COPY_ADD = {
   fix_lower_done_noBb:"Sent to purchasing: the count is {n}. The best-by list was not changed (the rest of this case could not be read) — tell purchasing.",
   fix_lower_bbfail:"Sent to purchasing: the count is {n}.",
   /* PM-3111: the SKU is on more than one open PO — say which one Finale will fill */
-  recv_po_multi:  "This item is on {k} open POs. Finale fills the oldest PO that has room first, so these go on PO {po}.",
-  recv_po_multi_over:"This item is on {k} open POs. A confirmed extra goes on the OLDEST one: PO {po}.",
+  recv_po_multi:  "This item is on {k} open POs. These go on PO {po}, the order this case was received against.",
+  recv_po_multi_over:"This item is on {k} open POs. The extra goes on PO {po}, the order this case was received against.",
 };
 for(const k of Object.keys(COPY_ADD)) if(!(k in RX.COPY)) RX.COPY[k] = COPY_ADD[k];
 
@@ -758,25 +758,17 @@ function onCart(f){
   return out;
 }
 const whoAmI = () => { try{ return account || ""; }catch(_){ return ""; } };
-/* ⭐ PM-3111 (2026-10-23): WHICH PO the poster will put `d` more units on. The scan's own `Po` is only advisory: lib/receiving_post.py
-   walks the open POs OLDEST first (receive date) and an unconfirmed receipt goes on the first PO with room — partly, with the rest
-   HELD, when that room is smaller than the receipt — while an OverConfirmed one goes whole on the oldest PO carrying the item. The pack
-   carries every open PO with its eta, so the tablet mirrors that order (the same sort as RX.po.matchFor):
-     the first PO with room > 0 has room for all `d` ⇒ that PO, not extra;  otherwise ⇒ the OLDEST PO carrying the item, extra.
-   With one open PO this is exactly the old rule (room ≥ d ⇔ putCheck not over). -> {po, pc, k} | null (a PO could not be read) */
-const etaSort = (a, b) => String(a.po.eta || "9999").localeCompare(String(b.po.eta || "9999")) || String(a.po.order_id).localeCompare(String(b.po.order_id));
+/* ⭐ PM-3111 (2026-10-23), rewritten for PM-2907 (2026-11-02): WHICH PO the poster will put `d` more units on — the same rule as
+   lib/receiving_post.py: a PINNED scan (PoPinned + Po) goes ONLY on its Po; an unpinned one on the NEWEST pack PO carrying the SKU.
+   ⛔ Never spills onto an older PO: room short ⇒ that PO, extra (putCheck's own `over`). -> {po, pc, k} | null (a PO could not be read) */
+const newestSort = (a, b) => String(b.po.eta || "9999").localeCompare(String(a.po.eta || "9999")) || String(b.po.order_id).localeCompare(String(a.po.order_id));
 function posterPick(f, d){
   const own = String(f.Po || "");
-  const ids = (RX.pack.poLinesBySku ? RX.pack.poLinesBySku(f.Sku) : []).slice().sort(etaSort).map(c => String(c.po.order_id));
-  if(ids.length <= 1){ const pc = RX.po.putCheck(own, f.Sku, d); return pc ? {po:own, pc, k:Math.max(1, ids.length)} : null; }
-  let first = null;
-  for(const id of ids){
-    const p0 = RX.po.putCheck(id, f.Sku, 0); if(!p0) return null;
-    if(p0.cap - p0.have > 0){ first = {id, room:p0.cap - p0.have}; break; }
-  }
-  const id = (first && first.room >= d) ? first.id : ids[0];
+  const ids = (RX.pack.poLinesBySku ? RX.pack.poLinesBySku(f.Sku) : []).slice().sort(newestSort).map(c => String(c.po.order_id));
+  const pinned = (f.PoPinned === true || String(f.PoPinned).toLowerCase() === "true") && own;
+  const id = pinned ? own : (ids[0] || own);
   const pc = RX.po.putCheck(id, f.Sku, d); if(!pc) return null;
-  return {po:id, pc: (id === ids[0] && !(first && first.room >= d)) ? Object.assign({}, pc, {over:true}) : pc, k:ids.length};
+  return {po:id, pc, k:Math.max(1, ids.length)};
 }
 /* the confirm card for "receive the rest": numbers from putCheck at the moment Save was pressed */
 function recvHtml(v, a){
@@ -923,7 +915,7 @@ RX.registerAct("fix-recv", ({el}) => { const iid = el.dataset.iid;
        in its place would put a different meaning under the same finger (misuse review 2026-10-23 (3)) */
     if(!pc || c.total !== a.base || pc.have !== a.pc.have || pc.cap !== a.pc.cap || pc.over !== a.pc.over){ P.state.recvAsk = null; P.state.fixErr = pk ? t("recv_changed") : t("recv_noread"); return; }
     const cq = +f.CaseQty || 0;
-    I.create(replacement(v, {Po:String(a.po || f.Po), FixBin:"rest-of:" + v.iid, Units:a.d, Cases: cq > 0 ? Math.round(a.d / cq * 100) / 100 : null, QtyKind: (cq > 0 && a.d % cq === 0) ? "full" : "part",
+    I.create(replacement(v, {Po:String(a.po || f.Po), PoPinned: !!(RX.pack.poById && RX.pack.poById(String(a.po || f.Po))), FixBin:"rest-of:" + v.iid, Units:a.d, Cases: cq > 0 ? Math.round(a.d / cq * 100) / 100 : null, QtyKind: (cq > 0 && a.d % cq === 0) ? "full" : "part",
                              ScanAt:RX.iso(), OverConfirmed: !!pc.over, TempConfirmed: !!f.TempConfirmed,
                              DamagedUnits:null, RejectedUnits:null, ShortDated:false, FefoOverride: !!f.FefoOverride,
                              /* ⛔ a NEW receipt by whoever is signed in, put straight on the shelf: never the original scanner, never cart fields
