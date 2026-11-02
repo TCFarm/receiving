@@ -444,6 +444,7 @@ function renderMain(ctx, d2){
              `<span class="rx-pa-sub">${esc(sub).replace("\u0000", bb)}</span>`;
   const pl = d2.late ? "" : poLine(p, d2);
   if(pl) body += `<span class="rx-pa-po">${esc(t("d2_po", {msg: pl}))}</span>`;
+  if(!d2.late && RX.po.chipHtml) body += RX.po.chipHtml(p);          // PM-2907: which PO, [Change PO], the older-order warning
   if(d2.pendingN) body += `<span class="rx-pa-sub"><strong>${esc(t("d2_pending_n", {n: d2.pendingN}))}</strong></span>`;
   const offer = d2.offer && !d2.portions.length ? d2.offer : null;
   if(offer) body += `<span class="rx-pa-sub" id="rxOffer">${esc(t("offer_line", {bin: "\u0000"})).replace("\u0000", `<strong class="num">${esc(offer)}</strong>`)}</span>`;
@@ -743,12 +744,13 @@ function finishLate(ctx, d2){
      PageMode. "Now" let a case scanned while the page showed shadow pass the poster's live checks after live began. */
   const orig = (RX.intents.byId(first.iid) || {}).fields || {};
   const at0 = Date.parse(orig.ScanAt || "");
-  const row = first.row, synth = {prod: p.prod, upc: p.upc, gtin: p.gtin, best: p.best, lot: p.lot, units: p.qty, qtyKind: "part", qtyShown: p.qtyShown, _po: RX.poRef(p) || "",
+  const row = first.row, synth = {prod: p.prod, upc: p.upc, gtin: p.gtin, best: p.best, lot: p.lot, units: p.qty, qtyKind: "part", qtyShown: p.qtyShown, _po: orig.Po || RX.poRef(p) || "",
                                   _at: isNaN(at0) ? (row._at || RX.now()) : at0, _op: acct(), id: row.id || ""};
   /* ⛔ ROUND 5: ...and the case's DECISIONS: the crew's over-shipment Yes (else the poster holds the portion OVER_UNCONFIRMED) and
      short-dated (else the KeHE credit list loses those units). */
   const keepMode = (f) => { if(orig.PageMode) f.PageMode = orig.PageMode; if(orig.ScanAt) f.ScanAt = orig.ScanAt;
-    if(orig.OverConfirmed === true) f.OverConfirmed = true; if(orig.ShortDated === true) f.ShortDated = true; return f; };
+    if(orig.OverConfirmed === true) f.OverConfirmed = true; if(orig.ShortDated === true) f.ShortDated = true;
+    if(orig.Po){ f.Po = orig.Po; f.PoPinned = orig.PoPinned === true; } return f; };   // PM-2907 review: one case, one PO
   const rawScans = JSON.stringify(RX.state.scanLog.slice());
   const kids = [];
   if(!ps.length && d2.restUnits){      // nothing more was put away: the rest is recorded as short, on an intent of its own
