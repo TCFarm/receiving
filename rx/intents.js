@@ -49,11 +49,11 @@
 const RX = window.RX; if(!RX) return;
 const CFG = RX.CFG, I = RX.intents, t = RX.t;
 
-RX.INTENT_FIELDS = ["IntentId","Kind","State","PageMode","ScanDay","ScanAt","ReadyAt","Po","Sku","Upc","Gtin14","Units","Cases","CaseQty","QtyKind","BestBy","Lot","Location","BinSource","Workflow","StagedArea","RecommendedBin","RecReasons","SplitOf","TempConfirmed","FefoOverride","ShortDated","CancelTooLate","OverConfirmed","DamagedUnits","RejectedUnits","RawScans","PhotoUrls","Operator","Device","BbItemId","PlacedBy","FixUnits","FixBin","FixNote"];
+RX.INTENT_FIELDS = ["IntentId","Kind","State","PageMode","ScanDay","ScanAt","ReadyAt","Po","PoPinned","Sku","Upc","Gtin14","Units","Cases","CaseQty","QtyKind","BestBy","Lot","Location","BinSource","Workflow","StagedArea","RecommendedBin","RecReasons","SplitOf","TempConfirmed","FefoOverride","ShortDated","CancelTooLate","OverConfirmed","DamagedUnits","RejectedUnits","RawScans","PhotoUrls","Operator","Device","BbItemId","PlacedBy","FixUnits","FixBin","FixNote"];
 RX.INTENT_CHOICES = {"Kind":["intent","fix","short"],"State":["staged","ready","skipped","cancelled"],"PageMode":["off","shadow","live"],"QtyKind":["full","part"],"BinSource":["scanned","typed","armed"],"Workflow":["direct","staged"]};
 const FIN_FIELDS = ["FinState","FinReason","FinPo","FinShipment","FinBatch","FinAt","FinUnitsPosted","FinUnitsHeld","FinUnitsWould"];
 const NUM = new Set(["Units","Cases","CaseQty","DamagedUnits","RejectedUnits","FixUnits"]);
-const BOOL = new Set(["TempConfirmed","FefoOverride","ShortDated","CancelTooLate","OverConfirmed"]);
+const BOOL = new Set(["TempConfirmed","FefoOverride","ShortDated","CancelTooLate","OverConfirmed","PoPinned"]);
 const CORE_COLS = ["IntentId","State","PageMode","ScanDay","Sku","Units"];
 const KEY = "rx_intents_v1";
 const PAGE_SEL = RX.INTENT_FIELDS.filter(k => k !== "RawScans" && k !== "PhotoUrls").concat(FIN_FIELDS).join(",");   // the two long note columns are never needed in a list read
@@ -266,7 +266,13 @@ I.baseFields = function(row, f, flow){
   return {
     Kind:"intent", State:state, PageMode:pageMode(), ScanDay:RX.dayKey(at), ScanAt:RX.iso(at),
     ReadyAt: state === "ready" ? RX.iso() : null,
-    Po: row._po || "", Sku:row.prod.sku, Upc:row.upc || "", Gtin14:row.gtin || "",
+    Po: row._po || "",
+    /* ⭐ PM-2907 (2026-11-02): Po came from the newest-first rule or the crew's pick, and names a pack PO ⇒ the poster books it ONLY there */
+    /*   ⛔ review: only when the crew PICKED it or the pack was built today — a stale pack's newest PO may be last week's, so then the
+         poster's live newest-first rule decides */
+    PoPinned: !!(row._po && RX.pack && RX.pack.poById && RX.pack.poById(row._po)
+              && ((RX.po && RX.po.pickOf && RX.po.pickOf(row.prod.sku) === String(row._po)) || (RX.pack.builtToday && RX.pack.builtToday()))),
+    Sku:row.prod.sku, Upc:row.upc || "", Gtin14:row.gtin || "",
     Units: units, Cases:cases, CaseQty:caseQty, QtyKind: row.qtyKind || null,
     BestBy: row.best || "", Lot: row.lot || "",
     Location: f.bin || "", BinSource: f.bin ? (f.binSource || "scanned") : null,
