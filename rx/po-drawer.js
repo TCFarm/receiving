@@ -3,7 +3,7 @@
 
    ⛔ SCOPE (MASTER-PLAN §3 ⚖): Julia's reconciliation lives in the staff portal. The scanner keeps ONLY this tablet
    drawer — progress bar, filters, line rows that expand to their scans. NO desktop `?view=po`, no "Reviewed" column,
-   no CSV export, no PO selector. Several open POs are stacked, oldest first.
+   no CSV export. (The PO picker on the scan cards — PM-2907, 2026-11-02 — lives in rx/receive-po.js, not here.) Several open POs are stacked, oldest first.
 
    HISTORY TABLE (UX §6.1): when a new flow is on, or any row carries an intent, "Src" becomes Shelf and "Saved"
    becomes Status (the chip). In best-by-only the table is EXACTLY today's. Filter chips above it:
