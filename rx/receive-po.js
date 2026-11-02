@@ -2,7 +2,7 @@
    prefill and everything extra on the quantity card. OWNER: Procurement & Merchandising (hosted in ProductPipeline).
 
    ═══ THE RULES ═══
-   • ⭐ NO PO PICKER. A scan is matched to the OLDEST-DUE open PO that still has quantity left for that SKU
+   • ⛔ SUPERSEDED 2026-11-02 (PM-2907, the PO picker below PO.matchFor): newest PO first + the crew's pick. Old text: a scan was matched to the OLDEST-DUE open PO that still has quantity left for that SKU
      (order_id as the tie-break); when every PO that carries the SKU is full, the oldest is used and the case reads
      "over" (never refused, never blocking); a SKU on no pack PO is "not on a PO" (Julia decides). The crew never
      sees a PO number except in the strip, the start card and the drawers.
@@ -30,7 +30,7 @@ const num = (x) => (typeof x === "number" && isFinite(x)) ? x : (+x || 0);
 /* today's intents ∪ every intent of the open pack POs (any day, any tablet — 2026-10-22); falls back to today's on an old intents.js */
 const allIntents = () => (RX.intents.allPo ? RX.intents.allPo() : RX.intents.allToday());
 /* ⭐ PM-3111 review (3), 2026-10-23: the PO a POSTED intent's units are really on is the poster's `FinPo` (it re-derives the PO from Finale,
-   oldest open PO first); the intent's own `Po` is only the tablet's guess. With one open PO they are the same. */
+   newest PO first since PM-2907); the intent's own `Po` is binding only when PoPinned. With one open PO they are the same. */
 const poOfV = (v) => String(((v.fin && v.fin.FinState === "posted" && v.fin.FinPo) || (v.fields || {}).Po || ""));
 
 PO.pos = function(){
@@ -120,16 +120,98 @@ PO.counts = function(po, line){
   const total = pack + sc.units;
   return {ordered, pack, scanned:sc.units, total, left:ordered - total, shelves:sc.shelves};
 };
+/* ⭐ PM-2907 / THE PO PICKER (Jack 2026-11-02: "they should be able to select what PO they are working on" · "do auto + switch, but flag
+   for the user if you are selecting an older PO than the most recent one for that vendor"). Supersedes "NO PO PICKER" above.
+   • AUTO = the NEWEST-due pack PO that carries the SKU (eta desc, order_id desc). A full line stays on that PO ("over") — ⛔ never
+     spills onto an older PO's open line (the 2026-10-20 failure: an old open line took Tuesday's cases).
+   • SWITCH = the crew picks another pack PO that carries the SKU; remembered for that SKU on this tablet for the day.
+   • OLDER = the chosen PO is due before the vendor's newest PO in the pack ⇒ the card shows an amber warning.
+   • The intent carries Po + PoPinned (rx/intents.js) and lib/receiving_post.py books it ONLY on that PO — the same rule both sides. */
+const PICK_KEY = "rx_popick_v1";
+/* a blank eta sorts NEWEST — the poster ranks a PO with no receive date as "9999" too (review 2026-11-02) */
+const etaKey = (po) => String((po && po.eta) || "9999");
+const newestFirst = (a, b) => etaKey(b.po).localeCompare(etaKey(a.po)) || String(b.po.order_id).localeCompare(String(a.po.order_id));
+function picks(){
+  try{ const j = JSON.parse(localStorage.getItem(PICK_KEY) || "null"); if(j && j.day === RX.today() && j.picks && typeof j.picks === "object") return j.picks; }catch(_){}
+  return {};
+}
+PO.pickOf = (sku) => { const v = picks()[sku]; return v ? String(v) : ""; };
+PO.setPick = function(sku, oid){
+  const m = picks(); if(oid) m[sku] = String(oid); else delete m[sku];
+  try{ localStorage.setItem(PICK_KEY, JSON.stringify({day: RX.today(), picks: m})); }catch(_){}
+};
+PO.cands = (sku) => RX.pack.poLinesBySku(sku).slice().sort(newestFirst);
+PO.newest = function(){
+  const all = PO.pos(); if(!all.length) return null;
+  return all.slice().sort((a, b) => etaKey(b).localeCompare(etaKey(a)) || String(b.order_id).localeCompare(String(a.order_id)))[0];
+};
+const olderThanNewest = (po) => { const n = PO.newest(); return !!(n && po && String(n.order_id) !== String(po.order_id)
+  && (etaKey(po) < etaKey(n) || (etaKey(po) === etaKey(n) && String(po.order_id) < String(n.order_id)))); };
+const orderedOf = (line) => num(line && (line.ordered_units != null ? line.ordered_units : line.qty));
 PO.matchFor = function(p){
   const sku = typeof p === "string" ? p : (p && p.prod && p.prod.sku);
   if(!RX.pack.data || !sku || String(sku).startsWith("!")) return null;
-  const cands = RX.pack.poLinesBySku(sku).slice().sort((a, b) => String(a.po.eta || "9999").localeCompare(String(b.po.eta || "9999")) || String(a.po.order_id).localeCompare(String(b.po.order_id)));
-  if(!cands.length) return {po:null, line:null, left:0, status:"notpo", counts:null};
-  let pick = null;
-  for(const c of cands){ const k = PO.counts(c.po, c.line); if(k.left > 0){ pick = {c, k}; break; } }
-  if(!pick){ pick = {c:cands[0], k:PO.counts(cands[0].po, cands[0].line)}; }
-  return {po:pick.c.po, line:pick.c.line, left:pick.k.left, status: pick.k.left > 0 ? "ok" : "over", counts:pick.k};
+  const cands = PO.cands(sku);
+  if(!cands.length) return {po:null, line:null, left:0, status:"notpo", counts:null, cands:[]};
+  const want = PO.pickOf(sku);
+  let pickC = want ? cands.find(c => String(c.po.order_id) === want) : null;       // a pick of a PO no longer in the pack is ignored
+  /* ⛔ review (2026-11-02): a pick made for a LATE case must not catch this week's cases once its line is full — then auto again */
+  if(pickC && PO.counts(pickC.po, pickC.line).left <= 0 && cands.some(x => x !== pickC && PO.counts(x.po, x.line).left > 0)) pickC = null;
+  /* a line KeHE zeroed (out of stock) does not take the auto pick while another PO still expects the item — the poster agrees */
+  const auto = cands.find(x => orderedOf(x.line) > 0) || cands[0];
+  const c = pickC || auto;
+  const k = PO.counts(c.po, c.line);
+  return {po:c.po, line:c.line, left:k.left, status: k.left > 0 ? "ok" : "over", counts:k, cands, picked: !!pickC, older: olderThanNewest(c.po)};
 };
+/* the PO the case goes to, on every card that names it: "PO x · due Tue" [Change PO] + the amber older-order warning */
+PO.chipHtml = function(p){
+  try{
+    const m = PO.matchFor(p); if(!m || !m.po) return "";
+    const po = m.po, esc = RX.esc;
+    let h = `<span id="rxPoChip" class="rx-pochip" data-po="${esc(String(po.order_id))}" style="display:block;margin:4px 0 0">` +
+            `<strong class="num">${esc(t("po_chip", {po: po.order_id, due: PO.dueText(po) || po.eta || ""}))}</strong>` +
+            (m.picked ? ` <span class="hint" style="display:inline">(${esc(t("po_picked"))})</span>` : "") +
+            (m.cands.length > 1 ? ` <button type="button" class="rx-chipbtn" data-act="po-change" style="margin-left:8px">${esc(t("po_change"))}</button>` : "");
+    if(m.older){ const n = PO.newest(), only = m.cands.length === 1;
+      h += `<span class="rx-poolder" role="alert" style="display:block;margin-top:6px;padding:7px 10px;border-left:5px solid var(--wait);background:var(--card)">` +
+           `⚠ ${esc(t(only ? "po_older_only" : "po_older", {po: po.order_id, newest: n ? n.order_id : ""}))}</span>`; }
+    return h + `</span>`;
+  }catch(_){ return ""; }
+};
+const pendingP = () => { try{ return pending; }catch(_){ return null; } };
+RX.registerAct("po-change", () => {
+  const p = pendingP(), el = document.getElementById("rxPoChip"); if(!p || !el) return;
+  const m = PO.matchFor(p); if(!m || !m.po) return;
+  const rows = m.cands.map((c, i) => { const k = PO.counts(c.po, c.line), upc = upcOf(c.line), cases = upc > 0;
+    const left = fmt(Math.max(0, cases ? k.left / upc : k.left));
+    return `<button type="button" class="rx-btn${String(c.po.order_id) === String(m.po.order_id) ? " primary" : ""}" data-act="po-pick" data-po="${RX.esc(String(c.po.order_id))}" style="display:block;margin:6px 0;text-align:left">` +
+      RX.esc(t("po_pick_row", {po: c.po.order_id, due: PO.dueText(c.po) || c.po.eta || "", left, unit: cases ? "cases" : "units"})) +
+      (PO.newest() && String(PO.newest().order_id) === String(c.po.order_id) ? ` · <strong>${RX.esc(t("po_pick_newest"))}</strong>`
+        : (i === 0 ? ` · <strong>${RX.esc(t("po_pick_newest_item"))}</strong>` : "")) + `</button>`; }).join("");
+  el.innerHTML = `<strong>${RX.esc(t("po_pick_title"))}</strong>${rows}` +
+    `<button type="button" class="rx-btn" id="rxPoKeep" data-act="po-pick" data-po="${RX.esc(String(m.po.order_id))}" data-close="1">${RX.esc(t("po_pick_cancel", {po: m.po.order_id}))}</button>`;
+  setTimeout(() => { const k = document.getElementById("rxPoKeep"); if(k) k.focus(); }, 20);    // ⛔ review: focus never drops to the body
+  return "stop";
+});
+RX.registerAct("po-pick", ({el}) => {
+  const p = pendingP(); if(!p || !el) return;
+  const oid = el.getAttribute("data-po") || "", sku = p.prod.sku;
+  const cands = PO.cands(sku);
+  if(!cands.some(c => String(c.po.order_id) === oid)) return;               // ⛔ only a pack PO that carries this SKU
+  const before = ((PO.matchFor(p) || {}).po || {}).order_id;
+  PO.setPick(sku, "");
+  const auto = ((PO.matchFor(p) || {}).po || {}).order_id;
+  if(String(auto) !== oid) PO.setPick(sku, oid);                            // the PO auto would choose anyway = back to auto
+  RX.sound("decide");
+  const changed = String(before) !== String(((PO.matchFor(p) || {}).po || {}).order_id);
+  /* put-away card: a real change re-asks the count against the new PO; "Keep" / Escape (no change) only closes the chooser (review) */
+  if(RX.state.step && changed){ RX.backToQty(); return "stop"; }
+  if(document.getElementById("qty")){ refreshQtyCard(); setTimeout(() => { const q = document.getElementById("qty"); if(q) q.focus(); }, 20); return "stop"; }
+  const pr = document.getElementById("rxProgress"), chip = document.getElementById("rxPoChip");
+  const h = PO.progressHtml(p), tmp = document.createElement("span"); tmp.innerHTML = h;
+  if(pr && tmp.firstChild) pr.replaceWith(tmp.firstChild); else if(chip){ const c2 = document.createElement("span"); c2.innerHTML = PO.chipHtml(p); if(c2.firstChild) chip.replaceWith(c2.firstChild); }
+  return "stop";
+});
 const upcOf = (line) => num(line && line.units_per_case) > 0 ? num(line.units_per_case) : 0;
 const fmt = (x) => String(Math.round(x * 100) / 100);
 PO.classify = function(p, qty){
@@ -153,7 +235,7 @@ PO.progressHtml = function(p){
     const left = c.ordered - c.total;
     const tail = left > 0 ? t("prog_left", {l:q(left), unit}) : (left === 0 ? t("prog_done") : t("prog_over", {o:q(-left), unit}));
     const col = left > 0 ? "var(--line)" : (left === 0 ? "var(--go)" : "var(--wait)");
-    const two = PO.pos().filter(po => PO.line(po, p.prod.sku)).length > 1 ? ` <span class="hint" style="display:inline">PO ${RX.esc(m.po.order_id)}</span>` : "";
+    const two = PO.chipHtml(p);
     return `<span id="rxProgress" class="rx-progress" data-left="${RX.esc(String(left))}" style="display:block;margin:0 0 9px;padding:8px 12px;border-left:5px solid ${col};background:var(--card);font-size:14px">`
       + `${RX.esc(t("prog", {k:q(c.total), n:q(c.ordered), unit}))} — <strong>${RX.esc(tail)}</strong>${two}</span>`;
   }catch(_){ return ""; }
@@ -245,7 +327,7 @@ RX.registerStep("overship", {
   start(ctx){
     const o = ctx.p.rx.over || PO.overCap(ctx.p, num(ctx.p.qty)); if(!o){ ctx.done({}); return; }
     const n = fmt(o.n), m = fmt(o.cap);
-    const body = `<span class="rx-pa-sub">${RX.esc(t(o.basis === "shipped" ? "overship_body" : "overship_body_ordered", {n, m}))}</span>`;
+    const body = `<span class="rx-pa-sub">${RX.esc(t(o.basis === "shipped" ? "overship_body" : "overship_body_ordered", {n, m}))}</span>` + PO.chipHtml(ctx.p);   // review: name the PO here too
     prompt_("stop", RX.esc(t("overship_title", {n, item: ctx.p.prod.name})), body,
       `<div class="rx-pa-btns"><button type="button" class="rx-btn primary" data-act="over-yes" data-primary>${RX.esc(t("overship_yes", {n}))}</button>` +
       `<button type="button" class="rx-btn" data-act="over-fix" data-close="3">${RX.esc(t("overship_fix"))}</button></div>`);
@@ -272,7 +354,7 @@ function poLineHtml(p, qty){
   if(k.status === "over"){ msg = t("over", {k:k.k, n:k.n, unit:k.unit, over:k.over}); col = "var(--wait)"; }
   else if(k.status === "complete"){ msg = t("complete", {k:k.k, n:k.n, unit:k.unit}); col = "var(--go)"; }
   else msg = t("makes", {k:k.k, n:k.n, unit:k.unit});
-  const two = PO.pos().filter(po => PO.line(po, p.prod.sku)).length > 1 ? ` <span class="hint" style="display:inline">PO ${RX.esc(k.match.po.order_id)}</span>` : "";
+  const two = PO.chipHtml(p);
   return `<span id="rxPoLine" class="rx-poline rx-${k.status}" style="${dflt};border-left-color:${col}">${RX.esc(msg)}${two}</span>`;
 }
 function kindNow(p){ return RX.state.qtyKindChoice || ((p.qtyShown == null || p.qtyShown === typedQty()) ? "full" : "part"); }
