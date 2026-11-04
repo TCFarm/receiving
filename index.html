@@ -179,6 +179,8 @@
       <div style="margin-top:9px">
         <button id="cantScan" style="font-size:14px;padding:8px 13px;min-height:48px">
           Can&rsquo;t scan it?</button>
+        <button id="rlPhotoBtn" hidden style="font-size:14px;padding:8px 13px;min-height:48px">
+          &#128247; Read the label from a photo</button>
         <span class="hint" style="display:inline;margin-left:9px">barcode too big, too tight, or damaged</span>
       </div>
     </div>
@@ -231,6 +233,8 @@
 <script src="rx/short.js"></script>
 <script src="rx/version.js"></script>
 <script src="rx/lotdate.js"></script>
+<script src="rx/datepick.js"></script>
+<script src="rx/photocap.js"></script>
 <script src="rx/feedback.js"></script>
 <script src="rx/offline.js"></script>
 <script>
@@ -424,6 +428,13 @@ function rand(n){ const a=new Uint8Array(n); crypto.getRandomValues(a); return b
 /* ---------- auth: authorization code + PKCE ---------- */
 const store = sessionStorage;
 let token=null, tokenExp=0, refreshTok=null, account="";
+/* ⭐ 2026-11-05 (Jack: "it is kicking out and makes a new sign in on EVERY refresh"): the sign-in used to live ONLY in this tab's sessionStorage, so a new tab,
+   a Home-screen launch or a closed browser meant a full Microsoft sign-in with the account picker. It is now ALSO kept in localStorage for one SHIFT
+   (12 h from the sign-in, never extended by a token refresh). ⛔ The shared-tablet rule stands: Sign out clears BOTH and ends the Microsoft session, and the
+   name stays on screen so a wrong person is obvious. */
+const PERSIST_KEY = "tok_persist_v1", PERSIST_MS = 12 * 3600 * 1000;
+const persistRead = () => { try{ const p = JSON.parse(localStorage.getItem(PERSIST_KEY) || "null");
+  if(p && p.r && p.a && Date.now() - (p.at || 0) < PERSIST_MS) return p; localStorage.removeItem(PERSIST_KEY); }catch(_){} return null; };
 
 async function beginLogin(){
   const verifier = rand(64);
@@ -458,20 +469,24 @@ async function completeLogin(){
     method:"POST", headers:{"Content-Type":"application/x-www-form-urlencoded"}, body});
   const j = await r.json();
   if(!r.ok) throw new Error(j.error_description || j.error || "token exchange failed");
-  setToken(j);
+  setToken(j, true);
   history.replaceState({}, "", location.pathname);   // strip ?code= from the URL
   return true;
 }
 
-function setToken(j){
+function setToken(j, fresh){
   token = j.access_token;
   tokenExp = Date.now() + (j.expires_in||3600)*1000 - 60000;   // refresh a minute early
   if(j.refresh_token) refreshTok = j.refresh_token;
   try{ account = JSON.parse(atob(j.id_token.split(".")[1])).preferred_username || ""; }catch(_){}
   store.setItem("tok", JSON.stringify({t:token,e:tokenExp,r:refreshTok,a:account}));
+  try{ const old = persistRead();
+    if(refreshTok && account) localStorage.setItem(PERSIST_KEY, JSON.stringify({t:token,e:tokenExp,r:refreshTok,a:account,at:(fresh || !old) ? Date.now() : old.at})); }catch(_){}
 }
 function loadToken(){
-  try{ const s=JSON.parse(store.getItem("tok")||"null"); if(!s) return false;
+  try{ let s=JSON.parse(store.getItem("tok")||"null");
+    if(!s){ const p = persistRead(); if(p){ s = {t:p.t,e:p.e,r:p.r,a:p.a}; store.setItem("tok", JSON.stringify(s)); } }   // a fresh tab: the shift's sign-in
+    if(!s) return false;
     token=s.t; tokenExp=s.e; refreshTok=s.r; account=s.a||""; return Date.now()<tokenExp; }catch(_){ return false; }
 }
 async function getToken(){
@@ -864,7 +879,7 @@ async function handleScan(raw){
     }
   }
   if(pending && $("promptArea").querySelector(".prompt") && !takesDate && lotRoute(v)) return;
-  if(pending && $("promptArea").querySelector(".prompt") && !takesDate){
+  if(pending && $("promptArea").querySelector(".prompt") && !takesDate && !(window.RXLearn && RXLearn.awaitingUnit && RXLearn.awaitingUnit())){   /* 2026-11-04: the learn wizard waits for ONE unit scan */
     noteDropped(v, "BUSY");
     showBurstRefusal(v);
     return;
@@ -1026,6 +1041,8 @@ async function handleScan(raw){
   }
   /* ⭐ PM-2919: a code learned on ANOTHER tablet in the last minute — read the learnings before calling it unknown */
   if(!prod && window.RXLearn){ try{ await RXLearn.refresh(false); }catch(_){} prod = look(); }
+  /* ⭐ 2026-11-04 (Jack): the Learn-a-barcode wizard is waiting for ONE unit scan — that unit's product is the answer, no ticks */
+  if(window.RXLearn && RXLearn.unitScan && RXLearn.unitScan(prod, v, upc)) return;
   if(!prod){ reject("UNKNOWN_UPC", v, upc);
     /* ⭐ PM-2919 (Jack, 2026-10-20): the code we would LEARN — the retail UPC (derived from a case GTIN when there is one) */
     if(window.RXLearn) RXLearn.setCandidate({code: upc || v.replace(/\D/g,""), raw: v});
@@ -1522,9 +1539,13 @@ function askDate(){
          <strong>The date is worth more than the code</strong> — record it here and we
          will attach it to the product once the UPC is known.`
       : `<strong>${esc(pending.prod.name)}</strong>${window.RX && RX.idLine ? RX.idLine(pending.prod.sku) : ""}`) +
-    ` — tap for a calendar, or type six digits MMDDYY.`,
+    ` — tap Pick date, or type six digits MMDDYY.`,
+    /* ⭐ 2026-11-04 (Jack): no calendar — big month / day / year buttons (rx/datepick.js). `#pick` stays as a HIDDEN input carrying
+       the same ISO value the calendar did, so every reader of it below is unchanged. */
     `<div class="dateRow">
-       <input id="pick" type="date" aria-label="Pick best by date">
+       <input id="pick" type="hidden" aria-label="Pick best by date">
+       <button type="button" id="pickBtn">Pick date</button>
+       <button type="button" id="photoDateBtn" hidden>&#128247; Photo</button>
        <span class="or">or</span>
        <input id="typed" type="text" class="num" inputmode="numeric" maxlength="6"
               placeholder="MMDDYY" aria-label="Type best by as MMDDYY">
@@ -1601,6 +1622,14 @@ function askDate(){
       el.addEventListener("keydown",e=>{ if(e.key==="Enter") $("dok").click(); });
       el.addEventListener("input",()=>{ if(pick) pick.value=""; readBack(); }); }
     if(pick) pick.addEventListener("change",()=>{ if(rb) rb.innerHTML = pick.value ? yearFirst(pick.value) : ""; if(el) el.value=""; $("dok").click(); });
+    const phb=$("photoDateBtn");
+    if(window.RXPhoto && RXPhoto.showButtons) RXPhoto.showButtons();
+    if(phb) phb.addEventListener("click",()=>{ if(window.RXPhoto) RXPhoto.open({mode:"date"}); });
+    const pb=$("pickBtn");
+    if(pb) pb.addEventListener("click",()=>{
+      if(!window.RXDate){ if(el) el.focus(); return; }
+      RXDate.open({title:"Best-by date", onPick:(iso)=>{ if(!pick) return; pick.value=iso; pick.dispatchEvent(new Event("change")); }});
+    });
     const lb=$("lotScanBtn"), li=$("lotIn");
     if(lb) lb.addEventListener("click",()=>{ const bx=$("lotScanBox"); if(bx) bx.hidden=false; if(li){ li.value=""; li.focus(); } });
     /* ⛔ misuse review 6: a person TYPING (a date, usually) into the lot box is told where it goes — a scanner's characters arrive a
@@ -3086,6 +3115,7 @@ document.addEventListener("click",e=>{
      it must not inherit an earlier carton's codes (a wrong permanent alias).
      The unknown carton's own "Find it by name" (#unkFind) keeps its codes. */
   if(e.target.closest("#cantScan")){ unresolved = null; return askFind(); }
+  if(e.target.closest("#rlPhotoBtn")){ if(window.RXPhoto) RXPhoto.open({mode:"start"}); return; }   /* 2026-11-04: read the label from a photo */
   /* ⭐ ARM the unit scan for THIS case, then get out of the way. Single-shot and
      time-boxed; the very next resolving scan consumes it. */
   if(e.target.closest("#pendGo") && pending) { clearPrompt(); return next(); }
@@ -3274,6 +3304,11 @@ document.addEventListener("click",e=>{
     const val=window.prompt(
       `Best-by for ${row.prod.name}?\nYYYY-MM-DD, or six digits MMDDYY.`, row.best);
     if(val===null) return;
+    return correctRowDate(row, val);
+  }
+  /* ⭐ 2026-11-04: the correction itself, callable with a value from the prompt OR from the picker (the toast's Fix) */
+  function correctRowDate(row, val){
+    {
     /* ⛔⛔ SWAP MMDDYY -> YYMMDD, as the prompt promises. This field said MMDDYY
        and then passed the string STRAIGHT to `parseGs1Date`, which reads YYMMDD
        — so `120126` (1 Dec 2026) became **2012-01-26** and `033129` failed
@@ -3303,8 +3338,8 @@ document.addEventListener("click",e=>{
          format stays `auto` every night. Same rule as srcForSave(). */
       const relot = d !== row.best && /^(audit_)?gs1_lot/.test(String(row.source||""));
       if(relot) row.source = String(row.source).replace(/gs1_lot/, "keyed_gs1nodate");
-      const unmark = d !== row.best && /\+(lotsuggest|lastcase|datelabel)/.test(String(row.source||""));
-      if(unmark) row.source = String(row.source).replace(/\+(lotsuggest|lastcase|datelabel)/g, "");
+      const unmark = d !== row.best && /\+(lotsuggest|lastcase|datelabel|photopick|photo)/.test(String(row.source||""));
+      if(unmark) row.source = String(row.source).replace(/\+(lotsuggest|lastcase|datelabel|photopick|photo)/g, "");
       row.best=d; render();
       /* ⛔ A FAILED row has NO id, so `patchDate` was a NO-OP on exactly the rows
          that needed fixing — the operator types the missing date and nothing
@@ -3336,6 +3371,7 @@ document.addEventListener("click",e=>{
     }
     applyDateFix(false);
     return;
+    }
   }
   /* ⭐ DELETE A SCAN FROM THE HISTORY (Jack, 2026-09-01). Date and units were
      both tap-correctable, but a scan of the WRONG PRODUCT could not be undone —
@@ -3428,7 +3464,7 @@ document.addEventListener("click",e=>{
        encode dates from a label format that cannot carry one. */
     /* ⭐ PM-3297: a suggestion accepted UNCHANGED is marked on the source (`+lotsuggest` teaches the nightly learner; `+lastcase` is
        measured); a changed date is an ordinary keyed date. Re-decided on every Save, so a "Fix it" retype cannot keep a stale mark. */
-    pending.source = String(pending.source||"").replace(/\+(lotsuggest|lastcase|datelabel)/g, "");
+    pending.source = String(pending.source||"").replace(/\+(lotsuggest|lastcase|datelabel|photopick|photo)/g, "");
     if(pending.suggest && !pending.splitDate && !picked && d === pending.suggest.date) pending.source += "+" + pending.suggest.tag;
     /* ⭐ PM-3304: the lot came from a scanned lot barcode — the nightly learner takes it as evidence whatever the case code was */
     if(pending.lotScanned && pending.lot && !/\+lotscan/.test(pending.source)) pending.source += "+lotscan";
@@ -3437,7 +3473,16 @@ document.addEventListener("click",e=>{
        (commit() re-checks as the last gate for any date that arrives another way, e.g. a GS1 label). */
     const dc0 = dateCheck(pending.prod.sku, d);
     if(dc0) return askDateCheck(dc0);
+    const p0 = pending, sku0 = (pending.prod||{}).sku;
     next();
+    /* ⭐ 2026-11-04 (Jack): a KEYED date says how many days it is, with a Fix. Not for a scanned date (this handler is only the typed /
+       picked path). Fix = the case is still open (quantity step) → ask the date again; already saved → correct that row. */
+    if(window.RXDate) RXDate.toast(d, {onFix:()=>{
+      if(pending === p0){ p0.best = null; delete p0.dateConfirmed; return askDate(); }
+      const row = [...rows].reverse().find(r => r.prod && r.prod.sku === sku0 && r.best === d);
+      if(!row) return;
+      RXDate.open({title:"Fix the best-by date", value:d, typed:true, onPick:(iso)=>correctRowDate(row, iso)});
+    }});
   }
 });
 
@@ -3607,7 +3652,7 @@ $("signin").addEventListener("click", ()=>beginLogin().catch(e=>{
 /* ⭐ 2026-10-23: Sign out ends the MICROSOFT session in this browser too (it used to clear only this page, so the next Sign in came back
    as the same person). Scans not yet sent live in localStorage (rx_intents_v1, pending rows) and are kept; they are sent after the next
    sign-in, under the account that scanned them (Operator is stamped at scan time). */
-$("signout").addEventListener("click", ()=>{ store.clear();
+$("signout").addEventListener("click", ()=>{ store.clear(); try{ localStorage.removeItem(PERSIST_KEY); }catch(_){}
   location.assign(`${AUTH}/logout?post_logout_redirect_uri=${encodeURIComponent(location.origin + location.pathname)}`); });
 $("mReceive").addEventListener("click", ()=>chooseMode("receive"));
 $("mAudit").addEventListener("click",   ()=>chooseMode("audit"));
@@ -3652,7 +3697,7 @@ function showBurstRefusal(code){
 }
 document.addEventListener("keydown", e=>{
   const area = $("promptArea");
-  if(!area || !area.innerHTML || e.target === $("scan") || e.target === $("lotIn") || e.target === $("rxFbText")){ kRun = null; return; }   /* PM-3304: the lot box takes scans */
+  if(!area || !area.innerHTML || e.target === $("scan") || (window.RXLearn && RXLearn.awaitingUnit && RXLearn.awaitingUnit()) || e.target === $("lotIn") || e.target === $("rxFbText")){ kRun = null; return; }   /* PM-3304: the lot box takes scans */
   const now = performance.now();
   const printable = typeof e.key === "string" && e.key.length === 1
                     && !e.ctrlKey && !e.metaKey && !e.altKey;
@@ -3706,7 +3751,7 @@ $("scan").addEventListener("keydown",e=>{
     if(!v.trim() && window.RX && RX.onEmptyEnter()) return;
     handle(v); }});
 document.addEventListener("click",(ev)=>{ if(ev && ev.target && ev.target.closest && ev.target.closest("#rxFb,#rxFbFab")) return;   /* PM-3305: typing feedback */
-  if((!$("promptArea").innerHTML || unitScanFor || (window.RX && RX.keepScan())) && $("app").style.display!=="none") $("scan").focus(); });
+  if((!$("promptArea").innerHTML || unitScanFor || (window.RXLearn && RXLearn.awaitingUnit && RXLearn.awaitingUnit()) || (window.RX && RX.keepScan())) && $("app").style.display!=="none") $("scan").focus(); });
 window.addEventListener("beforeunload",e=>{
   if(leavingForSignIn) return;       // ⭐ B9: the sign-in redirect — everything is persisted
   if(rows.some(r=>r.saved!=="saved" || r.fix) || outbox.length || (window.RX && RX.unsentCount())){ e.preventDefault(); e.returnValue=""; }});
