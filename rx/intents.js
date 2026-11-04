@@ -50,7 +50,7 @@ const RX = window.RX; if(!RX) return;
 const CFG = RX.CFG, I = RX.intents, t = RX.t;
 
 RX.INTENT_FIELDS = ["IntentId","Kind","State","PageMode","ScanDay","ScanAt","ReadyAt","Po","PoPinned","Sku","Upc","Gtin14","Units","Cases","CaseQty","QtyKind","BestBy","Lot","Location","BinSource","Workflow","StagedArea","RecommendedBin","RecReasons","SplitOf","TempConfirmed","FefoOverride","ShortDated","CancelTooLate","OverConfirmed","DamagedUnits","RejectedUnits","RawScans","PhotoUrls","Operator","Device","BbItemId","PlacedBy","FixUnits","FixBin","FixNote"];
-RX.INTENT_CHOICES = {"Kind":["intent","fix","short"],"State":["staged","ready","skipped","cancelled"],"PageMode":["off","shadow","live"],"QtyKind":["full","part"],"BinSource":["scanned","typed","armed"],"Workflow":["direct","staged"]};
+RX.INTENT_CHOICES = {"Kind":["intent","fix","short","move"],"State":["staged","ready","skipped","cancelled"],"PageMode":["off","shadow","live"],"QtyKind":["full","part"],"BinSource":["scanned","typed","armed"],"Workflow":["direct","staged"]};
 const FIN_FIELDS = ["FinState","FinReason","FinPo","FinShipment","FinBatch","FinAt","FinUnitsPosted","FinUnitsHeld","FinUnitsWould"];
 const NUM = new Set(["Units","Cases","CaseQty","DamagedUnits","RejectedUnits","FixUnits"]);
 const BOOL = new Set(["TempConfirmed","FefoOverride","ShortDated","CancelTooLate","OverConfirmed","PoPinned"]);
@@ -183,7 +183,7 @@ const isFinal = (rec) => {
   const fs = (rec.fin && rec.fin.FinState) || "";
   if(fs === "posted" || fs === "refused" || fs === "shadow" || fs === "reversed") return true;
   if(rec.fields.State === "skipped" || rec.fields.State === "cancelled") return true;
-  if(rec.fields.Kind === "fix" || rec.fields.Kind === "short") return true;
+  if(rec.fields.Kind === "fix" || rec.fields.Kind === "short" || rec.fields.Kind === "move") return true;
   if(rec.fields.PageMode === "shadow" && rec.sent && rec.fields.State !== "staged") return true;    // shadow ends at "Saved"
   return false;
 };
@@ -729,6 +729,9 @@ I.query = async function(filter, o){
 };
 RX.state.todayAll = new Map();
 const isShort = (x) => ((x && x.fields) || {}).Kind === "short";
+/* ⭐ 2026-11-04 a `move` row (a stock move the poster does in Finale) is never a receipt, a count or a note: every reader of
+   allToday()/allPo() is blind to it BY CONSTRUCTION; only I.moves() sees it (the put-away card in staging.js). */
+const isMove = (x) => ((x && x.fields) || {}).Kind === "move";
 function rawToday(){
   const seen = new Set(), out = [];
   for(const [iid, v] of RX.state.todayAll){ const rec = S.recs[iid];
@@ -738,7 +741,7 @@ function rawToday(){
     out.push({iid:rec.iid, fields:rec.fields, fin:rec.fin || {}, itemId:rec.itemId, etag:rec.etag, local:true}); }
   return out;
 }
-I.allToday = () => rawToday().filter(x => !isShort(x));
+I.allToday = () => rawToday().filter(x => !isShort(x) && !isMove(x));
 const hasOpen = () => Object.values(S.recs).some(r => !r.denied && !isFinal(r));
 const needList = () => !!(Object.keys(S.recs).length || (RX.pack.data && (RX.pack.data.pos || []).length));
 function applyList(items){
@@ -804,7 +807,8 @@ function rawPo(){
                  : {iid, fields:v.fields, fin:v.fin, itemId:v.itemId, etag:v.etag, local:false}); seen.add(iid); }
   return out;
 }
-I.allPo = () => rawPo().filter(x => !isShort(x));
+I.allPo = () => rawPo().filter(x => !isShort(x) && !isMove(x));
+I.moves = () => rawPo().filter(isMove);
 I.shorts = () => rawPo().filter(isShort);
 async function pollPoster(gen){
   const ps = RX.poster;
