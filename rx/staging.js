@@ -103,6 +103,11 @@ const COPY_ADD = {
   inhand_body:     "All {n} of its staged case(s) are in your hand. Scan the SHELF TAG where you put it — nothing new was recorded.",
   inhand_got:      "Got it",
   inhand_another:  "This is another case — receive it now",
+  hit_title:       "Staged {when} — {name}",
+  hit_body:        "{units} u · best-by {bb} · on cart {area}",
+  hit_more:        "{n} more staged",
+  hit_put:         "Put it away from stage",
+  hit_another:     "This is another case — receive it",
   lot_h:           "Which best-by is this case?",
   lot_row:         "{bb} · {n} units · {by}",
   placed_flash:    "{n} items → {bin}",
@@ -594,8 +599,18 @@ function onTagScan(id){
   }
   RX.sound("staged"); ST.render(); return true;
 }
+/* ⭐ 2026-11-05 (real PO 2026110101, Orgain 851770006668 = two products): the scan's catalog SKU can differ from the SKU the case was
+   STAGED under (a refreshed / older catalog; a barcode on two products). A staged record whose own Upc / Gtin14 IS the scanned code is
+   that case — match on the code as well as the SKU, so the crew are never told "not on the staged list" about a case that is. */
+const dig = (x) => String(x == null ? "" : x).replace(/\D/g, "");
+function wantedFor(id, raw){
+  const codes = new Set([dig(id.upc), dig(id.gtin), dig(raw)].filter(x => x.length >= 12));
+  const sameCode = (r) => { const f = r.fields || {}; return [dig(f.Upc), dig(f.Gtin14)].some(x => x.length >= 12 && codes.has(x)); };
+  return (r) => (id.sku && r.sku === id.sku) || sameCode(r);
+}
 async function onItemScan(id, raw){
-  const mineAll = ST.records().filter(r => r.sku === id.sku && !inTray(r.iid));
+  const wanted = wantedFor(id, raw);
+  const mineAll = ST.records().filter(r => wanted(r) && !inTray(r.iid));
   const all = mineAll.filter(r => !holdWaiting(r));
   /* PM-3361: the current shelf, else a one-shot arm. ⛔ review (3): an item going into the TRAY does not keep the shelf alive — only a
      placement does (PA.shelf.bump) — so the 10-min idle ends a shelf the crew walked away from */
@@ -611,7 +626,7 @@ async function onItemScan(id, raw){
        answers about one case. So: (1) a SKU whose staged records are all in the hand says so (it IS staged); (2) otherwise, when the PO
        line already shows complete, the card says that BEFORE the crew press [Receive it now]. ⛔ Information only — a truly extra case
        still goes through the ladder (the over-shipment confirm). */
-    const hand = ST.records().filter(r => r.sku === id.sku && inTray(r.iid) && !holdWaiting(r));
+    const hand = ST.records().filter(r => wanted(r) && inTray(r.iid) && !holdWaiting(r));
     if(hand.length){
       S.notstaged = {raw, name: id.prod.name, armed: armed ? armed.bin : null, inHand: true};
       prompt_("stop", esc(t("inhand_title", {name: id.prod.name})), `<span class="rx-pa-sub">${esc(t("inhand_body", {n: hand.length}))}</span>`,
@@ -744,55 +759,55 @@ RX.registerAct("staged-cancel-yes", async ({el}) => {
    hand (tray) for the shelf tag; in Sort first it is already where it belongs. [No — another case] carries on (the over-shipment
    confirm still asks if it goes past what KeHE shipped). ⛔ Never in Best-by only (that flow runs no steps). */
 const dayAt = (iso) => { const d = new Date(Date.parse(iso)); if(isNaN(d)) return ""; return d.toLocaleDateString(undefined, {weekday: "short"}) + " " + RX.hhmm(iso); };
-/* ⛔ review 2026-10-23 PM (1): only when this case would take the item PAST what KeHE shipped (else ordered) counting what is already
-   received, scanned and on carts (RX.po.overCap) — a normal second, third … case of a line is never asked. (7): cart records of the
-   SKU on ANY open PO (a re-scan can match a different PO once the first reads full). */
-function onCartFor(p, m){
-  if(!p || !p.prod) return [];
-  const o = (RX.po && RX.po.overCap) ? RX.po.overCap(p, +p.qty || 0) : null;
-  if(!(o && o.over)) return [];
-  p.rx = p.rx || {}; p.rx.oncartOver = o;
-  const pos = new Set(RX.po.pos().map(po => String(po.order_id)));
-  return oldestFirst(ST.records().filter(r => r.sku === p.prod.sku && pos.has(String(r.po)) && !inTray(r.iid) && !holdWaiting(r)
-                                           && (r.fields || {}).PageMode === "live"));
-}
-RX.registerStep("oncart", {
+/* 2026-11-05: the old "already on a cart?" step (asked after the date and count, only past the PO cap) is REPLACED by the
+   "staged yesterday" card below, which comes first and works in every flow. */
+
+/* ───────────────────────── "staged yesterday" — ANY receive flow (Jack 2026-11-05) ─────────────────────────
+   The crew had no way to put away a case sorted to a cart in Direct / Sort / To identify, so they received it AGAIN (the gravy double
+   receives). A case scan that resolves — by SKU or by the case code / retail UPC the record carries — to an open STAGED, live, not
+   cancelled record on an open pack PO, not already in the hand, now shows ONE card BEFORE any date or count is asked:
+   [Put it away from stage] (Enter) moves THAT record into the hand and goes to the shelf-tag step (no best-by asked, no second intent,
+   no second best-by row, no second receipt: the same record becomes State=ready + Location, which the poster posts once);
+   [This is another case — receive it] runs the ordinary ladder (over-ship confirm included). Several records ⇒ the OLDEST staged first,
+   "n more staged". Once every staged record is used (or in the hand) the card does not appear. ⛔ Never in Best-by only / practice. */
+S.hit = null; S.hitBypass = false;
+const hitRecords = (id, raw) => {
+  const pos = new Set(((RX.po && RX.po.pos && RX.po.pos()) || []).map(po => String(po.order_id)));
+  const w = wantedFor(id, raw);
+  return ST.records().filter(r => w(r) && !inTray(r.iid) && !holdWaiting(r) && (r.fields || {}).PageMode === "live" && pos.has(String(r.po)))
+    .sort((a, b) => String(a.at).localeCompare(String(b.at)));
+};
+RX.registerIdle("stagedhit", {
   keepScan: false,
-  applies(ctx){
-    const p = ctx.p; if(p.rx && p.rx.oncartNo) return false;
-    const recs = onCartFor(p, ctx.po); (p.rx || (p.rx = {})).oncart = recs.map(r => r.iid);
-    return recs.length > 0;
-  },
-  start(ctx){
-    const p = ctx.p, recs = onCartFor(p, ctx.po); if(!recs.length){ ctx.done({}); return; }
-    const same = recs.filter(r => p.best && r.best === p.best), order = same.concat(recs.filter(r => same.indexOf(r) < 0)).slice(0, 4);
-    const rows = order.map(r => btn("oncart-pick", t("oncart_row", {units: fmtU(r.units), bb: r.best ? r.best : "no date", area: r.area || "a cart", when: dayAt(r.at), who: whoText(r)}),
-      "rx-st-lot", `data-iid="${esc(r.iid)}"`)).join("");
-    const o = (p.rx && p.rx.oncartOver) || {};
-    const sub = o.cap != null ? `<span class="rx-pa-sub">${esc(t(o.basis === "shipped" ? "oncart_sub" : "oncart_sub_ord", {n: fmtU(o.n), cap: fmtU(o.cap)}))}</span>` : "";
-    /* ⭐ "No — another case" is the primary (Enter): it records the case, so a wrong Enter can never lose a real case */
-    prompt_("stop", esc(t("oncart_title", {name: p.prod.name})), sub,
-      `<div>${rows}</div><div class="rx-pa-btns">${btn("oncart-no", t("oncart_no"), "primary", "data-primary")}${btn("oncart-back", t("btn_back"), "", 'data-close="3"')}</div>`);
+  async onScan(raw){
+    const flow = RX.flow();
+    if(RX.mode() !== "live" || (flow !== "direct" && flow !== "sort")) return false;
+    if(S.hitBypass){ S.hitBypass = false; return false; }
+    const id = PA.identify(raw);
+    if(S.hit){ if(id.kind === "tag" || id.kind === "product"){ RX.toast("Answer the question first. That scan was not recorded."); RX.sound("refused"); return true; } return false; }
+    if(id.kind !== "product" && id.kind !== "unknown") return false;
+    const hits = hitRecords(id, raw); if(!hits.length) return false;
+    const r = hits[0], bb = r.best || "no date";
+    S.hit = {raw, iid: r.iid, name: nameOf(r.sku) || (id.prod && id.prod.name) || r.sku};
+    const more = hits.length > 1 ? `<span class="rx-pa-sub"><strong>${esc(t("hit_more", {n: hits.length - 1}))}</strong></span>` : "";
+    prompt_("go", esc(t("hit_title", {when: dayAt(r.at), name: S.hit.name})), `${RX.idLine(r.sku)}<span class="rx-pa-sub">${esc(t("hit_body", {units: fmtU(r.units), bb, area: r.area || "a cart"}))}</span>${more}`,
+      `<div class="rx-pa-btns">${btn("stagedhit-put", t("hit_put"), "primary", "data-primary")}${btn("stagedhit-another", t("hit_another"))}</div>`);
     setTimeout(() => { const b = document.querySelector("#promptArea [data-primary]"); if(b) b.focus(); }, 30);
-    RX.sound("decide");
+    RX.sound("decide"); return true;
   },
-  onScan(){ return false; },
 });
-const onCartCtx = () => { const st = RX.state.step; return st && st.name === "oncart" ? st.ctx : null; };
-RX.registerAct("oncart-no", () => { const c = onCartCtx(); if(!c) return; (c.p.rx || (c.p.rx = {})).oncartNo = true; try{ clearPrompt(); }catch(_){} c.done({overConfirmed: true}); });   // the crew just said it is an extra case: the overship step does not ask again
-RX.registerAct("oncart-back", () => { if(onCartCtx()) RX.backToQty(); });
-RX.registerAct("oncart-pick", ({el}) => {
-  const c = onCartCtx(); if(!c) return;
-  const iid = el.getAttribute("data-iid"), r = ST.records().find(x => x.iid === iid), name = c.p.prod.name, flow = RX.flow();
-  if(!r){ RX.toast(t("conflict_gone", {name})); return; }
-  /* ⛔ nothing is recorded: the open scan is dropped exactly as Close drops it (no best-by row, no intent) */
-  try{ if(typeof abandonPending === "function") abandonPending(); else RX.abandon(); }catch(_){}
-  try{ clearPrompt(); }catch(_){}
-  if(flow === "sort"){ RX.toast(t("oncart_sort", {name})); RX.sound("staged"); RX.refresh(); return; }
-  /* review 2026-10-23 PM (2): the staged screen only until this record is on a shelf (or the hand is cleared) — then back to the
-     screen the crew was on, so the next new case is received, not matched against the cart list */
-  if(RX.flow() !== "staged"){ S.returnFlow = flow; RX.setFlow("staged"); }
-  addToTray(r); S.notice = t("oncart_intray", {name}); ST.render();
+RX.registerAct("stagedhit-put", () => {
+  const h = S.hit; if(!h) return; S.hit = null; try{ clearPrompt(); }catch(_){}
+  const r = ST.records().find(x => x.iid === h.iid);
+  if(!r){ RX.toast(t("conflict_gone", {name: h.name})); return; }
+  const flow = RX.flow();
+  if(flow !== "staged"){ S.returnFlow = flow; RX.setFlow("staged"); }
+  addToTray(r); S.notice = t("oncart_intray", {name: h.name}); ST.render();
+});
+RX.registerAct("stagedhit-another", () => {
+  const h = S.hit; if(!h) return; S.hit = null; try{ clearPrompt(); }catch(_){}
+  S.hitBypass = true; setTimeout(() => { S.hitBypass = false; }, 800);
+  try{ handleScan(h.raw); }catch(_){}
 });
 function maybeReturn(){
   if(!S.returnFlow || S.tray.items.length || S.dec) return;
