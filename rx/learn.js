@@ -5,12 +5,20 @@
    codes but the product doesn't change" and "we would need to have the user open the case, search for the SKU, and have them
    confirm the size and information are identical to the original product in the app before it's accepted."
 
-   ═══ THE FLOW (three screens, every one with Cancel) ═══
-     1. OPEN THE CASE   take out one unit; tick that the unit carries this same barcode.
+   ═══ THE FLOW (P1, Jack 2026-11-04: "We should trust they scanned the correct UPC code without a million confirmations … I am
+       confused why there are so many gates here?" — Matt could neither tick "same number at the end" nor learn the code) ═══
+     1. SCAN A UNIT    "Take out one unit and scan it." The unit's own barcode IS the identity: the scan (index.html's handleScan calls
+                       RXLearn.unitScan(prod, v, upc)) learns the case code for that unit's product — NO tick screens. An Undo banner
+                       stays 60 s (revokes the list row; the !ALIAS record is held until the window closes, so an undone learning
+                       never reaches the catalog builder). [Find the product by name] is the way out when a unit will not scan.
      2. FIND IT         search by name, brand or SKU — one row per product, size and SKU on every row.
-     3. CONFIRM         the product as the app knows it beside the new code; three ticks — same product, same size/weight,
-                        same flavour/variety. [Learn this barcode] stays disabled until all three are ticked.
+     3. CONFIRM         the product as the app knows it beside the new code; ONE tick — "This is the product in my hand".
                         [Not the same] records a skip ("different product — new item") and says to set the case aside.
+     ⛔ KEPT: a case code already tied to a DIFFERENT product is refused and explained, never silently relinked (unitScan checks the
+        catalog and the learned list); validCheck() on the code; Revoked rows; the persisted outbox. The WRONG-ITEM path (below) is
+        unchanged: its open-the-case tick and three ticks stay (Jack 2026-10-28: "three ticks are enough for a wrong-item fix").
+     ⭐ The BarcodeLearnings `Confirmed` JSON keeps the four evidence keys true (the mini's lib/barcode_learnings.confirmed_ok still
+        requires them) and adds `basis`: "unit_scan" (+ `unit_code`) or "one_tick".
    On Learn: (a) a `BarcodeLearnings` row on the ClaudeAgents site (persisted outbox; the Mac mini adds the code to the
    product in FINALE — scripts/barcode_learn_finale.py), (b) a `!ALIAS` "code -> sku" record in BB Receipts, which the
    overnight catalog already learns permanently (build_receiving_catalog.case_aliases_detail), (c) the code is added to this
@@ -43,7 +51,9 @@ const SITE = "tcfarm0.sharepoint.com:/sites/ClaudeAgents", LIST = "BarcodeLearni
 const KEY_Q = "learn_outbox_v1", KEY_C = "learn_cache_v1";
 const REFRESH_MS = 60000, MIN_GAP_MS = 20000, READ_LIMIT_MS = 8000;
 const S = { cand: null, learned: {}, siteId: null, listId: null, lastFetch: 0, fetching: null, outbox: [], flushing: false,
-            unitTicked: false, pick: null, err: "", preSku: null, asks: null, asksAt: 0, refused: [] };
+            unitTicked: false, pick: null, err: "", preSku: null, asks: null, asksAt: 0, refused: [],
+            awaitUnit: false, undo: null, undoMs: 60000, ids: {}, wantRevoke: {}, aliases: [] };
+const KEY_AL = "learn_alias_pending_v1";
 const KEY_A = "learn_asks_v1", KEY_R = "learn_refused_v1", ASK_MS = 30 * 60000, STUCK_MS = 2 * 60000;
 
 const ls = { get(k, d){ try{ const v = JSON.parse(localStorage.getItem(k) || "null"); return v == null ? d : v; }catch(_){ return d; } },
@@ -52,6 +62,7 @@ S.learned = ls.get(KEY_C, {}) || {};
 S.outbox = (ls.get(KEY_Q, []) || []).filter(x => x && x.fields && x.fields.Code);
 S.asks = ls.get(KEY_A, null);
 S.refused = (ls.get(KEY_R, []) || []).filter(x => x && x.code);
+S.aliases = (ls.get(KEY_AL, []) || []).filter(x => x && x.raw && x.code);
 const e_ = (s) => (typeof esc === "function" ? esc(s) : String(s == null ? "" : s));
 const el = (id) => document.getElementById(id);
 
@@ -164,7 +175,10 @@ async function flush(){
     await ids();
     while(S.outbox.length){
       const q = S.outbox[0];
-      try{ await graph(`/sites/${S.siteId}/lists/${S.listId}/items`, {method: "POST", body: JSON.stringify({fields: q.fields})}); }
+      try{
+        const r = await graph(`/sites/${S.siteId}/lists/${S.listId}/items`, {method: "POST", body: JSON.stringify({fields: q.fields})});
+        if(r && r.id){ S.ids[q.fields.LearnId] = String(r.id); if(S.wantRevoke[q.fields.LearnId]) await revoke(q.fields.LearnId); }   // P1: an Undo pressed mid-save
+      }
       catch(e){
         if(e && e.status === 409){ /* duplicate LearnId = already saved */ }
         else if(e && e.permanent){ console.warn("learning refused by SharePoint, dropped", q.fields, e);
@@ -190,6 +204,7 @@ function banner(){
   if(old.length) parts.push(`⚠️ <strong>${old.length} new barcode${old.length === 1 ? "" : "s"} not saved to the shared list yet</strong> (${old.map(q => e_(q.fields.Code)).join(", ")}). They are kept on this tablet and retried — keep it online. Other tablets do not know ${old.length === 1 ? "it" : "them"} yet.`);
   if(S.refused.length) parts.push(`⛔ <strong>SharePoint refused ${S.refused.length === 1 ? "a learned barcode" : S.refused.length + " learned barcodes"}</strong>: ${S.refused.map(r => e_(r.code) + " → " + e_(r.sku)).join(", ")}. Other tablets and Finale do not know it. Tell Jack. <button type="button" data-act="learn-banner-ok" style="margin-left:6px;min-height:0;padding:4px 10px">OK</button>`);
   b.innerHTML = parts.join("<br>");
+  if(S.undo) undoBanner();                                              // keep the Undo banner stacked above this one
 }
 
 /* ── the buyer's list of codes to identify (app/receiving/past_scans.json, read with the signed-in token like the pack) ── */
@@ -237,18 +252,21 @@ const cancel = `<div class="pcloseRow"><button type="button" class="pclose" data
 /* opts (B2, rx/identify.js): {noReplay, onLearned, onDifferent} — learning a carton ALREADY recorded unnamed: nothing is replayed (a
    second receipt would double it); its saved date attaches once the code resolves. */
 const T = (n, what) => (S.mode === "wrong" ? "Wrong item — " : "Learn a new barcode — ") + n + " of 3: " + what;
+const TL = (what) => (S.mode === "wrong" ? "Wrong item — " : "Learn a new barcode — ") + what;   // P1: the learn path is not "n of 3" any more
 function start(preSku, opts){
   if(!S.cand) return;
   S.mode = "learn";
-  S.unitTicked = false; S.pick = null; S.preSku = preSku || null; S.opts = opts || null;
-  prompt_("", T(1, "open the case"),
+  S.unitTicked = false; S.pick = null; S.preSku = preSku || null; S.opts = opts || null; S.awaitUnit = false;
+  const bySku = (typeof CATALOG_BY_SKU === "object" && CATALOG_BY_SKU) || {};
+  /* purchasing's suggestion (learn-ask): the product is already chosen — compare it, ONE tick (no search, no unit step) */
+  if(S.preSku && bySku[S.preSku]) return confirm_(S.preSku);
+  S.awaitUnit = true;                                                  // unitScan() takes the NEXT scan, only while THIS card is on screen
+  prompt_("", TL("scan one unit"),
     `New barcode <span class="num">${e_(S.cand.code)}</span>.<br><br>
-     <strong>Open the case and take out ONE unit.</strong> Look at the unit's own barcode number.`,
-    `<label style="display:flex;gap:10px;align-items:center;margin:8px 0 12px;font-size:16px">
-       <input type="checkbox" id="lnUnit" data-act="learn-unit" style="width:24px;height:24px">
-       The unit inside shows this same number (${e_(S.cand.code.slice(-6))} at the end)</label>
-     <button class="primary" id="lnNext1" data-act="learn-next1" disabled>${S.preSku ? "Next — compare it" : "Next — find the product"}</button>${cancel}`, {noClose: true});
+     <strong>Take out ONE unit and scan it.</strong> The unit's own barcode tells us which product this case is.`,
+    `<button id="lnFind" data-act="learn-find">Can't scan it — find the product by name</button>${cancel}`, {noClose: true});
 }
+
 function find(){
   prompt_("", T(2, "find the product"),
     `Type the name, brand or SKU of the product <strong>in your hand</strong>. Two sizes read alike — check the size.`,
@@ -300,10 +318,10 @@ function confirm_(sku){
       If the product is right and only the DATE is wrong, Cancel and change the date. Otherwise search for the product that is really in the box.</div>`; }, 40);
     return;
   }
-  prompt_("", T(3, "is it identical?"),
+  prompt_("", W ? T(3, "is it identical?") : TL("is this the product?"),
     (W && S.cand.always ? `This barcode is on ${S.cand.alts.length + 1} products. Confirm it is ALWAYS this one.<br>` :
      W ? `This barcode was matched to <s>${e_(W.name || W.sku)}</s> <span class="num">${e_(W.sku)}</span> — that is what you said is wrong.<br>` : "") +
-    `Compare the unit in your hand with what the app has. ⛔ Only if ALL of it matches.`,
+    (W ? `Compare the unit in your hand with what the app has. ⛔ Only if ALL of it matches.` : `Compare the unit in your hand with what the app has.`),
     `<table style="width:100%;border-collapse:collapse;font-size:15px;margin:4px 0 10px">
        <tr><td style="color:var(--ink-3);padding:3px 8px 3px 0">Brand</td><td><strong>${e_(p.br || "—")}</strong></td></tr>
        <tr><td style="color:var(--ink-3);padding:3px 8px 3px 0">Product</td><td><strong>${e_(p.name || "")}</strong></td></tr>
@@ -313,9 +331,10 @@ function confirm_(sku){
        <tr><td style="color:var(--ink-3);padding:3px 8px 3px 0">Old barcode</td><td class="num">${e_(codesFor(p.sku).join(", ") || "none on file")}</td></tr>
        <tr><td style="color:var(--ink-3);padding:3px 8px 3px 0">${W ? "This barcode" : "NEW barcode"}</td><td class="num"><strong>${e_(S.cand.code)}</strong></td></tr>
      </table>
-     ${tick("lnSame", "Same product — brand and name match the unit")}
+     ${W ? `${tick("lnSame", "Same product — brand and name match the unit")}
      ${tick("lnSize", `Same size / weight${sizeOf(p.name) ? " (" + e_(sizeOf(p.name)) + ")" : ""}`)}
-     ${tick("lnVar", "Same flavour / variety")}
+     ${tick("lnVar", "Same flavour / variety")}`
+         : tick("lnSame", "This is the product in my hand — the size is on the card")}
      ${(W && S.cand.alts && S.cand.alts.length && !S.cand.always) ? `<label style="display:flex;gap:10px;align-items:center;margin:10px 0 6px;font-size:16px;border-top:1px solid var(--line);padding-top:10px">
         <input type="checkbox" id="lnAlways" style="width:24px;height:24px"> Always this product for this barcode <span class="hint" style="display:inline">(otherwise only this case changes — this barcode is on ${S.cand.alts.length + 1} products)</span></label>` : ""}
      <div style="margin-top:10px"><button class="primary" id="lnLearn" data-act="learn-commit" disabled>${W ? "Correct it to this product" : "Learn this barcode"}</button>
@@ -323,24 +342,36 @@ function confirm_(sku){
          : `<button id="lnDiff" data-act="learn-diff">Not the same — it's a different product</button>`}
      <button id="lnBack" data-act="learn-back">Back — pick another</button></div>${cancel}`, {noClose: true});
 }
-function ticksOk(){ return ["lnSame", "lnSize", "lnVar"].every(id => { const x = el(id); return x && x.checked; }); }
+function ticksOk(){ return (S.mode === "wrong" ? ["lnSame", "lnSize", "lnVar"] : ["lnSame"]).every(id => { const x = el(id); return x && x.checked; }); }
 
 async function commit(){
-  if(!S.cand || !S.pick || !ticksOk() || !S.unitTicked) return;
-  if(S.mode === "wrong") return commitWrong();
-  const code = S.cand.code, p = S.pick, raw = S.cand.raw;
-  const conf = {same_product: true, same_size: true, same_variety: true, unit_opened: true, asked: !!S.preSku && S.preSku === p.sku,
-                shown: {name: p.name || "", br: p.br || "", size: sizeOf(p.name), old: codesFor(p.sku)}};
+  if(!S.cand || !S.pick || !ticksOk()) return;
+  if(S.mode === "wrong"){ if(!S.unitTicked) return; return commitWrong(); }
+  return learnNow(S.pick, "one_tick", {asked: !!S.preSku && S.preSku === S.pick.sku});
+}
+/* write one learning: the BarcodeLearnings row (persisted outbox), the !ALIAS record, the local catalog entry, then replay the scan */
+async function learnNow(p, basis, extra){
+  const code = S.cand.code, raw = S.cand.raw;
+  const conf = Object.assign({same_product: true, same_size: true, same_variety: true, unit_opened: true, basis,
+                shown: {name: p.name || "", br: p.br || "", size: sizeOf(p.name), old: codesFor(p.sku)}}, extra || {});
   const fields = {Title: "learn " + code, LearnId: newId(), Code: code, Sku: p.sku, ProductName: String(p.name || "").slice(0, 250),
                   Confirmed: JSON.stringify(conf).slice(0, 4000), Operator: (typeof account === "string" ? account : "") || "",
                   Device: (typeof device === "string" ? device : "") || "", LearnedAt: new Date().toISOString()};
   S.outbox.push({fields, at: Date.now()}); ls.set(KEY_Q, S.outbox);
   S.learned[code] = {sku: p.sku, name: p.name || "", local: true}; ls.set(KEY_C, S.learned);
-  try{ if(typeof reject === "function") reject("ALIAS", `${code} -> ${p.sku}`, code); }catch(_){}
+  const wasNew = !CATALOG[code];
   if(!CATALOG[code] || CATALOG[code].sku === p.sku) CATALOG[code] = Object.assign({}, p, {learned: true});
+  const o = S.opts, noReplay = !!(o && o.noReplay);
+  if(noReplay){ try{ if(typeof reject === "function") reject("ALIAS", `${code} -> ${p.sku}`, code); }catch(_){} }   // no Undo here: the recorded carton is attached
+  else{                                                                // ⭐ the !ALIAS is held for the Undo window (an undone learning must never reach the catalog builder)
+    S.aliases.push({raw: `${code} -> ${p.sku}`, code, lid: fields.LearnId, due: Date.now() + S.undoMs}); ls.set(KEY_AL, S.aliases);
+    setTimeout(flushAliases, S.undoMs + 60);
+    S.undo = {lid: fields.LearnId, code, sku: p.sku, name: p.name || "", raw, wasNew, until: Date.now() + S.undoMs};
+    setTimeout(undoBanner, S.undoMs + 60); undoBanner();
+  }
   flush();
-  const o = S.opts; S.cand = null; S.pick = null; S.preSku = null; S.opts = null;
-  if(o && o.noReplay){                                                 // B2: a carton already recorded — never a second receipt
+  S.cand = null; S.pick = null; S.preSku = null; S.opts = null; S.awaitUnit = false;
+  if(noReplay){                                                        // B2: a carton already recorded — never a second receipt
     if(typeof clearPrompt === "function") clearPrompt();
     try{ if(o.onLearned) o.onLearned(p.sku); }catch(_){}
     if(typeof RX === "object" && RX.toast) RX.toast(`Learning ${code} as ${p.name || p.sku} — the recorded case attaches to it`);
@@ -350,9 +381,78 @@ async function commit(){
   if(typeof clearPrompt === "function") clearPrompt();
   if(typeof handleScan === "function") await handleScan(raw);        // the case carries on as the confirmed product
 }
+function flushAliases(){
+  const now = Date.now(), due = S.aliases.filter(a => a.due <= now);
+  if(!due.length) return;
+  S.aliases = S.aliases.filter(a => a.due > now); ls.set(KEY_AL, S.aliases);
+  for(const a of due){ try{ if(typeof reject === "function") reject("ALIAS", a.raw, a.code); }catch(_){} }
+}
+
+/* ── P1: THE UNIT SCAN. index.html's handleScan calls this with the scan that FOLLOWS the learn card's step 1. Returns true when the wizard
+   took the scan (the page must stop), false when it is not waiting for one (the page carries on as usual). ── */
+function unitScan(prod, v, upc){
+  if(!S.awaitUnit || S.mode !== "learn" || !S.cand || !el("lnFind")) return false;   // ⛔ only while THIS card is on screen — never a stale arming
+  const own = [v, upc].map(pkey).filter(Boolean), cases = [S.cand.code, S.cand.raw].map(pkey).filter(Boolean);
+  const toast = (m) => { if(typeof RX === "object" && RX.toast) RX.toast(m); };
+  if(own.some(x => cases.indexOf(x) >= 0)){ toast("That is the case's own barcode. Scan the barcode on ONE UNIT inside."); return true; }
+  if(!prod || !prod.sku || String(prod.sku).startsWith("!")){ toast("That unit's barcode is not in our catalog either. Scan another unit, or find the product by name."); return true; }
+  /* ⛔ a case code already tied to a DIFFERENT product is never relinked here */
+  const cur = CATALOG[S.cand.code], L = S.learned[S.cand.code];
+  const other = (cur && cur.sku && cur.sku !== prod.sku) ? cur : ((L && !L.revoked && L.sku && L.sku !== prod.sku) ? {sku: L.sku, name: L.name} : null);
+  if(other){
+    S.awaitUnit = false;
+    prompt_("stop", TL("already another product"),
+      `Barcode <span class="num">${e_(S.cand.code)}</span> is already <strong>${e_(other.name || other.sku)}</strong> <span class="num">${e_(other.sku)}</span>.
+       The unit you scanned is <strong>${e_(prod.name || prod.sku)}</strong>. <strong>Nothing was changed.</strong><br><br>
+       If the barcode is matched to the wrong product, scan the case again and use <strong>Different product in the box? Correct it</strong>.`,
+      cancel, {noClose: true});
+    return true;
+  }
+  S.awaitUnit = false;
+  if(Array.isArray(prod.alt) && prod.alt.length){ confirm_(prod.sku); return true; }   // the unit's own barcode is on several products: one tick decides
+  learnNow(prod, "unit_scan", {unit_code: String(upc || v || "").replace(/\D/g, "")});
+  return true;
+}
+
+/* ── the 60-second Undo ── */
+function undoBanner(){
+  let b = el("lnUndo");
+  const u = S.undo;
+  if(!u || Date.now() >= u.until){ S.undo = null; if(b) b.remove(); return; }
+  if(!b){ b = document.createElement("div"); b.id = "lnUndo"; b.setAttribute("role", "status");
+    b.style.cssText = "position:fixed;left:0;right:0;bottom:0;z-index:51;display:flex;gap:12px;align-items:center;padding:10px max(16px,env(safe-area-inset-left,0px)) calc(10px + env(safe-area-inset-bottom,0px));background:var(--card,#fff);color:var(--ink,#222);border-top:2px solid var(--line,#999);font-size:16px";
+    document.body.appendChild(b); }
+  const lb = el("lnBanner"); b.style.bottom = (lb ? lb.offsetHeight : 0) + "px";   // never hide the save-problem banner (or be hidden by it)
+  /* the Undo button sits on the LEFT: the feedback button floats bottom-right and would cover it */
+  b.innerHTML = `<button type="button" data-act="learn-undo" style="min-height:44px;padding:8px 18px">Undo</button>
+    <span style="flex:1;padding-right:96px">Learned <span class="num">${e_(u.code)}</span> as <strong>${e_(u.name || u.sku)}</strong>.</span>`;
+}
+async function revoke(lid){
+  const id = S.ids[lid]; if(!id) return false;
+  try{ await graph(`/sites/${S.siteId}/lists/${S.listId}/items/${id}/fields`, {method: "PATCH", body: JSON.stringify({Revoked: true})}); delete S.wantRevoke[lid]; return true; }
+  catch(_){ if(typeof RX === "object" && RX.toast) RX.toast("Could not undo it on the shared list — tell Jack. This tablet has undone it."); return false; }
+}
+async function undo(){
+  const u = S.undo; if(!u || Date.now() >= u.until) return undoBanner();
+  S.undo = null; undoBanner();                                         // idempotent: a second press finds nothing
+  S.aliases = S.aliases.filter(a => a.lid !== u.lid); ls.set(KEY_AL, S.aliases);   // ⛔ the alias is never written
+  const qi = S.outbox.findIndex(q => q.fields.LearnId === u.lid);
+  if(qi >= 0 && !(S.flushing && qi === 0)){ S.outbox.splice(qi, 1); ls.set(KEY_Q, S.outbox); }
+  else if(S.ids[u.lid]) await revoke(u.lid);
+  else S.wantRevoke[u.lid] = true;                                     // the save is in flight: flush() revokes it the moment it has an id
+  delete S.learned[u.code]; ls.set(KEY_C, S.learned);
+  if(CATALOG[u.code] && CATALOG[u.code].learned && CATALOG[u.code].sku === u.sku) delete CATALOG[u.code];
+  /* the open case: if it is still that product's date prompt, ask about the code afresh; a receipt already saved stays as it is */
+  const still = typeof pending === "object" && pending && pending.prod && pending.prod.sku === u.sku;
+  if(still){ try{ pending = null; unresolved = null; }catch(_){} if(typeof clearPrompt === "function") clearPrompt();
+    if(typeof RX === "object" && RX.toast) RX.toast(`Undone — ${u.code} is not learned`);
+    if(typeof handleScan === "function") await handleScan(u.raw); }
+  else if(typeof RX === "object" && RX.toast) RX.toast(`Undone — ${u.code} is not learned (the receipt already saved stays as it is)`);
+}
+
 function different(){
   const code = S.cand ? S.cand.code : "";
-  S.mode = "learn";                                                    // a wrong-item search that found nothing ends here too
+  S.mode = "learn"; S.awaitUnit = false;                               // a wrong-item search that found nothing ends here too
   const o = S.opts; S.opts = null;
   if(o && o.noReplay){                                                 // B2: classify the recorded carton; there is no pending scan to clear
     try{ if(o.onDifferent) o.onDifferent(); }catch(_){}
@@ -365,6 +465,7 @@ function different(){
      The skip and its reason are recorded. ⛔ Set the case aside; do not put it away.`);
 }
 function cancelFlow(){
+  S.awaitUnit = false;
   if(S.mode === "wrong"){                                              // PM-3303: nothing changed — back to the item that was open
     S.mode = "learn"; S.cand = null; S.pick = null;
     if(typeof pending === "object" && pending && typeof next === "function") return next();
@@ -599,6 +700,7 @@ setTimeout(() => { loadPending(true); }, 3500);
 const ACTS = { "learn-start": () => start(), "learn-cancel": () => cancelFlow(),
                "learn-next1": () => { if(!S.unitTicked) return; const bySku = (typeof CATALOG_BY_SKU === "object" && CATALOG_BY_SKU) || {}; if(S.preSku && bySku[S.preSku]) confirm_(S.preSku); else find(); },
                "learn-ask": (a) => start(a.el.getAttribute("data-sku")),
+               "learn-find": () => { S.awaitUnit = false; find(); }, "learn-undo": () => { undo(); },
                "learn-banner-ok": () => { S.refused = []; ls.set(KEY_R, S.refused); banner(); },
                "learn-pick": (a) => confirm_(a.el.getAttribute("data-sku")), "learn-back": () => find(),
                "learn-diff": () => different(), "learn-commit": () => { commit(); },
@@ -608,7 +710,7 @@ const ACTS = { "learn-start": () => start(), "learn-cancel": () => cancelFlow(),
                "fix-undo": (a) => undoAsk(a.el.getAttribute("data-code")), "fix-undo-no": () => showFixes(),
                "fix-undo-yes": (a) => undoFix(a.el.getAttribute("data-code")) };
 if(window.RX && RX.registerAct){
-  for(const n of ["learn-start", "learn-cancel", "learn-next1", "learn-pick", "learn-back", "learn-diff", "learn-commit", "learn-unit", "learn-tick", "learn-ask", "learn-banner-ok", "wrong-start", "fix-undo", "fix-undo-yes", "fix-undo-no"])
+  for(const n of ["learn-start", "learn-cancel", "learn-next1", "learn-pick", "learn-back", "learn-diff", "learn-commit", "learn-unit", "learn-tick", "learn-ask", "learn-find", "learn-undo", "learn-banner-ok", "wrong-start", "fix-undo", "fix-undo-yes", "fix-undo-no"])
     RX.registerAct(n, (a) => { ACTS[n](a); return (n === "learn-unit" || n === "learn-tick") ? undefined : "stop"; });
 }
 document.addEventListener("change", (e) => {
@@ -618,7 +720,10 @@ document.addEventListener("change", (e) => {
   if(act === "learn-tick"){ const b = el("lnLearn"); if(b) b.disabled = !ticksOk(); }
 });
 
-setTimeout(() => { refresh(true); flush(); loadAsks(true); banner(); }, 3000);
-setInterval(() => { refresh(false); flush(); loadAsks(false); banner(); }, REFRESH_MS);
-window.RXLearn = { setCandidate, start, apply, refresh, flush, learnBtn, wrongItem, wrongBtn, wrongCodes, alwaysThis, showFixes, fixesList, validCheck, sizeOf, pendingFor, showPending, loadPending, loadAsks, asksFor, banner, state: S };
+setTimeout(() => { refresh(true); flush(); loadAsks(true); banner(); flushAliases(); }, 3000);
+setInterval(() => { refresh(false); flush(); loadAsks(false); banner(); flushAliases(); }, REFRESH_MS);
+/* index.html asks this before refusing a scan as "busy" (a question is open) and when it decides where focus goes: while the wizard's step 1 is
+   on screen the NEXT scan is the unit, and must not be turned away */
+const awaitingUnit = () => !!(S.awaitUnit && S.mode === "learn" && S.cand && el("lnFind"));
+window.RXLearn = { awaitingUnit, setCandidate, start, apply, refresh, flush, learnBtn, wrongItem, wrongBtn, unitScan, undo, wrongCodes, alwaysThis, showFixes, fixesList, validCheck, sizeOf, pendingFor, showPending, loadPending, loadAsks, asksFor, banner, state: S };
 })();
