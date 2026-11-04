@@ -124,6 +124,32 @@ const COPY_ADD = {
   hold_wait:       "Waiting for purchasing to add it to the PO",
   hold_wait_card:  "{name} is on hold — waiting for purchasing to add it to the PO.",
   hold_wait_close: "Close",
+  pm_title:        "{name} was already put away.",
+  pm_sub:          "Nothing is left on the staged list. This is what was recorded:",
+  pm_row:          "{units} u → {bin} · {who} · {when} · {status}",
+  pm_in_finale:    "in Finale",
+  pm_held:         "held — {why}",
+  pm_waiting:      "waiting to post",
+  pm_change:       "Change",
+  pm_moved_row:    "moved {units} u → {bin}: {status}",
+  pm_mv_done:      "done in Finale",
+  pm_mv_wait:      "waiting for the office",
+  pm_mv_held:      "held — {why}",
+  pm_mv_refused:   "not moved — {why}",
+  pm_close:        "Close",
+  pm_another:      "This is another case — receive it",
+  pm_units_q:      "How many units of {name} are NOT on {bin}?",
+  pm_units_hint:   "Up to {max} can be moved. One case is {cq}.",
+  pm_next:         "Next — scan the new shelf",
+  pm_back:         "Back",
+  pm_scan:         "Scan the SHELF TAG where those {n} units are now.",
+  pm_confirm:      "Move {n} u of {name} from {from} to {to}? Finale will follow.",
+  pm_go:           "Move them",
+  pm_same:         "That is the same shelf. Scan the shelf they are on now.",
+  pm_scan_tag:     "Scan a shelf tag.",
+  pm_sent:         "Sent — {n} u of {name} → {to}. The office moves it in Finale.",
+  pm_busy:         "A move for this put-away is already waiting. Let it finish first.",
+  pm_none:         "Nothing is left to move from this put-away.",
 };
 for(const k of Object.keys(COPY_ADD)) if(!(k in RX.COPY)) RX.COPY[k] = COPY_ADD[k];
 const t = RX.t;
@@ -582,7 +608,7 @@ RX.registerAct("placed-undo", async () => {
 });
 
 /* ───────────────────────── idle scans: items into the tray, tags place it ───────────────────────── */
-function closeCards(){ const had = !!(S.lot || S.notstaged || S.dec); S.lot = null; S.notstaged = null; S.dec = null; if(had){ try{ clearPrompt(); }catch(_){} } }
+function closeCards(){ const had = !!(S.lot || S.notstaged || S.dec); S.lot = null; S.notstaged = null; S.dec = null; S.chg = null; if(had){ try{ clearPrompt(); }catch(_){} } }
 const oldestFirst = (a) => a.slice().sort((x, y) => String(x.best || "9999").localeCompare(String(y.best || "9999")) || String(x.at).localeCompare(String(y.at)));
 function onTagScan(id){
   const info = id.info;
@@ -633,6 +659,12 @@ async function onItemScan(id, raw){
         `<div class="rx-pa-btns">${btn("inhand-close", t("inhand_got"), "primary", "data-primary data-close=\"3\"")}${btn("notstaged-receive", t("inhand_another"))}</div>`);
       setTimeout(() => { const b = document.querySelector("#promptArea [data-primary]"); if(b) b.focus(); }, 30);
       RX.sound("refused"); return true;
+    }
+    /* ⭐ 2026-11-04 (Jack, the beef gravy): nothing is staged because it WAS put away — say what was recorded, who, where and
+       whether Finale has it, and let the crew change a wrong shelf (a stock move, see the put-away card below). */
+    if(putRecords(id, raw).length){
+      S.notstaged = {raw, idObj: id, name: id.prod.name, armed: armed ? armed.bin : null, puts: true};
+      renderPut(); RX.sound("decide"); return true;
     }
     let doneLine = "";
     try{ const m = RX.po.matchFor(id.sku);
@@ -691,12 +723,119 @@ RX.registerAct("notstaged-receive", () => {
   S.bypass = true; setTimeout(() => { S.bypass = false; }, 800);
   try{ handleScan(n.raw); }catch(_){}
 });
+/* ═══ ALREADY PUT AWAY: the put-away card + CHANGE (a stock move). 2026-11-04, Jack (beef gravy: 2 cases recorded on DG-14-C1-D,
+   one physically went to another shelf). The card lists every put-away recorded for the scanned item on the open POs, with its status;
+   [Change] writes ONE `Kind=move` intent row (SplitOf = that put-away, FixUnits = units, FixBin = the new shelf). The poster on the
+   mini does the Finale stock move (never the tablet), and the row's own outcome is shown back on this card.
+   ⛔ Never a Kind=fix row: those carry a shelf-move NOTE with a null FixUnits and nobody asked for those to move stock.
+   ⛔ Offered only for a put-away Finale already has (posted); a not-yet-posted one is fixed with its own Undo. ═══ */
+const fOf = (x) => (x && x.fields) || {};
+const pmFin = (x) => (x && x.fin) || {};
+function putRecords(id, raw){
+  const I = RX.intents, seen = new Set(), out = [];
+  const codes = new Set([dig(id.upc), dig(id.gtin), dig(raw)].filter(x => x.length >= 12));
+  for(const x of [].concat(I.allPo ? I.allPo() : [], I.allToday ? I.allToday() : [])){
+    if(seen.has(x.iid)) continue; seen.add(x.iid);
+    const f = fOf(x), fs = pmFin(x).FinState || "";
+    if((f.Kind && f.Kind !== "intent") || f.State === "staged" || f.State === "cancelled" || f.State === "skipped" || fs === "reversed" || fs === "refused") continue;
+    if(!((id.sku && f.Sku === id.sku) || [dig(f.Upc), dig(f.Gtin14)].some(c => c.length >= 12 && codes.has(c)))) continue;
+    out.push(x);
+  }
+  return out.sort((a, b) => String(fOf(a).ReadyAt || fOf(a).ScanAt || "").localeCompare(String(fOf(b).ReadyAt || fOf(b).ScanAt || "")));
+}
+const movesOf = (iid) => (RX.intents.moves ? RX.intents.moves() : []).filter(m => fOf(m).SplitOf === iid && fOf(m).State !== "cancelled");
+const mvLive = (m) => (pmFin(m).FinState || "") !== "refused";
+const mvPending = (m) => { const fs = pmFin(m).FinState || ""; return fs !== "posted" && fs !== "refused" && fs !== "held"; };
+const movedUnits = (iid) => movesOf(iid).filter(mvLive).reduce((s, m) => s + (+fOf(m).FixUnits || 0), 0);
+const putPosted = (x) => (pmFin(x).FinState === "posted") ? (+pmFin(x).FinUnitsPosted || +fOf(x).Units || 0) : 0;
+const putMovable = (x) => Math.max(0, Math.floor(putPosted(x) - movedUnits(x.iid)));
+function putStatus(x){
+  const fin = pmFin(x), fs = fin.FinState || "";
+  if(fs === "posted") return t("pm_in_finale");
+  if(fs === "held") return t("pm_held", {why: String(fin.FinReason || "").split(":").pop().trim() || "held"});
+  return t("pm_waiting");
+}
+function moveStatus(m){
+  const fin = pmFin(m), fs = fin.FinState || "", why = String(fin.FinReason || "").trim();
+  if(fs === "posted") return t("pm_mv_done");
+  if(fs === "refused") return t("pm_mv_refused", {why: why || "refused"});
+  if(fs === "held") return t("pm_mv_held", {why: why || "held"});
+  return t("pm_mv_wait");
+}
+function renderPut(){
+  const n = S.notstaged; if(!n || !n.puts) return;
+  const puts = putRecords(n.idObj, n.raw);
+  const rows = puts.map(x => {
+    const f = fOf(x), canChange = putMovable(x) > 0 && !movesOf(x.iid).some(mvPending);
+    const mv = movesOf(x.iid).map(m => `<span class="rx-pa-sub">↳ ${esc(t("pm_moved_row", {units: fmtU(fOf(m).FixUnits), bin: fOf(m).FixBin || "?", status: moveStatus(m)}))}</span>`).join("");
+    return `<div class="rx-pa-sub"><strong>${esc(t("pm_row", {units: fmtU(f.Units), bin: f.Location || "?", who: nice(f.PlacedBy || f.Operator), when: dayAt(f.ReadyAt || f.ScanAt), status: putStatus(x)}))}</strong>`
+      + `${canChange ? " " + btn("pmove-change", t("pm_change"), "", `data-iid="${esc(x.iid)}"`) : ""}</div>${mv}`;
+  }).join("");
+  prompt_("go", esc(t("pm_title", {name: n.name})), `${RX.idLine(fOf(puts[0]).Sku || n.idObj.sku)}<span class="rx-pa-sub">${esc(t("pm_sub"))}</span>${rows}`,
+    `<div class="rx-pa-btns">${btn("pmove-close", t("pm_close"), "primary", "data-primary")}${btn("notstaged-receive", t("pm_another"))}</div>`);
+}
+function renderChange(){
+  const c = S.chg, n = S.notstaged; if(!c || !n) return;
+  const x = putRecords(n.idObj, n.raw).find(r => r.iid === c.iid); if(!x){ S.chg = null; renderPut(); return; }
+  const f = fOf(x), name = n.name;
+  if(c.step === "units"){
+    const max = putMovable(x), cq = +f.CaseQty > 0 ? +f.CaseQty : max, dflt = Math.min(max, cq);
+    prompt_("go", esc(t("pm_units_q", {name, bin: f.Location || "?"})), `${RX.idLine(f.Sku)}<span class="rx-pa-sub">${esc(t("pm_units_hint", {max: fmtU(max), cq: fmtU(cq)}))}</span>`
+      + `<input id="rxMvN" type="number" inputmode="numeric" min="1" max="${max}" value="${dflt}" style="width:6em;font-size:1.3em;margin:6px 0">`,
+      `<div class="rx-pa-btns">${btn("pmove-units", t("pm_next"), "primary", "data-primary")}${btn("pmove-back", t("pm_back"))}</div>`);
+    setTimeout(() => { const i = document.getElementById("rxMvN"); if(i){ i.focus(); i.select(); i.onkeydown = (ev) => { if(ev.key === "Enter"){ ev.preventDefault(); const b = document.querySelector('[data-act="pmove-units"]'); if(b) b.click(); } }; } }, 30);
+  }else if(c.step === "shelf"){
+    prompt_("go", esc(t("pm_scan", {n: fmtU(c.n)})), `${RX.idLine(f.Sku)}<span class="rx-pa-sub">${esc(name)} · ${esc(f.Location || "?")}</span>`,
+      `<div class="rx-pa-btns">${btn("pmove-back", t("pm_back"))}</div>`, {keepScan: true});
+  }else if(c.step === "confirm"){
+    prompt_("go", esc(t("pm_confirm", {n: fmtU(c.n), name, from: f.Location || "?", to: c.to})), RX.idLine(f.Sku),
+      `<div class="rx-pa-btns">${btn("pmove-go", t("pm_go"), "primary", "data-primary")}${btn("pmove-back", t("pm_back"))}</div>`);
+    setTimeout(() => { const b = document.querySelector("#promptArea [data-primary]"); if(b) b.focus(); }, 30);
+  }
+}
+RX.registerAct("pmove-close", () => { S.chg = null; S.notstaged = null; try{ clearPrompt(); }catch(_){} });
+RX.registerAct("pmove-back", () => { S.chg = null; renderPut(); });
+RX.registerAct("pmove-change", ({el}) => {
+  const n = S.notstaged; if(!n || !n.puts) return;
+  const iid = el.getAttribute("data-iid"), x = putRecords(n.idObj, n.raw).find(r => r.iid === iid);
+  if(!x) return;
+  if(movesOf(iid).some(mvPending)){ RX.toast(t("pm_busy")); RX.sound("refused"); return; }
+  if(putMovable(x) < 1){ RX.toast(t("pm_none")); RX.sound("refused"); return; }
+  S.chg = {iid, step: "units"}; renderChange();
+});
+RX.registerAct("pmove-units", () => {
+  const c = S.chg, n = S.notstaged; if(!c || !n) return;
+  const x = putRecords(n.idObj, n.raw).find(r => r.iid === c.iid), inp = document.getElementById("rxMvN"), v = parseInt(((inp && inp.value) || "").trim(), 10);
+  if(!x || isNaN(v) || v < 1 || v > putMovable(x)){ if(inp) inp.style.borderColor = "var(--stop)"; return; }
+  c.n = v; c.step = "shelf"; renderChange();
+});
+function pmShelfScan(raw){
+  const c = S.chg, n = S.notstaged; if(!c || !n || c.step !== "shelf") return false;
+  const x = putRecords(n.idObj, n.raw).find(r => r.iid === c.iid); if(!x){ S.chg = null; renderPut(); return true; }
+  const id = PA.identify(raw);
+  if(id.kind !== "tag"){ RX.toast(t("pm_scan_tag")); RX.sound("refused"); return true; }
+  if(!id.info || !id.info.active){ RX.toast(t("inactive_card", {bin: id.bin})); RX.sound("refused"); return true; }
+  if(String(id.bin) === String(fOf(x).Location)){ RX.toast(t("pm_same")); RX.sound("refused"); return true; }
+  c.to = id.bin; c.step = "confirm"; renderChange(); RX.sound("decide"); return true;
+}
+RX.registerAct("pmove-go", () => {
+  const c = S.chg, n = S.notstaged; if(!c || !n || c.step !== "confirm") return;
+  const x = putRecords(n.idObj, n.raw).find(r => r.iid === c.iid);
+  if(!x || c.n > putMovable(x) || movesOf(c.iid).some(mvPending)){ S.chg = null; RX.toast(t("pm_busy")); renderPut(); return; }
+  const f = fOf(x);
+  RX.intents.create({Kind: "move", State: "ready", Sku: f.Sku || "", Upc: f.Upc || "", Gtin14: f.Gtin14 || "", Po: f.Po || "", SplitOf: c.iid,
+    FixUnits: c.n, FixBin: c.to, FixNote: ("tablet: " + (f.Location || "?") + " -> " + c.to).slice(0, 250), Units: 0}, {});
+  RX.toast(t("pm_sent", {n: fmtU(c.n), name: n.name, to: c.to})); RX.sound("decide");
+  S.chg = null; renderPut();
+});
+for(const ev_ of ["intents", "poster"]) RX.on(ev_, () => { if(S.notstaged && S.notstaged.puts && !S.chg) try{ renderPut(); }catch(_){} });   // the move's outcome appears on the card
 RX.registerIdle("tray", {
   get keepScan(){ return RX.flow() === "staged" && !S.some; },
   async onScan(raw){
     if(RX.flow() !== "staged") return false;
     if(S.bypass){ S.bypass = false; return false; }
     if(S.placing) return true;
+    if(S.chg && S.chg.step === "shelf") return pmShelfScan(raw);
     const id = PA.identify(raw);
     if((S.dec && S.dec.card) || S.notstaged){                    // a modal question is open: refused, never recorded (SCANNER-UX §8 rule 3)
       if(id.kind === "tag" || id.kind === "product"){ try{ noteDropped(raw, "MODAL"); }catch(_){} RX.toast("Answer the question first. That scan was not recorded."); RX.sound("refused"); return true; }
