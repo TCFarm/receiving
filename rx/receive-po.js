@@ -214,6 +214,18 @@ RX.registerAct("po-pick", ({el}) => {
 });
 const upcOf = (line) => num(line && line.units_per_case) > 0 ? num(line.units_per_case) : 0;
 const fmt = (x) => String(Math.round(x * 100) / 100);
+/* ⭐ 2026-11-05 (real PO 2026110101): units of (PO, SKU) that are STAGED on a cart — counted by PO.counts as scanned in, but NOT in Finale
+   yet. The quantity card says so, or "2 of 1 cases — 1 more than ordered" reads as "already received" about a case nobody has put away. */
+PO.cartUnits = function(poId, sku){
+  const dups = (RX.problems && RX.problems.dupIids) ? RX.problems.dupIids() : new Set(); let u = 0;
+  for(const v of allIntents()){
+    const f = v.fields || {};
+    if(f.Kind === "fix" || f.State !== "staged" || f.Sku !== sku || String(f.Po || "") !== String(poId) || (v.fin && v.fin.FinState) || dups.has(v.iid)) continue;
+    u += num(f.Units);
+  }
+  return u;
+};
+if(!("on_cart_note" in RX.COPY)) RX.COPY.on_cart_note = "{k} of that is already on a cart (staged, not in Finale yet). If this is that case, the next question lets you say so.";
 PO.classify = function(p, qty){
   const m = PO.matchFor(p); if(!m) return null;
   if(m.status === "notpo") return {status:"notpo", match:m};
@@ -355,6 +367,8 @@ function poLineHtml(p, qty){
   else if(k.status === "complete"){ msg = t("complete", {k:k.k, n:k.n, unit:k.unit}); col = "var(--go)"; }
   else msg = t("makes", {k:k.k, n:k.n, unit:k.unit});
   const two = PO.chipHtml(p);
+  try{ const cu = k.match && k.match.po ? PO.cartUnits(k.match.po.order_id, p.prod.sku) : 0;
+    if(cu > 0 && (k.status === "over" || k.status === "complete")){ const upc = upcOf(k.match.line); msg += " — " + t("on_cart_note", {k: fmt(upc > 0 ? cu / upc : cu) + (upc > 0 ? " cases" : " units")}); } }catch(_){}
   return `<span id="rxPoLine" class="rx-poline rx-${k.status}" style="${dflt};border-left-color:${col}">${RX.esc(msg)}${two}</span>`;
 }
 function kindNow(p){ return RX.state.qtyKindChoice || ((p.qtyShown == null || p.qtyShown === typedQty()) ? "full" : "part"); }
