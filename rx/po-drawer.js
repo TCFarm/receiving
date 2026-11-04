@@ -20,8 +20,27 @@ const RX = window.RX; if(!RX) return;
 const D = RX.drawer, t = RX.t, esc = RX.esc;
 const $ = (id) => document.getElementById(id);
 const pageRows = () => { try{ return rows; }catch(_){ return []; } };
-D.state = { open:null, rowN:null, poFilter:"all", poSearch:"", expanded:{}, hist:"all", showAll:false, editing:null, err:"" };
+D.state = { open:null, rowN:null, poFilter:"all", poSearch:"", poOpen:{}, order:{}, expanded:{}, hist:"all", showAll:false, editing:null, err:"" };
 const H = D.state;
+
+/* ⭐ 2026-11-05 (Jack): the PO drawer opens as a SUMMARY — every PO collapsed to one row that says how many lines are still missing — and a PO
+   expands to its lines with the missing ones FIRST ("7 of 6 received" and "0 of 1 received" at the top). */
+const COPY_ADD = {
+  po_missing_n:  "{n} missing",
+  po_all_in:     "all received",
+  po_sum_top:    "{p} POs open · {n} lines still missing",
+  po_sum_one:    "1 PO open · {n} lines still missing",
+  po_sum_none:   "Everything on the open POs is received.",
+  po_sec_miss:   "Missing or holding the truck",
+  po_sec_done:   "Received",
+  po_toggle_hint:"Tap a PO to open its lines",
+};
+for(const k of Object.keys(COPY_ADD)) if(!(k in RX.COPY)) RX.COPY[k] = COPY_ADD[k];
+/* what holds a truck up, most urgent first: a line with a problem or an over-receipt (7 of 6) -> not started -> partly in -> told short -> done */
+const lineRank = (s) => (s.problems > 0 || s.buyer > 0) ? 0 : s.state === "over" ? 0 : s.state === "notstarted" ? 1 : s.state === "partial" ? 2 : s.state === "short" ? 3 : 4;
+const outstanding = (s) => Math.max(0, (Number(s.n) || 0) - (Number(s.k) || 0));
+const filterActive = () => (H.poFilter !== "all" && H.poFilter !== "notpo") || !!H.poSearch.trim();
+const poIsOpen = (id, count) => filterActive() || (H.poOpen[id] !== undefined ? !!H.poOpen[id] : count === 1);
 
 const showShelf = () => RX.active() && (RX.flowActive() || pageRows().some(r => r.rx && (r.rx.iid || (r.rx.iids || []).length)));
 const portrait = () => { try{ return window.matchMedia("(orientation: portrait)").matches; }catch(_){ return false; } };
@@ -108,7 +127,7 @@ D.close = function(){
 };
 RX.registerAct("drawer-close", () => D.close());
 RX.registerAct("po-close", () => D.close());
-D.openPo = function(){ H.open = "po"; H.poSearch = ""; D.refresh(true); RX.pack.data ? 0 : RX.pack.load(); };
+D.openPo = function(){ H.open = "po"; H.poSearch = ""; H.order = {}; D.refresh(true); RX.pack.data ? 0 : RX.pack.load(); };
 RX.registerAct("po-open", () => D.openPo());
 D.openRow = function(row){ H.open = "row"; H.rowN = row.n; H.editing = null; H.err = ""; D.refresh(true); };
 
@@ -137,17 +156,31 @@ function poHtml(){
     `<button class="rx-btn" data-act="po-refresh" style="margin-left:auto">${esc(t("btn_refresh"))}</button></div>
     <input class="rx-search" id="rxPoSearch" type="search" placeholder="${esc(t("po_search_ph"))}" value="${esc(H.poSearch)}" aria-label="${esc(t("po_search_ph"))}">`;
   const q = H.poSearch.trim().toLowerCase();
+  /* the high-level summary first: how many POs, how many lines still missing */
+  const missingAll = sum.reduce((a, x) => a + x.left, 0);
+  body += `<div class="rx-note" id="rxPoSum" role="status"><strong>${esc(!sum.length ? "" : missingAll === 0 ? t("po_sum_none") : sum.length === 1 ? t("po_sum_one", {n:missingAll}) : t("po_sum_top", {p:sum.length, n:missingAll}))}</strong>${sum.length > 1 && !filterActive() ? ` <span class="hint" style="display:inline">${esc(t("po_toggle_hint"))}</span>` : ""}</div>`;
   for(const x of sum){
     const pct = x.lines ? Math.round(x.done / x.lines * 100) : 0;
+    const id = String(x.po.order_id), isOpen = poIsOpen(id, sum.length);
     /* ⭐ 2026-10-22: what is holding THIS truck, in counts the crew can act on; tapping it shows only those lines */
     const hold = [x.staged ? t("pb_sum_staged", {n:x.staged}) : "", (x.crew - x.staged) > 0 ? t("pb_sum_crew", {n:x.crew - x.staged}) : "", x.buyer ? t("pb_sum_buyer", {n:x.buyer}) : ""].filter(Boolean);
-    body += `<div class="rx-pohead"><strong>PO ${esc(x.po.order_id)}</strong> · ${esc(x.due)}
+    body += `<div class="rx-pohead${isOpen ? " open" : ""}" data-po="${esc(id)}"><button type="button" class="rx-pobtn" data-act="po-toggle" data-po="${esc(id)}" aria-expanded="${isOpen}" style="display:block;width:100%;text-align:left;background:none;border:0;padding:0;font:inherit;color:inherit;min-height:48px">
+      <strong>${isOpen ? "▾" : "▸"} PO ${esc(id)}</strong> · ${esc(x.due)} · <strong class="${x.left ? "rx-red" : ""}">${esc(x.left ? t("po_missing_n", {n:x.left}) : t("po_all_in"))}</strong>
       <div class="rx-bar" role="progressbar" aria-valuemin="0" aria-valuemax="${x.lines}" aria-valuenow="${x.done}"><span style="width:${pct}%"></span></div>
-      <div class="hint">${esc(t("po_progress", {done:x.done, total:x.lines, pct}))}</div>
-      <div class="rx-holding" data-po="${esc(x.po.order_id)}">${hold.length ? `<button type="button" class="rx-chipbtn${H.poFilter === "problems" ? " on" : ""}" data-act="po-filter" data-f="problems"><strong>${esc(t("pb_holding"))}:</strong> ${esc(hold.join(" · "))}</button>` : `<span class="hint">${esc(t("pb_none"))}</span>`}</div></div>`;
-    let n = 0;
-    (x.po.lines || []).forEach((line, i) => {
-      const s = x.statuses[i];
+      <div class="hint">${esc(t("po_progress", {done:x.done, total:x.lines, pct}))}</div></button>
+      <div class="rx-holding" data-po="${esc(id)}">${hold.length ? `<button type="button" class="rx-chipbtn${H.poFilter === "problems" ? " on" : ""}" data-act="po-filter" data-f="problems"><strong>${esc(t("pb_holding"))}:</strong> ${esc(hold.join(" · "))}</button>` : `<span class="hint">${esc(t("pb_none"))}</span>`}</div></div>`;
+    if(!isOpen) continue;
+    let n = 0, sawDone = false, sawMiss = false;
+    /* ⭐ MISSING FIRST (Jack, 2026-11-05): problems and over-receipts, then not started, partly in, told-short, and received LAST; within a
+       group the biggest gap first, then the PO's own order */
+    /* ⭐ FROZEN while the drawer is in use: the order is worked out when the PO is opened (or Refresh is pressed) and NOT redone as a line's
+       state changes — a line that has just been recorded must not jump away from under the next tap (the second tap of a double-tap landed
+       on a different line). New lines not seen at freeze time are placed by rank at the end. */
+    const rankNow = (x.po.lines || []).map((line, i) => ({line, i, s: x.statuses[i], rk: lineRank(x.statuses[i])}));
+    if(!H.order[id]) H.order[id] = rankNow.slice().sort((a, b) => a.rk - b.rk || outstanding(b.s) - outstanding(a.s) || a.i - b.i).map(o => ({sku: o.line.sku, rk: o.rk}));
+    const frozen = H.order[id], pos = new Map(frozen.map((f, j) => [f.sku, j]));
+    const order = rankNow.sort((a, b) => (pos.has(a.line.sku) ? pos.get(a.line.sku) : 1e6 + a.rk * 1000 + a.i) - (pos.has(b.line.sku) ? pos.get(b.line.sku) : 1e6 + b.rk * 1000 + b.i));
+    order.forEach(({line, i, s}) => {
       const info = RX.pack.skuInfo(line.sku) || {};
       const name = info.name || line.sku;
       /* a line just fixed stays in Problems while its answer is on screen ("Removed.", "Sent again…") — never vanishes mid-read */
@@ -156,6 +189,11 @@ function poHtml(){
       if(H.poFilter === "notpo") return;
       if(q && !(name.toLowerCase().includes(q) || String(line.sku).toLowerCase().includes(q) || RX.brandOf(line.sku).toLowerCase().includes(q))) return;   // PM-3332: brand searchable
       n++;
+      const fr = frozen.find(f => f.sku === line.sku), rk = fr ? fr.rk : lineRank(s);
+      if(H.poFilter === "all" && !q){
+        if(rk < 4 && !sawMiss){ sawMiss = true; body += `<div class="hint rx-sep" data-sec="miss"><strong>${esc(t("po_sec_miss"))}</strong></div>`; }
+        if(rk === 4 && !sawDone){ sawDone = true; body += `<div class="hint rx-sep" data-sec="done"><strong>${esc(t("po_sec_done"))}</strong></div>`; }
+      }
       const key = x.po.order_id+"|"+line.sku, open = !!H.expanded[key] || (H.poFilter === "problems" && H.expanded[key] !== false);
       body += `<div class="rx-line rx-${s.state}"><button class="rx-linebtn" data-act="po-line" data-key="${esc(key)}" aria-expanded="${open}">
         <span class="rx-lname">${esc(name)}${RX.idLine(line.sku)}</span><span class="rx-lqty num">${esc(t("po_line_of", {k:s.k, n:s.n, unit:s.unit}))}</span>
@@ -194,9 +232,12 @@ function notOnPo(){
   return pageRows().filter(r => !r.audit && !r.deleted && r.prod && !String(r.prod.sku).startsWith("!") && RX.pack.data
     && (RX.po.matchFor(r) || {}).status === "notpo");
 }
-RX.registerAct("po-filter", ({el}) => { H.poFilter = el.dataset.f || "all"; D.refresh(true); });
-RX.registerAct("po-line", ({el}) => { const k = el.dataset.key; const was = el.getAttribute("aria-expanded") === "true"; H.expanded[k] = !was; D.refresh(true); });
-RX.registerAct("po-refresh", () => { RX.pack.load({force:true}); });
+RX.registerAct("po-filter", ({el}) => { H.poFilter = el.dataset.f || "all"; H.order = {}; D.refresh(true); });
+/* ⛔ the second tap of a DOUBLE-tap on a button inside the drawer ("Yes", "Save") lands on whatever the first tap left under the finger — a line header or a PO
+   header — and must not toggle it (found 2026-11-05: it folded the line that had just been recorded). */
+RX.registerAct("po-toggle", ({el, ev}) => { if(ev && ev.detail > 1) return; const id = el.dataset.po; const was = el.getAttribute("aria-expanded") === "true"; H.poOpen[id] = !was; if(!was) delete H.order[id]; D.refresh(true); });
+RX.registerAct("po-line", ({el, ev}) => { if(ev && ev.detail > 1) return; const k = el.dataset.key; const was = el.getAttribute("aria-expanded") === "true"; H.expanded[k] = !was; D.refresh(true); });
+RX.registerAct("po-refresh", () => { H.order = {}; RX.pack.load({force:true}); });
 document.addEventListener("input", (e) => { if(e.target && e.target.id === "rxPoSearch"){ H.poSearch = e.target.value; D.refresh(true); const f = $("rxPoSearch"); if(f){ f.focus(); try{ f.setSelectionRange(f.value.length, f.value.length); }catch(_){} } } });
 
 /* ───────────────────────── the row drawer ───────────────────────── */
