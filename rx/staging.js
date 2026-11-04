@@ -98,6 +98,11 @@ const COPY_ADD = {
   notstaged:       "{name} isn't on the staged list.",
   notstaged_receive:"Receive it now",
   notstaged_cancel:"Not now",
+  notstaged_done:  "The purchase order already shows {k} of {n} {unit} received or scanned in — receiving it now would count it twice.",
+  inhand_title:    "{name} is already in your hand.",
+  inhand_body:     "All {n} of its staged case(s) are in your hand. Scan the SHELF TAG where you put it — nothing new was recorded.",
+  inhand_got:      "Got it",
+  inhand_another:  "This is another case — receive it now",
   lot_h:           "Which best-by is this case?",
   lot_row:         "{bb} · {n} units · {by}",
   placed_flash:    "{n} items → {bin}",
@@ -601,8 +606,27 @@ async function onItemScan(id, raw){
     RX.sound("refused"); return true;
   }
   if(!all.length){
+    /* ⭐ 2026-11-05 (Jack: the crew sorted to carts, then in Put away staged the app said "not on the staged list" yet [Receive it now]
+       said "already complete"): the list hides a case that is IN THE HAND, but the PO count (RX.po) counts every staged record — two
+       answers about one case. So: (1) a SKU whose staged records are all in the hand says so (it IS staged); (2) otherwise, when the PO
+       line already shows complete, the card says that BEFORE the crew press [Receive it now]. ⛔ Information only — a truly extra case
+       still goes through the ladder (the over-shipment confirm). */
+    const hand = ST.records().filter(r => r.sku === id.sku && inTray(r.iid) && !holdWaiting(r));
+    if(hand.length){
+      S.notstaged = {raw, name: id.prod.name, armed: armed ? armed.bin : null, inHand: true};
+      prompt_("stop", esc(t("inhand_title", {name: id.prod.name})), `<span class="rx-pa-sub">${esc(t("inhand_body", {n: hand.length}))}</span>`,
+        `<div class="rx-pa-btns">${btn("inhand-close", t("inhand_got"), "primary", "data-primary data-close=\"3\"")}${btn("notstaged-receive", t("inhand_another"))}</div>`);
+      setTimeout(() => { const b = document.querySelector("#promptArea [data-primary]"); if(b) b.focus(); }, 30);
+      RX.sound("refused"); return true;
+    }
+    let doneLine = "";
+    try{ const m = RX.po.matchFor(id.sku);
+      if(m && m.po && m.line && m.counts && m.counts.ordered > 0 && m.counts.total >= m.counts.ordered){
+        const k = RX.po.classify({prod: {sku: id.sku}}, 0);
+        if(k && k.status !== "notpo") doneLine = `<span class="rx-pa-sub">${esc(t("notstaged_done", {k: k.k, n: k.n, unit: k.unit}))}</span>`; }
+    }catch(_){}
     S.notstaged = {raw, name: id.prod.name, armed: armed ? armed.bin : null};
-    prompt_("stop", esc(t("notstaged", {name: id.prod.name})), "", `<div class="rx-pa-btns">${btn("notstaged-receive", t("notstaged_receive"), "primary", "data-primary")}${btn("notstaged-cancel", t("notstaged_cancel"), "", 'data-close="3"')}</div>`);
+    prompt_("stop", esc(t("notstaged", {name: id.prod.name})), doneLine, `<div class="rx-pa-btns">${btn("notstaged-receive", t("notstaged_receive"), doneLine ? "" : "primary", doneLine ? "" : "data-primary")}${btn("notstaged-cancel", t("notstaged_cancel"), doneLine ? "primary" : "", 'data-close="3"' + (doneLine ? " data-primary" : ""))}</div>`);
     setTimeout(() => { const b = document.querySelector("#promptArea [data-primary]"); if(b) b.focus(); }, 30);
     RX.sound("decide"); return true;
   }
@@ -645,6 +669,7 @@ RX.registerAct("lot-pick", ({el}) => {
   const r = lot.lots.find(x => x.iid === el.getAttribute("data-iid")); S.lot = null; try{ clearPrompt(); }catch(_){}
   if(r) take(r, lot.armed);
 });
+RX.registerAct("inhand-close", () => { S.notstaged = null; try{ clearPrompt(); }catch(_){} });   // 2026-11-05: closes the in-hand card; records nothing
 RX.registerAct("notstaged-cancel", () => { const n = S.notstaged; S.notstaged = null; try{ if(n) noteDropped(n.raw, "NOT_STAGED"); }catch(_){} try{ clearPrompt(); }catch(_){} });
 RX.registerAct("notstaged-receive", () => {
   const n = S.notstaged; if(!n) return; S.notstaged = null; try{ clearPrompt(); }catch(_){}
