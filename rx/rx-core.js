@@ -489,6 +489,8 @@ RX.qtyExtras = function(p){
 };
 RX.qtyKind = function(n){
   const p = pendingNow() || {};
+  /* review S2: more than the shown case size is never a "full case", even if the chip was tapped at a smaller number first */
+  if(RX.state.qtyKindChoice === "full" && RX.po && RX.po.overCase && RX.po.overCase(p, n)) return "part";
   if(RX.state.qtyKindChoice === "full" || RX.state.qtyKindChoice === "part") return RX.state.qtyKindChoice;
   const shown = p.qtyShown;
   return (shown == null || shown === n) ? "full" : "part";
