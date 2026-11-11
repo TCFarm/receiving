@@ -98,6 +98,14 @@ const COPY_ADD = {
   rec_onhand:      "{n} on hand",
   rec_empty:       "empty",
   rec_oldest:      "oldest {d}",
+  rec_goes_to:     "Goes to: {bin}",
+  rec_suggested:   "Suggested: {bin}",
+  rec_nohist_why:  "no shelf on record for this item",
+  rec_nohist_line: "No shelf on record for this item — {bin} is the fallback.",
+  rec_ask:         "Ask where this goes",
+  rec_ask_line:    "Ask where this goes — no shelf on record for this item.",
+  rec_for:         "For {name}",
+  rec_for_n:       "For {name} — the last of {n} in your hand",
   rec_cover:       "{a} left now · {b} with this",
   rec_slow:        "slow seller",
   rec_lasthere:    "last here {d}",
@@ -148,6 +156,10 @@ const t = RX.t;
 .rx-pa-btns .rx-btn{min-height:56px}
 .rx-pa-panel{background:var(--card);border:1px solid var(--line);border-radius:5px;padding:12px 14px}
 .rx-pa-reason{font-size:15px;font-weight:700;margin:2px 0 8px}
+.rx-pa-goes{display:block;margin:2px 0 8px;padding:8px 12px;border-left:5px solid var(--go);border-radius:0 4px 4px 0;background:var(--go-soft);color:var(--ink);font-size:16px;line-height:1.3}
+.rx-pa-goes.ask{border-left-color:var(--wait);background:var(--wait-soft)}
+.rx-pa-goes strong{font-size:18px}
+@media (min-width:1000px){.rx-pa-goes{display:none}}            /* side by side the panel itself is top-right, in view: the line would only push the card down */
 .rx-pa-advice{font-size:13px;margin:0 0 8px;padding:6px 10px;border-left:4px solid var(--wait);background:var(--wait-soft)}
 .rx-pa-area{font-size:18px;font-weight:700;margin:6px 0}
 .rx-pa-cand{border:1px solid var(--line);border-radius:5px;padding:9px 12px;margin:0 0 8px}
@@ -434,13 +446,54 @@ function poLine(p, d2){
     const key = k.status === "over" ? "over" : (k.status === "complete" ? "complete" : "makes");
     return t(key, {k: k.k, n: k.n, unit: k.unit, over: k.over}); }catch(_){ return ""; }
 }
+/* ⭐ PM-3919 (Jake, 2026-11-10): the receiver never saw "Where it goes" because below 1000 px the panel sits UNDER the card, off the bottom of an
+   upright tablet. So the headline is ALSO one line inside the shelf-scan card ("Goes to: <shelf> — <reason>"), in every layout, and the
+   panel is exported so the staged tray can show the same thing (rx/staging.js).
+   ⛔ NO SHELF ON RECORD (rank.reason NO_HISTORY): Dry names the ONE fallback shelf in config (RX.CFG.DRY_FALLBACK_BIN, ruling R1) — only when
+   the pack holds that bin and it is switched on; Refrigerated, Frozen and a line whose area cannot be told SAY "Ask where this goes" and name no
+   shelf. A guessed shelf is worse than a question. Pure display: recommend.js, its vectors and what is recorded are untouched. */
+PA.goesTo = function(rank){
+  if(!rank) return null;
+  const top = rank.cands && rank.cands[0];
+  if(top) return {kind: "shelf", bin: top.bin, why: rank.reason.text, fallback: false};
+  const key = rank.area && rank.area.key ? String(rank.area.key).charAt(0).toUpperCase() : "";
+  if(key === "D"){
+    const b = String((RX.CFG && RX.CFG.DRY_FALLBACK_BIN) || "").trim(), bi = b ? RX.pack.binInfo(b) : null;
+    if(bi && bi.active !== false && bi.active !== 0) return {kind: "shelf", bin: bi.name || b, why: t("rec_nohist_why"), fallback: true};
+  }
+  return {kind: "ask", bin: "", why: t("rec_nohist_why"), fallback: false};
+};
+/* ⭐ review S1 (2026-11-11): in SHELF-FIRST mode the card already says "Put it on <the shelf the crew scanned>?" — a second line reading
+   "Goes to: <another shelf>" then contradicts it. So when a shelf is OFFERED: the same shelf ⇒ no second line; a different one ⇒
+   "Suggested: <best> — <reason>" (a suggestion, never an instruction); nothing to suggest ("ask") ⇒ no line (the crew chose a shelf). */
+const goesHtml = (g, offered) => {
+  if(!g) return "";
+  if(offered){
+    if(g.kind !== "shelf" || sameBin(String(g.bin || "").trim(), String(offered || "").trim())) return "";
+    return `<span class="rx-pa-goes suggest" id="rxGoes" data-kind="suggest"><strong>${esc(t("rec_suggested", {bin: g.bin}))}</strong> — ${esc(g.why)}</span>`;
+  }
+  return g.kind === "shelf"
+    ? `<span class="rx-pa-goes" id="rxGoes" data-kind="shelf"><strong>${esc(t("rec_goes_to", {bin: g.bin}))}</strong> — ${esc(g.why)}</span>`
+    : `<span class="rx-pa-goes ask" id="rxGoes" data-kind="ask"><strong>${esc(t("rec_ask"))}</strong> — ${esc(g.why)}</span>`;
+};
+/* the flags (PM-3919 item 5): ADVICE EVIDENCE in RecReasons, never a tap, never a change to what is posted.
+   RESTOCK_FLAG     older MEASURED stock sits in backstock (the FEFO_BLOCK rule fired): this case is directed to backstock and the shelf
+                    needs the older stock brought forward.
+   CONSOLIDATE_FLAG the item has stock in two or more backstock spots (candidates are already same-temperature and active). */
+PA.flagsFor = function(rank){
+  const out = [];
+  if(!rank) return out;
+  if(rank.reason && rank.reason.code === "FEFO_BLOCK" && rank.fefo && rank.fefo.measured) out.push("RESTOCK_FLAG");
+  if((rank.cands || []).filter(c => c.role === "backstock" && c.units > 0).length >= 2) out.push("CONSOLIDATE_FLAG");
+  return out;
+};
 function renderMain(ctx, d2){
   const p = ctx.p;
   const offer0 = d2.offer && !d2.portions.length ? d2.offer : null;
   const title = (d2.portions.length || d2.late) ? t("split_rest", {n: d2.left}) : (offer0 ? t("offer_title", {bin: offer0}) : t("d2_title"));
   const bb = p.best ? yf(p.best) : "no date";
   const sub = d2.cases > 1 ? t("d2_cases", {n: d2.left, c: d2.cases, bb: "\u0000"}) : t("d2_units", {n: d2.left, bb: "\u0000"});
-  let body = (d2.notice ? `<span class="rx-pa-note" role="alert">${d2.notice}</span>` : "") + `<strong>${esc(p.prod.name)}</strong>${RX.idLine(p.prod.sku)}` +
+  let body = (d2.notice ? `<span class="rx-pa-note" role="alert">${d2.notice}</span>` : "") + goesHtml(PA.goesTo(d2.rank), offer0) + `<strong>${esc(p.prod.name)}</strong>${RX.idLine(p.prod.sku)}` +
              `<span class="rx-pa-sub">${esc(sub).replace("\u0000", bb)}</span>`;
   const pl = d2.late ? "" : poLine(p, d2);
   if(pl) body += `<span class="rx-pa-po">${esc(t("d2_po", {msg: pl}))}</span>`;
@@ -455,12 +508,17 @@ function renderMain(ctx, d2){
   prompt_("go", esc(title), body, acts, {keepScan: true});
   renderPanel(d2, p);
 }
-function renderPanel(d2, p){
+function renderPanel(d2, p, opts){
   const r = d2.rank; if(!r){ RX.side.clear(); return; }
+  opts = opts || {};
   const topN = REC.cfgOf(RX.pack.data).top_n || 3;
-  let h = `<div class="rx-pa-panel"><div class="rx-h">${esc(t("rec_h"))}</div><div class="rx-pa-reason" id="rxReason" data-code="${esc(r.reason.code)}">${esc(r.reason.text)}</div>`;
+  const g = (!r.cands || !r.cands.length) ? PA.goesTo(r) : null;           // no shelf on record: Dry's fallback shelf, or "ask"
+  const reasonText = g ? (g.kind === "shelf" ? t("rec_nohist_line", {bin: g.bin}) : t("rec_ask_line")) : r.reason.text;
+  let h = `<div class="rx-pa-panel"><div class="rx-h">${esc(t("rec_h"))}</div>`;
+  if(opts.forName) h += `<div class="rx-pa-sub" id="rxPanelFor"><strong>${esc(opts.inHand > 1 ? t("rec_for_n", {name: opts.forName, n: opts.inHand}) : t("rec_for", {name: opts.forName}))}</strong></div>`;
+  h += `<div class="rx-pa-reason" id="rxReason" data-code="${esc(r.reason.code)}">${esc(reasonText)}</div>`;
   for(const a of r.advice) h += `<div class="rx-pa-advice" data-advice="${esc(a.code)}">${esc(a.text)}</div>`;
-  if(r.area) h += `<div class="rx-pa-area" id="rxArea">${esc(r.area.text)}</div>`;
+  if(g && g.kind === "shelf") h += `<div class="rx-pa-cand best" data-bin="${esc(g.bin)}"><span class="rx-pa-bin">${esc(g.bin)}</span><span class="rx-pa-pill">${esc(t("rec_best"))}</span></div>`;
   const card = (c, i) => {
     const onhand = c.units > 0 ? t("rec_onhand", {n: c.units}) : t("rec_empty");
     const parts = [esc(onhand)];
@@ -478,6 +536,18 @@ function renderPanel(d2, p){
   }
   RX.side.set(h + `</div>`);
 }
+/* ⭐ review S4: several cases in the hand — one line per item (its own shelf, or "ask"), never one item's BEST card for all of them */
+PA.renderPanelList = function(list){
+  let h = `<div class="rx-pa-panel"><div class="rx-h">${esc(t("rec_h"))}</div>` +
+          `<div class="rx-pa-reason" id="rxReason" data-code="MANY">${esc(t("tray_all_there", {n: list.length}))}</div><div id="rxPanelList">`;
+  for(const e of list){
+    const g = e.goes;
+    h += `<div class="rx-pa-cand" data-item="${esc(e.name)}">` + esc(g && g.kind === "shelf" ? t("tray_item_shelf", {name: e.name, bin: g.bin}) : t("tray_item_ask", {name: e.name})) + `</div>`;
+  }
+  RX.side.set(h + `</div></div>`);
+};
+/* the staged tray (rx/staging.js) shows the same panel for the case in the crew's hand */
+PA.renderPanel = (d2, p, opts) => renderPanel(d2, p, opts);
 /* ⭐ ROUND 3: Back on the D2 card. A late "Not all fit?" split ⇒ nothing changes, every unit stays on the first shelf. A normal case ⇒
    back to the quantity, the item KEPT; portions already placed in memory are forgotten (nothing was written). */
 RX.registerAct("shelf-back", () => { const c = PA.cur; if(!c || c.d2.sub !== "main") return;
@@ -545,6 +615,7 @@ function startShelf(ctx, opts){
   const d2 = rxs.d2 = rxs.d2 || {total, left: total, units0: total, cases: 1, portions: [], sub: "main", notice: "", pendingN: null, cand: null, late: !!opts.late, first: opts.first || null, restUnits: 0};
   PA.cur = {ctx, d2}; PA.moreOpen = false;
   recompute(d2, p);
+  if(d2.flags === undefined) d2.flags = d2.late ? [] : PA.flagsFor(d2.rank);          // PM-3919: from the state BEFORE any portion was placed
   const a = (!d2.late && !opts.noArmed && ctx.flow === "direct") ? PA.shelf.current() : null;       // round 4: shelf mode (sticky), not one-shot
   /* ⭐⭐ PM-3333 (Jack, 2026-10-28: "a shelf tag scanned first still works the same way including partial quantity"): the current shelf
      is OFFERED on this card — [Put all N on <shelf>] (Enter) or [Only some go here] — exactly the choices a shelf scanned after the item
@@ -598,7 +669,7 @@ function commitPortion(ctx, d2){
   const cand = d2.cand, info = RX.pack.binInfo(cand.bin), r = d2.rank;
   const n = Math.max(1, Math.min(d2.pendingN || d2.left, d2.left));
   d2.portions.push({bin: info.name, binSource: cand.source, units: n, tempConfirmed: !!cand.flags.temp, fefoOverride: !!cand.flags.fefo,
-    recommendedBin: r.cands[0] ? r.cands[0].bin : "", recReasons: [r.reason.code], staging: info.role === "staging", rejected: null});
+    recommendedBin: r.cands[0] ? r.cands[0].bin : "", recReasons: [r.reason.code].concat(d2.portions.length ? [] : (d2.flags || [])), staging: info.role === "staging", rejected: null});
   d2.left -= n; d2.pendingN = null; d2.cand = null; d2.sub = "main"; d2.notice = "";
   if(d2.left > 0){ recompute(d2, ctx.p); render(ctx, d2); RX.sound("staged"); return; }
   finish(ctx, d2);
