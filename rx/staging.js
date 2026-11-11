@@ -43,7 +43,13 @@ const ST = RX.staging = {};
 const esc = RX.esc;
 
 const COPY_ADD = {
-  stage_other:     "Other area",
+  stage_other:     "Put it in another area",
+  tray_all_there:  "A shelf tag puts all {n} in your hand there.",
+  tray_item_shelf: "{name} — {bin}",
+  tray_item_ask:   "{name} — ask where this goes",
+  reason_not_on_po:"not on a PO yet",
+  reason_restock:  "older stock to bring forward",
+  reason_consol:   "stock in more than one spot",
   stage_direct:    "I'm at the shelf — scan the tag",
   stage_wrong:     "Pick a cart for {name} first (Enter = top). That scan was not recorded.",
   stage_enter:     "ENTER",
@@ -317,6 +323,13 @@ function trayBar(){
   }
   return h;
 }
+/* ⭐ review N2 (2026-11-11): RecReasons holds CODES (NO_HISTORY, FEFO_BLOCK, RESTOCK_FLAG…) for the poster and purchasing — the crew must
+   never read them. The staged row's detail shows plain words for the few flags that mean something to the person holding the case,
+   and NOTHING for every other code. Display only: the recorded value is untouched. */
+const REASON_WORDS = {NOT_ON_PO: "reason_not_on_po", RESTOCK_FLAG: "reason_restock", CONSOLIDATE_FLAG: "reason_consol"};
+function reasonWords(codes){
+  return String(codes || "").split(",").map(c => c.trim()).filter(c => REASON_WORDS[c]).map(c => t(REASON_WORDS[c])).join(", ");
+}
 function rowsHtml(all){
   const sel = S.areaShown;
   let h = "";
@@ -328,7 +341,7 @@ function rowsHtml(all){
       <span class="bin">${esc(r.bin || r.area || "—")}</span><span class="nm">${esc(nameOf(r.sku))}${RX.idLine(r.sku)}</span><span class="num">${r.units} u</span><span class="bb">${r.best ? yf(r.best) : "no date"}</span>
       <span class="by">${esc(t("staged_by", {at: r.at ? RX.hhmm(r.at) : "", who: whoText(r)}))}${r.device && r.by !== acct() ? " (" + esc(String(r.device).slice(0, 4)) + ")" : ""}</span>${holdWaiting(r) ? `<span class="by rx-holdwait" style="flex-basis:100%;font-weight:700;color:var(--ink)">${esc(t("hold_wait"))}</span>` : ""}</button>`;
     if(open){
-      h += `<div class="rx-st-x">${r.po ? "PO " + esc(r.po) + " · " : ""}${r.reasons ? esc(String(r.reasons)) + " · " : ""}${esc(r.area || "")}`;
+      h += `<div class="rx-st-x">${r.po ? "PO " + esc(r.po) + " · " : ""}${reasonWords(r.reasons) ? esc(reasonWords(r.reasons)) + " · " : ""}${esc(r.area || "")}`;
       if(S.confirm === r.iid) h += `<div class="rx-st-note"><strong>${esc(t("staged_cancel_q"))}</strong> ${btn("staged-cancel-yes", t("staged_cancel_yes"), "primary", `data-iid="${esc(r.iid)}"`)}${btn("staged-cancel-no", t("staged_cancel_no"), "", 'data-close="1"')}</div>`;
       else h += `<div>${btn("staged-cancel", t("staged_cancel"), "", `data-iid="${esc(r.iid)}"`)}</div>`;
       h += `<div>${btn("staged-row-close", t("btn_close"), "", 'data-close="2"')}</div>`;     // round 3: the row's details close too (while the confirm is open, Escape closes the confirm first)
@@ -356,8 +369,33 @@ function leftoversCard(){
   return `<div class="rx-st-wrap" id="rxLeftovers" style="border-left:5px solid var(--wait)"><strong>${esc(t("leftovers", {n: all.length, age: ageText(RX.now() - oldest)}))}</strong>
     ${btn("leftovers-open", t("leftovers_open"), "primary", 'style="margin-left:10px"')}</div>`;
 }
+/* ⭐ PM-3919: putting a STAGED case away shows the same "Where it goes" panel the direct flow has (before, the tray never showed it).
+   It is for the case the crew scanned last (they are holding it); it lives only while the tray holds something, and never touches a panel
+   another step owns (S.panelOwned). Only the key changing re-draws it, so a tick does not repaint it. */
+S.panelOwned = false; S.panelKey = "";
+function trayPanel(){
+  /* a step, or a card about ANOTHER item (the "Which best-by is this case?" pick), owns the screen: the
+     tray's panel would then name a different item's shelf, so it goes away and comes back when that card closes (review S4) */
+  const free = RX.active() && RX.flow() === "staged" && !RX.state.step && !PA.cur && !S.lot && RX.pack.data;
+  const items = free ? S.tray.items.map(x => ({x, r: byIid(x.iid)})).filter(e => e.r) : [];
+  const last = items.length ? items[items.length - 1] : null;
+  if(!last){ if(S.panelOwned){ S.panelOwned = false; S.panelKey = ""; RX.side.clear(); } return; }
+  const r = last.r;
+  const item = itemFor(r, last.x.take);
+  const key = [items.map(e => e.r.iid + ":" + (e.x.take || "")).join(","), item.units, item.best || "", (RX.pack.data.built || "")].join("|");
+  if(S.panelOwned && key === S.panelKey && document.querySelector("#rxSide .rx-pa-panel")) return;
+  /* ⭐ review S4 (2026-11-11): a shelf tag places EVERY case in the hand, so with more than one the panel must not offer ONE item's best
+     shelf as if it covered all of them: it says so, and lists each item with its own shelf (or "ask"). One case ⇒ the full panel. */
+  if(items.length > 1){
+    PA.renderPanelList(items.map(e => { const it = itemFor(e.r, e.x.take); return {name: it.name, goes: PA.goesTo(PA.rankFor(it))}; }));
+  }else{
+    PA.renderPanel({rank: PA.rankFor(item)}, null, {forName: item.name, inHand: 1});
+  }
+  S.panelOwned = true; S.panelKey = key;
+}
 ST.render = function(){
   const el = $("rxTray"); if(!el) return;
+  try{ trayPanel(); }catch(e){ try{ console.warn("rx/staging.js: tray panel", e); }catch(_){} }
   let h = "";
   if(RX.active()){
     const flow = RX.flow();
@@ -702,6 +740,7 @@ function take(r, armed){
 function openLotPick(all, armed){
   const byLot = new Map(); for(const r of oldestFirst(all)) if(!byLot.has(r.best || "")) byLot.set(r.best || "", r);
   S.lot = {lots: [...byLot.values()], armed};
+  try{ trayPanel(); }catch(_){}                                   // review S4: the pick is about ANOTHER item — drop the tray's panel now
   const btns = S.lot.lots.map((r, i) => `<button type="button" class="rx-btn rx-st-lot${i === 0 ? " primary" : ""}" data-act="lot-pick" data-iid="${esc(r.iid)}"${i === 0 ? " data-primary" : ""}>${r.best ? yf(r.best) : "no date"} · ${r.units} u · ${esc(t("staged_by", {at: r.at ? RX.hhmm(r.at) : "", who: whoText(r)}))}</button>`).join("");
   prompt_("go", esc(t("lot_h")), `<strong>${esc(nameOf(all[0].sku))}</strong>${RX.idLine(all[0].sku)}`, `<div>${btns}</div><div class="rx-pa-btns">${btn("lot-close", t("btn_close"), "", 'data-close="3"')}</div>`, {keepScan: true});
   RX.sound("decide");
@@ -714,7 +753,7 @@ RX.registerAct("tray-offer-place", () => {   // PM-3333: place the tray on the s
   trayTouch(); startPlace(info, "armed", entries);
 });
 RX.registerAct("hold-wait-close", () => { try{ clearPrompt(); }catch(_){} });
-RX.registerAct("lot-close", () => { S.lot = null; try{ clearPrompt(); }catch(_){} });
+RX.registerAct("lot-close", () => { S.lot = null; try{ clearPrompt(); }catch(_){} try{ trayPanel(); }catch(_){} });
 RX.registerAct("staged-close", () => { if(pend()){ RX.toast(t("finish_first")); return; } const prev = RX.state.prevFlow; RX.state.prevFlow = null; if(RX.setFlow(prev && prev !== "staged" ? prev : "direct")) RX.refresh(); });
 RX.registerAct("staged-row-close", () => { S.expanded = null; S.confirm = null; ST.render(); });
 RX.registerAct("lot-pick", ({el}) => {
@@ -969,7 +1008,7 @@ RX.registerStep("tray", {
     const rank = PA.rankFor({sku: p.prod.sku, name: p.prod.name, cls: p.prod.cls, best: p.best, units: p.qty}, p.qty);
     const top = rank.cands[0];
     const area = top ? (RX.pack.areaOf(top.bin) || "") : ((rank.area && rank.area.name) || "");
-    ctx.commit({state: "staged", workflow: "staged", stagedArea: area, recommendedBin: top ? top.bin : "", recReasons: [rank.reason.code]});
+    ctx.commit({state: "staged", workflow: "staged", stagedArea: area, recommendedBin: top ? top.bin : "", recReasons: [rank.reason.code].concat(PA.flagsFor(rank))});
     const row = RX.state.lastRow;
     if(row && row.rx){ for(const rec of RX.intents.forRow(row)){ const r = norm({iid: rec.iid, fields: rec.fields, etag: rec.etag, itemId: rec.itemId}); S.list.push(r); S.tray.items.push({iid: r.iid, take: null}); } trayTouch();
       /* ⭐ 2026-10-22: received this way the case is only STAGED + in hand. On 10-22 eight new frozen items were received like this and
@@ -1025,7 +1064,7 @@ function areasFor(p){
 const stageCtx = () => { const s = RX.state.step; return s && s.name === "stage" ? s.ctx : null; };
 function commitStage(ctx, row){
   const st = ctx.p.rx.stage; ST.cur = null;
-  ctx.commit({state: "staged", workflow: "staged", stagedArea: row.area, recommendedBin: row.bin || "", recReasons: [st.rank.reason.code]});
+  ctx.commit({state: "staged", workflow: "staged", stagedArea: row.area, recommendedBin: row.bin || "", recReasons: [st.rank.reason.code].concat(PA.flagsFor(st.rank))});
 }
 function toShelf(ctx, tagBin){
   const ctx2 = Object.assign({}, ctx, {step: "shelf"});
