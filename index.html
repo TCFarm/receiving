@@ -1803,16 +1803,14 @@ function askQty(){
     : "";
   /* ⭐ PM-3297: received-so-far on the PO in every receiving flow — the put-away flows already show "this makes k of n" (rxq.body) */
   const prog = (!isAudit() && window.RX && RX.po && RX.po.progressHtml && !(RX.flowActive && RX.flowActive())) ? RX.po.progressHtml(p) : "";
-  prompt_("", loose ? "How many units at this date?" : "How many units in this case?",
+  prompt_("", loose ? "How many units at this date?" : "How many units are you receiving?",
     ndNote + lotNote + prog + rxq.body +
     `<strong>${esc(p.prod.name)}</strong>${window.RX && RX.idLine ? RX.idLine(p.prod.sku) : ""} &mdash; best by
-     <strong>${p.best || "no date"}</strong>.<br><br>` +
+     <strong>${p.best || "no date"}</strong>.<span class="rx-qgap"></span>` +
     (loose
       ? `Count what is on the shelf <strong>at this date only</strong>. Scan the same
          item again for a different date.`
-      : `The ledger counts UNITS at each date, so enter the units in this case
-         &mdash; a part-case is normal.` +
-        (pk > 0 ? ` <span class="hint" style="display:inline">Pack on file: ${pk}.</span>` : "")),
+      : `Count every unit you are putting away, across all cases.`),
     `<div class="dateRow">
        <input id="qty" type="text" class="num" inputmode="numeric" maxlength="5"
               value="${dflt ?? ""}" placeholder="e.g. 12" aria-label="Quantity">
@@ -3751,6 +3749,7 @@ $("scan").addEventListener("keydown",e=>{
     if(!v.trim() && window.RX && RX.onEmptyEnter()) return;
     handle(v); }});
 document.addEventListener("click",(ev)=>{ if(ev && ev.target && ev.target.closest && ev.target.closest("#rxFb,#rxFbFab")) return;   /* PM-3305: typing feedback */
+  { const tg = ev && ev.target; if(tg && tg.id !== "scan" && tg.matches && tg.matches("input:not([type=button]):not([type=submit]):not([type=checkbox]):not([type=radio]),textarea,select") && !tg.disabled && !tg.readOnly) return; }   /* PM-3691: a tap on another typing box keeps the cursor there */
   if((!$("promptArea").innerHTML || unitScanFor || (window.RXLearn && RXLearn.awaitingUnit && RXLearn.awaitingUnit()) || (window.RX && RX.keepScan())) && $("app").style.display!=="none") $("scan").focus(); });
 window.addEventListener("beforeunload",e=>{
   if(leavingForSignIn) return;       // ⭐ B9: the sign-in redirect — everything is persisted
