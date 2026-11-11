@@ -45,6 +45,15 @@ button.rx-seg{cursor:pointer;text-decoration:underline dotted;min-height:48px;pa
 @media (prefers-color-scheme:dark){.rx-violet{background:#2a1c3d;color:#c9a8f0}.rx-blue{background:#12263f;color:#8ab8f0}}
 .rx-chipbtn{min-height:48px;padding:8px 14px;margin:0 6px 6px 0;border:1px solid var(--line);border-radius:22px;background:var(--card);font-size:14px}
 .rx-chipbtn.on{background:var(--ink);color:var(--ground);border-color:var(--ink)}
+/* review N6 (2026-11-11): the quantity card must keep its box, Save and the readout above the browser bars on a portrait tablet — the
+   blank line before the instruction, the chip row's top gap and the readout's bottom gap shrink at narrow widths (display only). */
+.rx-qgap{display:block;height:17px}
+@media (max-width:820px){
+  .rx-qgap{height:6px}
+  #rxQtyKind{margin-top:4px !important}
+  #rxQtyReadout{margin-bottom:4px !important}
+  #promptArea .rx-poline{margin-bottom:5px !important;padding-top:5px !important;padding-bottom:5px !important}
+}
 .rx-histtools{margin:0 0 8px}
 .rx-lastbtns{margin-top:8px;display:flex;gap:8px;flex-wrap:wrap}
 .rx-toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--ink);color:var(--ground);padding:12px 18px;border-radius:6px;z-index:10000;max-width:90vw}
@@ -76,6 +85,11 @@ button.rx-seg{cursor:pointer;text-decoration:underline dotted;min-height:48px;pa
    active card and the flash (SCANNER-UX §8 order). */
 #rxCols{display:block}
 #rxSideCol > #rxTray:not(:empty) + #rxSide:not(:empty){margin-top:12px}
+/* PM-3919: the recommendation panel sits ABOVE the staged list/tray in the side column, in every layout — stacked (portrait) it was pushed off the
+   bottom of an upright tablet by the list, and side by side the list pushed a staged case's panel below the screen. It is empty unless a step shows it. */
+#rxSideCol{display:flex;flex-direction:column}
+#rxSideCol > #rxSide{order:-1}
+#rxSideCol > #rxTray:not(:empty) + #rxSide:not(:empty){margin-top:0;margin-bottom:12px}
 @media (min-width:1000px){
   body.rx .wrap{max-width:1240px}
   body.rx #rxCols{display:grid;grid-template-columns:58% 1fr;gap:16px;align-items:start}
