@@ -354,6 +354,32 @@ RX.registerAct("over-fix", () => { if(overCtx()) RX.backToQty(); });
 
 /* ───────────────────────── the qty card ───────────────────────── */
 function typedQty(){ const el = document.getElementById("qty"); const n = parseInt(((el && el.value) || "").trim(), 10); return isNaN(n) ? 0 : n; }
+/* ⭐ PM-3917: "1 on the PO = 25 units". Only when the pack says the PO line is counted in packs (uom "cases") AND each one is more than one
+   selling unit (ordered_units / qty). ⛔ Never says "sack" or "display": nothing the page holds tells which it is. */
+PO.packNote = function(line){
+  try{
+    if(!line || line.uom !== "cases") return "";
+    const q = num(line.qty), u = num(line.ordered_units);
+    if(!(q > 0) || !(u > q)) return "";
+    return t("po_pack_note", {q: 1, n: fmt(u / q)});
+  }catch(_){ return ""; }
+};
+/* ⭐ PM-3916: the case size the readout counts against = what the card shows (a size the crew confirmed today wins, else the prefill). */
+function caseSizeOf(p){
+  let s = 0; try{ s = num(packs[p.prod.sku]); }catch(_){}
+  return s > 0 ? s : num(p.qtyShown);
+}
+/* ⭐ PM-3916: 30 of 6 ⇒ "5 full cases" · 32 ⇒ "5 cases + 2 units" · 4 ⇒ "Part case, 4 of 6". Case size unknown or 1 ⇒ "" (no invented number).
+   Display only — nothing recorded or sent comes from it. */
+PO.qtyReadout = function(n, c){
+  n = Math.floor(num(n)); c = num(c);
+  if(!(n > 0) || !(c > 1)) return "";
+  if(n < c) return t("qty_read_part", {n, c: fmt(c)});
+  const k = Math.floor(n / c), r = n - k * c;
+  const cs = k === 1 ? "case" : "cases";
+  if(r === 0) return t("qty_read_full", {k, cases: cs});
+  return t("qty_read_mix", {k, cases: cs, r, units: r === 1 ? "unit" : "units"});
+};
 function poLineHtml(p, qty){
   const k = PO.classify(p, qty);
   if(!k) return "";
@@ -367,19 +393,35 @@ function poLineHtml(p, qty){
   else if(k.status === "complete"){ msg = t("complete", {k:k.k, n:k.n, unit:k.unit}); col = "var(--go)"; }
   else msg = t("makes", {k:k.k, n:k.n, unit:k.unit});
   const two = PO.chipHtml(p);
+  /* ⭐ PM-3917: a PO line counted in packs (1 on the PO) that stocks N selling units says so. Receiving stays in UNITS. */
+  const packNote = PO.packNote(k.match && k.match.line);
   try{ const cu = k.match && k.match.po ? PO.cartUnits(k.match.po.order_id, p.prod.sku) : 0;
     if(cu > 0 && (k.status === "over" || k.status === "complete")){ const upc = upcOf(k.match.line); msg += " — " + t("on_cart_note", {k: fmt(upc > 0 ? cu / upc : cu) + (upc > 0 ? " cases" : " units")}); } }catch(_){}
-  return `<span id="rxPoLine" class="rx-poline rx-${k.status}" style="${dflt};border-left-color:${col}">${RX.esc(msg)}${two}</span>`;
+  return `<span id="rxPoLine" class="rx-poline rx-${k.status}" style="${dflt};border-left-color:${col}">${RX.esc(msg)}${packNote ? `<span id="rxPackNote" class="hint" style="display:block;margin-top:2px">${RX.esc(packNote)}</span>` : ""}${two}</span>`;
 }
+/* ⭐ review S2 (2026-11-11, Jake's ruling): MORE than one case typed (24 for a 12-per-case item) is never "a full case" or "a part case" —
+   a lit "Part case" next to "2 full cases" contradicts itself, and a tapped "Full case" taught the learner a wrong pack size (CaseQty 24,
+   "!PACK … = 24"). So over one case BOTH chips are HIDDEN (the readout alone says what it is) and any earlier tap is forgotten, so they come
+   back in their normal default state. RX.qtyKind (the one place the saved kind is decided) answers "part" there regardless — which is what
+   the default path always recorded. At or below one case nothing changes. Case size = the one the card SHOWS (caseSizeOf); unknown or 1 ⇒
+   never "over". Display only: no recorded field changes on the default path. */
+PO.overCase = function(p, n){ try{ const cs = caseSizeOf(p); return cs > 1 && n > cs; }catch(_){ return false; } };
 function kindNow(p){ return RX.state.qtyKindChoice || ((p.qtyShown == null || p.qtyShown === typedQty()) ? "full" : "part"); }
 function chipsHtml(p){
+  const over = PO.overCase(p, typedQty());
+  if(over) RX.state.qtyKindChoice = null;                           // forgotten, so the chips return in the default state
   const kind = kindNow(p);
   const known = p.qtyShown != null;
-  const src = p.qtyBasis ? `<span class="hint rx-qsrc" style="display:inline;margin-left:8px">${RX.esc(p.qtyShown)} per case — ${RX.esc(basisText(p.qtyBasis))}</span>` : "";
+  const cs = caseSizeOf(p);
+  /* PM-3916: "6 per case." (+ where the number came from) and the live readout; nothing at all when the case size is unknown or 1 */
+  const src = cs > 1 ? `<span id="rxQtyHelp" class="hint rx-qsrc" style="display:inline;margin-left:8px">${RX.esc(t("qty_help", {c: fmt(cs)}))}${p.qtyBasis ? " (" + RX.esc(basisText(p.qtyBasis)) + ")" : ""}</span>` : "";
+  const rd = PO.qtyReadout(typedQty(), cs);
+  const readout = rd ? `<span id="rxQtyReadout" role="status" style="display:block;margin:0 0 8px;font-size:18px;font-weight:700">${RX.esc(rd)}</span>` : "";
   const btn = (act, label, on) => `<button type="button" class="rx-chipbtn${on ? " on" : ""}" data-act="${act}" aria-pressed="${on}">${RX.esc(label)}</button>`;
   const changed = (known && kind === "part") ? `<button type="button" class="rx-chipbtn" data-act="qty-size-changed">${RX.esc(t("qty_size_changed"))}</button>` : "";
-  const hint = !known ? `<span class="hint" style="display:block;margin-top:4px">${RX.esc(t("qty_full_hint"))}</span>` : "";
-  return `<span id="rxQtyKind" style="display:block;margin-top:10px">${btn("qty-full", t("qty_full"), kind === "full")}${btn("qty-part", t("qty_part"), kind === "part")}${changed}
+  const hint = (!known && !over) ? `<span class="hint" style="display:block;margin-top:4px">${RX.esc(t("qty_full_hint"))}</span>` : "";
+  const fullPart = over ? "" : `${btn("qty-full", t("qty_full"), kind === "full")}${btn("qty-part", t("qty_part"), kind === "part")}`;
+  return `<span id="rxQtyKind" style="display:block;margin-top:10px">${readout}${fullPart}${changed}
     <button type="button" class="rx-chipbtn" data-act="qty-damaged" style="margin-left:10px">${RX.esc(t("qty_damaged"))}</button>${src}${hint}</span>`;
 }
 RX.registerQtyExtra("po", (p) => {
@@ -400,7 +442,7 @@ function refreshQtyCard(){
 }
 document.addEventListener("input", (e) => { if(e.target && e.target.id === "qty" && document.getElementById("rxQtyX")) refreshQtyCard(); });
 
-RX.registerAct("qty-full", () => { RX.state.qtyKindChoice = "full"; refreshQtyCard(); });
+RX.registerAct("qty-full", () => { const p = (() => { try{ return pending; }catch(_){ return null; } })(); if(p && PO.overCase(p, typedQty())) return; RX.state.qtyKindChoice = "full"; refreshQtyCard(); });
 RX.registerAct("qty-part", () => { RX.state.qtyKindChoice = "part"; refreshQtyCard(); });
 RX.registerAct("qty-size-changed", () => {
   const n = typedQty(); const ask = document.getElementById("rxQtyAsk"); if(!ask) return;
