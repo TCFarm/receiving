@@ -45,6 +45,7 @@ const CFG = {
   POLL_LIMIT:     10*1000,          // every read has a time limit and a generation guard
   PACK_STALL:     10*1000,          // no bytes for this long ⇒ give up and use the cached copy
   PACK_TOTAL:     30*1000,
+  SUBST_POLL_MS:  300000,           // PM-3701: re-read the supplemental order's status file every 5 min while the page is open
   PACK_REFRESH:   30*60*1000,       // silent refresh while the page is in use (applied only at an idle moment)
   FLOW_STALE:     6*3600*1000,      // the same clock as the mode question (MODE_STALE_HOURS)
   FLUSH_TICK:     15*1000,          // outbox retry cadence (the page's own retry is 45 s)
@@ -73,6 +74,8 @@ const CFG = {
   scan_log_max: 12,
   PHOTO_WAIT:     10*1000,          // round 5: Continue on the damage-photo card waits this long (twice) for an upload in flight
   SHELF_IDLE:     10*60*1000,       // round 4 (D12): shelf mode clears after this long with no case put away
+  DRY_FALLBACK_BIN: "DZ-STOCK-11",  // PM-3919 (ruling R1, Jake 2026-11-11): the Dry shelf the panel names ONLY when an item has no shelf on record and nothing fits better.
+                                    // ⛔ Refrigerated / Frozen never get a fallback — the panel says "Ask where this goes". Used only if the pack holds this bin and it is switched on.
 };
 
 /* ═══ COPY — UX design §8 plus the chip / pack / start strings ═══ */
@@ -143,6 +146,10 @@ const COPY = {
   po_many_hint:    "Scans match the right one automatically.",
   po_none_h:       "No KeHE delivery is due today.",
   po_none_b:       "Best-by dates still save. Nothing goes into Finale. If a truck is here, tell purchasing.",
+  subst_h:         "Supplemental order lines expected —",
+  subst_b:         "they appear on the Finale order once KeHE confirms.",
+  subst_c:         "If it is on the truck, scan it as usual; nothing is wrong.",
+  subst_po:        "Supplemental order (PO {po})",
   due_today:       "due today",
   due_tomorrow:    "due tomorrow",
   due_late:        "due {dow} (late)",
@@ -248,6 +255,13 @@ const COPY = {
   qty_size_yes:    "Yes, use {n}",
   qty_size_no:     "No",
   qty_damaged:     "Some damaged",
+  /* PM-3916: the live readout under the box (display only) + the helper that names the case size */
+  qty_help:        "{c} per case.",
+  qty_read_full:   "{k} full {cases}",
+  qty_read_mix:    "{k} {cases} + {r} {units}",
+  qty_read_part:   "Part case, {n} of {c}",
+  /* PM-3917: a PO line counted in packs (1 on the PO) that stocks N selling units */
+  po_pack_note:    "{q} on the PO = {n} units",
   dmg_q:           "How many units are damaged?",
   dmg_save:        "Save",
   dmg_cancel:      "Cancel",
