@@ -90,6 +90,7 @@ const COPY_ADD = {
   tray_offer_n:    "Put these {n} on {bin}",
   tray_offer_hint: "Enter puts it there — or scan another shelf tag",
   tray_some_q:     "How many go on this shelf?",
+  tray_some_scan:  "That scan was not recorded. Type how many go on this shelf, then scan again.",
   tray_some_save:  "Save",
   tray_in:         "in tray",
   tray_expired:    "The tray was cleared after {m} idle minutes — those items are NOT in Finale. Scan each one again, then the shelf tag.",
@@ -395,7 +396,12 @@ function addToTray(r, take){
 }
 RX.registerAct("tray-clear", () => { clearTray(""); RX.sound("decide"); });
 RX.registerAct("tray-remove", ({el}) => { S.tray.items = S.tray.items.filter(x => x.iid !== el.getAttribute("data-iid")); S.some = null; trayTouch(); ST.render(); });
-RX.registerAct("tray-some", ({el}) => { S.some = {iid: el.getAttribute("data-iid")}; trayTouch(); ST.render(); setTimeout(() => { const i = $("rxTrayN"); if(i){ i.focus(); i.onkeydown = (ev) => { if(ev.key === "Enter"){ ev.preventDefault(); const b = document.querySelector('[data-act="tray-some-save"]'); if(b) b.click(); } }; } }, 25); });
+RX.registerAct("tray-some", ({el}) => { S.some = {iid: el.getAttribute("data-iid")}; trayTouch(); ST.render(); setTimeout(() => { const i = $("rxTrayN"); if(i){ i.focus(); let kn = 0, kt = 0;     /* PM-3691 (review 2026-11-10): a hand scanner fired while the cursor is here types a barcode at scanner speed and ends in Enter — its first digits are never saved as a quantity */
+      i.onkeydown = (ev) => { const now = performance.now();
+        if(typeof ev.key === "string" && ev.key.length === 1){ kn = (now - kt <= 40) ? kn + 1 : 1; kt = now; }
+        if(ev.key === "Enter"){ ev.preventDefault();
+          if(kn >= 4 && now - kt <= 150){ kn = 0; i.value = ""; i.style.borderColor = "var(--stop)"; RX.sound("refused"); RX.toast(t("tray_some_scan")); return; }
+          const b = document.querySelector('[data-act="tray-some-save"]'); if(b) b.click(); } }; } }, 25); });
 RX.registerAct("tray-some-cancel", () => { S.some = null; const a = document.activeElement; if(a && a.blur && a.id === "rxTrayN") a.blur(); ST.render(); });     // ⭐ Escape leaves focus in the box, and render() never re-renders under a typing finger
 RX.registerAct("tray-some-save", ({el}) => {
   const iid = el.getAttribute("data-iid"), r = byIid(iid), inp = $("rxTrayN"), n = parseInt(((inp && inp.value) || "").trim(), 10);
