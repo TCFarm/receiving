@@ -894,8 +894,10 @@ function chipOf(rec){
   /* ready and not yet acted on */
   const ps = RX.poster;
   if(f.PageMode === "live" && ps.status === "ok" && ps.data){
-    const m = ps.data.modes && ps.data.modes[CFG.vendor];
-    if(m && m !== "live") return mk(t("chip_receive_app"), "red", 91, t("denied_detail"));
+    /* ⭐ PM5 (2026-11-12): a scan on a vendor DROP-OFF PO follows THAT vendor's poster mode; a vendor the status does not name is not live */
+    const vk = (RX.dropoffs && RX.dropoffs.modeKeyForPo(f.Po)) || CFG.vendor;
+    const m = ps.data.modes && ps.data.modes[vk];
+    if((m && m !== "live") || (vk !== CFG.vendor && m !== "live")) return mk(t("chip_receive_app"), "red", 91, t("denied_detail"));
   }
   const t0 = Date.parse(f.ReadyAt || f.ScanAt) || rec.createdAt;
   const age = Math.max(0, now - t0);
