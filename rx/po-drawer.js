@@ -159,6 +159,8 @@ function poHtml(){
   /* the high-level summary first: how many POs, how many lines still missing */
   const missingAll = sum.reduce((a, x) => a + x.left, 0);
   body += `<div class="rx-note" id="rxPoSum" role="status"><strong>${esc(!sum.length ? "" : missingAll === 0 ? t("po_sum_none") : sum.length === 1 ? t("po_sum_one", {n:missingAll}) : t("po_sum_top", {p:sum.length, n:missingAll}))}</strong>${sum.length > 1 && !filterActive() ? ` <span class="hint" style="display:inline">${esc(t("po_toggle_hint"))}</span>` : ""}</div>`;
+  /* ⭐ PM5 (2026-11-12): vendor drop-offs arriving today + the NOT READY ones with "Lock now" (rx/dropoffs.js) */
+  if(RX.dropoffs) body += RX.dropoffs.sectionHtml();
   for(const x of sum){
     const pct = x.lines ? Math.round(x.done / x.lines * 100) : 0;
     const id = String(x.po.order_id), isOpen = poIsOpen(id, sum.length);
@@ -168,7 +170,7 @@ function poHtml(){
       <strong>${isOpen ? "▾" : "▸"} PO ${esc(id)}</strong> · ${esc(x.due)} · <strong class="${x.left ? "rx-red" : ""}">${esc(x.left ? t("po_missing_n", {n:x.left}) : t("po_all_in"))}</strong>
       <div class="rx-bar" role="progressbar" aria-valuemin="0" aria-valuemax="${x.lines}" aria-valuenow="${x.done}"><span style="width:${pct}%"></span></div>
       <div class="hint">${esc(t("po_progress", {done:x.done, total:x.lines, pct}))}</div></button>
-      <div class="rx-holding" data-po="${esc(id)}">${hold.length ? `<button type="button" class="rx-chipbtn${H.poFilter === "problems" ? " on" : ""}" data-act="po-filter" data-f="problems"><strong>${esc(t("pb_holding"))}:</strong> ${esc(hold.join(" · "))}</button>` : `<span class="hint">${esc(t("pb_none"))}</span>`}</div></div>`;
+      ${RX.dropoffs ? RX.dropoffs.poLabel(x.po) : ""}<div class="rx-holding" data-po="${esc(id)}">${hold.length ? `<button type="button" class="rx-chipbtn${H.poFilter === "problems" ? " on" : ""}" data-act="po-filter" data-f="problems"><strong>${esc(t("pb_holding"))}:</strong> ${esc(hold.join(" · "))}</button>` : `<span class="hint">${esc(t("pb_none"))}</span>`}</div></div>`;
     if(!isOpen) continue;
     let n = 0, sawDone = false, sawMiss = false;
     /* ⭐ MISSING FIRST (Jack, 2026-11-05): problems and over-receipts, then not started, partly in, told-short, and received LAST; within a
@@ -206,7 +208,7 @@ function poHtml(){
   }
   if(H.poFilter === "all" || H.poFilter === "notpo"){
     const np = notOnPo();
-    if(np.length) body += `<div class="rx-pohead"><strong>${esc(t("po_f_notpo"))}</strong></div>` + np.map(r => `<div class="rx-line"><span class="rx-lname">${esc(r.prod.name)}${RX.idLine(r.prod.sku)}</span> <span class="num">${r.units ?? "?"}u</span></div>`).join("");
+    if(np.length) body += `<div class="rx-pohead"><strong>${esc(t("po_f_notpo"))}</strong>${RX.refreshJob ? RX.refreshJob.ageHtml({button: false}) : ""}</div>` + np.map(r => `<div class="rx-line"><span class="rx-lname">${esc(r.prod.name)}${RX.idLine(r.prod.sku)}</span> <span class="num">${r.units ?? "?"}u</span></div>`).join("");
     else if(H.poFilter === "notpo") body += `<div class="hint">${esc(t("po_empty"))}</div>`;
   }
   return shell("Delivery", body);
