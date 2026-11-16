@@ -174,7 +174,7 @@ PO.chipHtml = function(p){
             (m.cands.length > 1 ? ` <button type="button" class="rx-chipbtn" data-act="po-change" style="margin-left:8px">${esc(t("po_change"))}</button>` : "");
     if(m.older){ const n = PO.newest(), only = m.cands.length === 1;
       h += `<span class="rx-poolder" role="alert" style="display:block;margin-top:6px;padding:7px 10px;border-left:5px solid var(--wait);background:var(--card)">` +
-           `⚠ ${esc(t(only ? "po_older_only" : "po_older", {po: po.order_id, newest: n ? n.order_id : ""}))}</span>`; }
+           `⚠ ${esc(t(only ? "po_older_only" : "po_older", {po: po.order_id, newest: n ? n.order_id : ""}))}${RX.refreshJob ? RX.refreshJob.ageHtml({button: false}) : ""}</span>`; }
     return h + `</span>`;
   }catch(_){ return ""; }
 };
@@ -386,7 +386,7 @@ function poLineHtml(p, qty){
   const dflt = "display:block;margin:0 0 9px;padding:8px 12px;border-left:5px solid var(--line);background:var(--card);font-size:14px";
   if(k.status === "notpo"){
     return `<span id="rxPoLine" class="rx-poline rx-notpo" style="${dflt};border-left-color:var(--stop)"><strong>${RX.esc(t("no_po_short"))}</strong>
-      <span class="hint" style="display:inline"> You will be asked to set it aside until purchasing adds it.</span></span>`;
+      <span class="hint" style="display:inline"> You will be asked to set it aside until purchasing adds it.</span>${RX.refreshJob ? RX.refreshJob.ageHtml() : ""}</span>`;
   }
   let msg, col = "var(--line)";
   if(k.status === "over"){ msg = t("over", {k:k.k, n:k.n, unit:k.unit, over:k.over}); col = "var(--wait)"; }
@@ -441,6 +441,8 @@ function refreshQtyCard(){
   if(k){ const tmp = document.createElement("span"); tmp.innerHTML = chipsHtml(p); k.replaceWith(tmp.firstChild); }
 }
 document.addEventListener("input", (e) => { if(e.target && e.target.id === "qty" && document.getElementById("rxQtyX")) refreshQtyCard(); });
+/* ⭐ 2026-11-12 (review S6): the delivery list changed while the count card is open — the PO line ("Not on the KeHE order" / "makes n of m") is re-judged, never kept */
+RX.on("pack", () => { if(document.getElementById("rxQtyX")) refreshQtyCard(); });
 
 RX.registerAct("qty-full", () => { const p = (() => { try{ return pending; }catch(_){ return null; } })(); if(p && PO.overCase(p, typedQty())) return; RX.state.qtyKindChoice = "full"; refreshQtyCard(); });
 RX.registerAct("qty-part", () => { RX.state.qtyKindChoice = "part"; refreshQtyCard(); });
