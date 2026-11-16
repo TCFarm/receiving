@@ -151,6 +151,7 @@ P.load = async function(opts){
     if(r.status === 403) return fail(t("pack_denied"));
     if(r.status === 404) return fail(t("pack_missing"));
     if(!r.ok) return fail("Graph "+r.status);
+    try{ if(RX.noteServerDate) RX.noteServerDate(r.headers.get("date")); }catch(_){}   // review S8: a SERVER time (when the browser lets us read it) beats the tablet clock for the list's age
     s.total = +(r.headers.get("content-length") || 0) || 0;
     const reader = r.body && r.body.getReader ? r.body.getReader() : null;
     let text = "";
