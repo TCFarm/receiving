@@ -99,11 +99,12 @@ function poCardHtml(){
       sum.map(x => `<div class="rx-porow">${esc(t("po_many_row", {po:x.po.order_id, due:x.due, left:x.left}))}</div>`).join("") +
       `<div class="hint">${esc(t("po_many_hint"))}</div>`;
   }
+  if(RX.subst) h += RX.subst.html();          /* PM-3701 U13: a sent supplemental order's lines are not on the Finale PO until KeHE confirms (read-only note) */
   const when = d.built ? RX.hhmm(d.built) : "";
   const ago = d.built ? RX.ago(RX.now() - Date.parse(d.built)) : "";
   if(st.level === "amber") h += `<div class="rx-sub rx-amber">${esc(P.builtToday(d) ? t("pack_from_ago", {at:when, ago}) : t("pack_not_today", {when: d.built ? new Date(d.built).toLocaleDateString(undefined, {weekday:"short"})+" "+when : "earlier"}))}
-    <button class="rx-btn" data-act="start-pack-retry">${esc(t("btn_refresh"))}</button></div>`;
-  else h += `<div class="rx-sub">${esc(t("pack_from", {at:when}))}</div>`;
+    <button class="rx-btn" data-act="start-pack-retry">${esc(t("btn_refresh"))}</button>${RX.refreshJob ? " " + RX.refreshJob.btnHtml() : ""}</div>`;
+  else h += `<div class="rx-sub">${esc(t("pack_from", {at:when}))}${RX.refreshJob ? " " + RX.refreshJob.btnHtml() : ""}</div>`;
   if(s.status === "cached" || s.status === "none") h += `<div class="rx-note rx-amber" role="status">${esc(P.message())} <button class="rx-btn" data-act="start-pack-retry">${esc(t("btn_try_again"))}</button></div>`;
   return h;
 }
@@ -274,6 +275,7 @@ function renderHeader(){
 function renderMenu(){
   const m = $("rxMenu");
   m.innerHTML = `<button class="rx-menuitem" role="menuitem" data-act="menu-sounds">${esc(RX.soundOn() ? t("menu_sounds_on") : t("menu_sounds_off"))}</button>
+    ${RX.refreshJob ? RX.refreshJob.menuItemHtml() : ""}
     <button class="rx-menuitem" role="menuitem" data-act="menu-refresh-pack">${esc(t("menu_refresh"))}</button>
     <button class="rx-menuitem" role="menuitem" data-act="menu-fixes">${esc(t("menu_fixes"))}</button>
     ${RX.offline ? `<button class="rx-menuitem" role="menuitem" data-act="offline-ready">${esc(t("off_menu"))}</button>` : ""}
