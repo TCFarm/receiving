@@ -47,6 +47,31 @@ const CFG = {
   PACK_TOTAL:     30*1000,
   SUBST_POLL_MS:  300000,           // PM-3701: re-read the supplemental order's status file every 5 min while the page is open
   PACK_REFRESH:   30*60*1000,       // silent refresh while the page is in use (applied only at an idle moment)
+  /* ⭐ PM-3919 F (2026-11-11): "Refresh from Finale" — rx/refresh.js. The job contract is Procurement & Merchandising/routines/job-receiving-refresh-tablet-data.md
+     ("Page contract"). Limits live HERE, never as literals (_shared/APP-PROGRESS-STATUS.md rule 3). */
+  REFRESH_INSTALLED:    false,      // ⛔ NEVER OFFER A CONTROL THAT CANNOT WORK (2026-11-12, review S7): the job kind `receiving.refresh_tablet_data` is STAGED on the mini until Jack signs
+                                    // the bundle; until then a pressed row is REFUSED within seconds and opens an error-board row. While false NO "Refresh from Finale" button or menu item is
+                                    // drawn anywhere — the list-age line and the stale lead still show, with the plain "Refresh delivery list" re-read instead. To turn it on: set true
+                                    // and deploy (a test/preview tablet can set localStorage rx_refresh_on = "1"). Same pattern as READER_INSTALLED in rx/photocap.js.
+  /* ⭐ PM5 (dropoff-planner, 2026-11-12): vendor drop-off POs — rx/dropoffs.js. "Lock now" posts job `receiving.vendor_po_lock_now`. */
+  LOCKNOW_INSTALLED:    false,      // ⛔ NEVER OFFER A CONTROL THAT CANNOT WORK: the job kind is STAGED until the lead's signed bundle installs it on the mini; while false
+                                    // a not-ready drop-off says "ask purchasing to lock it" and has NO button. A test tablet can set localStorage rx_locknow_on = "1".
+  LOCK_POLL_MS:         3*1000,     // read the lock job row this often
+  LOCK_PICKUP_MS:       60*1000,    // the Mac mini must pick the lock job up within this
+  LOCK_TOTAL_MS:        240*1000,   // total, from the press (the job's own timeout is 240 s)
+  REFRESH_RESUME_MAX_MS: 6*3600*1000, // a saved job id older than this is dropped on reload (the row is long finished and its answer no longer matters)
+  REFRESH_CAT_FALLBACK_MS: 60*1000, // when the RESULT carries no usable finished_utc / pages_ready_utc pair: the documented push + ~60 s for the barcode page
+  REFRESH_CAT_FETCH_MS: 20*1000,    // one read of the barcode list (catalog.json) has this long, then "did not load" (the old list stays in use)
+  CLOCK_SKEW_MS:        5*60*1000,  // a list "built" more than this much in the FUTURE by the tablet clock means the clock is wrong: its age is not known
+  LIST_STALE_MS:        60*60*1000, // the delivery list is "may be out of date" past this age (the Not-on-the-KeHE-order card leads with it)
+  REFRESH_POLL_MS:      3*1000,     // read the job row this often
+  REFRESH_PICKUP_MS:    60*1000,    // the Mac mini must pick the job up within this (fast lane ~13 s)
+  REFRESH_TOTAL_MS:     300*1000,   // total, from the press (the handler ends itself by 215 s; one retry is possible)
+  REFRESH_STAGE_MS:     [10*1000, 40*1000], // while RUNNING: reading POs until 10 s, publishing until 40 s, then rebuilding barcodes (a time estimate — the row has no mid-run message)
+  REFRESH_PACK_TRY_MS:  10*1000,    // after "done": re-read the delivery list this often ...
+  REFRESH_PACK_WAIT_MS: 120*1000,   // ... for this long (OneDrive has to upload the new pack.json first)
+  REFRESH_CAT_WAIT_MS:  120*1000,   // the longest we wait for the barcode page to publish (push + ~60 s)
+  REFRESH_DONE_MS:      20*1000,    // a success message hides itself after this; a problem stays until OK
   FLOW_STALE:     6*3600*1000,      // the same clock as the mode question (MODE_STALE_HOURS)
   FLUSH_TICK:     15*1000,          // outbox retry cadence (the page's own retry is 45 s)
   TOAST_MS:       4000,
@@ -289,6 +314,60 @@ const COPY = {
   btn_cancel:      "Cancel",
   btn_back:        "Back",
   notput_area:     "Not put away yet",
+  /* ⭐ PM-3919 F: Refresh from Finale + the age of the delivery list */
+  rf_btn:          "Refresh from Finale",
+  rf_btn_busy:     "Refreshing from Finale…",
+  rf_menu_hint_in: "Sign in first",
+  rf_why_signin:   "Sign in again first.",
+  rf_why_offline:  "No signal. Connect to refresh.",
+  rf_why_missing:  "This page is missing a part. Reload the page.",
+  rf_step:         "Step {n} of 4 · {what}",
+  rf_wait_pickup:  "Waiting for the Mac mini to pick it up…",
+  rf_run1:         "Reading the purchase orders from Finale",
+  rf_run2:         "Publishing the delivery list",
+  rf_run3:         "Rebuilding barcodes",
+  rf_apply_pack:   "Loading the new delivery list on this tablet",
+  rf_apply_cat:    "Loading the new barcodes on this tablet",
+  rf_wait_cat:     "Waiting for the new barcodes to publish",
+  rf_retrying:     "The first try did not work ({why}). Trying once more…",
+  rf_scanning:     "You can keep scanning. Usually under a minute, at most 5 minutes.",
+  rf_old_stays:    "The old list stays in use.",
+  rf_try_again:    "Try again",
+  rf_ok:           "OK",
+  rf_details:      "Details",
+  rf_reload_pack:  "Reload the list now",
+  rf_posting:      "Sending the request…",
+  rf_post_failed:  "The request did not go through ({why}). {stays}",
+  rf_lim_pickup:   "The Mac mini has not picked this up after 1 minute. {stays}",
+  rf_lim_total:    "This is taking longer than 5 minutes. {stays} Scanning is not affected.",
+  rf_refused:      "Refresh is not available on this tablet yet — tell the office.",
+  rf_why_unavailable: "Refresh is not available on this tablet yet — tell the office.",
+  rf_nosignal:     "No signal — still trying",
+  rf_failed:       "The refresh did not work. {stays}",
+  rf_off:          "Refresh is not switched on yet — ask the office. {stays}",
+  rf_busy:         "A refresh is already running. Give it a minute, then try again.",
+  rf_pack_built:   "Delivery list updated — built {at}",
+  rf_pack_fresh:   "The delivery list was already up to date — built {at}",
+  rf_pack_queued:  "The new delivery list is ready — it loads when you finish this case.",
+  rf_pack_found:   "A newer delivery list was found — built {at}.",
+  rf_pack_found_queued: "A newer delivery list was found (built {at}) — it loads when you finish this case.",
+  rf_pack_late:    "The new list is still on its way — reload in a minute. {stays}",
+  rf_pack_old:     "The delivery list did not change: {words}",
+  rf_pack_after:   "Try again after {at}.",
+  rf_cat_new:      "Barcodes updated",
+  rf_cat_same:     "Barcodes were already up to date",
+  rf_cat_reloaded: "Barcodes reloaded",
+  rf_cat_late:     "The new barcodes are still publishing — reload in a minute.",
+  rf_cat_old:      "Barcodes did not change: {words}",
+  rf_cat_notloaded:"The new barcodes did not load. {stays}",
+  rf_partial:      "Only part of the refresh worked.",
+  list_built:      "The delivery list was built at {at} ({ago}).",
+  list_none:       "No delivery list is loaded on this tablet.",
+  list_unknown:    "The delivery list's build time is not known.",
+  list_clock_wrong:"The delivery list was built at {at} — this tablet's clock looks wrong, so its age is not known.",
+  list_future_srv: "The delivery list was built at {at}, which is later than the time now, so its age is not known.",
+  list_stale_lead: "The list may be out of date — refresh it before setting this aside.",
+  ago_now:         "just now",
 };
 
 function t(key, vars){
