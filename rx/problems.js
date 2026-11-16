@@ -197,7 +197,8 @@ const FX_WHY = {STOCK_MOVED:"the stock was already moved or sold", FOREIGN:"some
   NOT_OURS:"that receipt was not made by the tablet", NOT_RECEIVED:"that receipt is not received in Finale", RECORDS_DISAGREE:"the records disagree",
   NO_LINE:"the item is no longer on the PO", NO_CANCEL:"Finale would not cancel that receipt", FINALE_REFUSED:"Finale refused the change",
   NOT_STAFF:"it was not sent by a signed-in staff member", BAD_SHAPE:"the correction was incomplete",
-  PARTLY_HELD:"part of this scan was held or posted separately", TOO_OLD:"the delivery is too old to correct by itself"};
+  PARTLY_HELD:"part of this scan was held or posted separately", TOO_OLD:"the delivery is too old to correct by itself",
+  VENDOR_PO:"it is a vendor drop-off PO: Purchasing corrects it in Finale"};
 function fxLockWhy(r){ return /invoice is in/i.test(r) ? "KeHE's invoice is in" : /earlier month/i.test(r) ? "the receipt is from an earlier month"
   : /no longer open/i.test(r) ? "the PO is closed in Finale" : "it could not be checked"; }
 function fxWhy(r){ const m = /^([A-Z_]+):\s*(.*)$/.exec(String(r || "")); if(!m) return String(r || "").slice(0, 120);
