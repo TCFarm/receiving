@@ -87,6 +87,26 @@ let T = {
   }
 };
 
+/* ⭐ 2026-11-11 (PM-3919 package F): the SAME Graph client, offered to rx/refresh.js (the "Refresh from Finale" button) so the page has ONE
+   job-queue client, not two. `enqueue(fields)` posts the row EXACTLY as given (the caller owns the contract); `poll(rowId)` reads back only
+   State, Message and Attempts (⚠️ there is no `Result` column on AgentJobs — the photo flow's own `poll` asks for one and tolerates its absence). */
+const J = {
+  async enqueue(fields){
+    await T.ids();
+    const r = await gfetch(GRAPH + "/sites/" + S.siteId + "/lists/" + S.listId + "/items",
+                           {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({fields})});
+    if(!r.ok) await failOf(r, "the job queue");
+    return String((await r.json()).id);
+  },
+  async poll(rowId){
+    await T.ids();
+    const r = await gfetch(GRAPH + "/sites/" + S.siteId + "/lists/" + S.listId + "/items/" + encodeURIComponent(rowId) + "?$expand=fields($select=State,Message,Attempts)");
+    if(!r.ok) await failOf(r, "the job queue");
+    const f = (await r.json()).fields || {};
+    return {state: String(f.State || ""), message: String(f.Message || ""), attempts: Number(f.Attempts) || 0};
+  }
+};
+
 /* ── validate what came back: never trust the reader's shape ── */
 function clean(res, id){
   const bad = !res || typeof res !== "object" || res.id !== id;
@@ -305,5 +325,5 @@ function open(opts){
 }
 
 showButtons();
-window.RXPhoto = { enabled, showButtons, open, close, state: () => ({open: !!S.el, busy: S.busy, id: S.cur && S.cur.id}), _setTransport: (t) => { T = Object.assign(T, t); }, _test: { clean, setLimits: (w, p) => { WAIT_MS = w; POLL_MS = p; } } };
+window.RXPhoto = { jobs: J, enabled, showButtons, open, close, state: () => ({open: !!S.el, busy: S.busy, id: S.cur && S.cur.id}), _setTransport: (t) => { T = Object.assign(T, t); }, _test: { clean, setLimits: (w, p) => { WAIT_MS = w; POLL_MS = p; } } };
 })();
