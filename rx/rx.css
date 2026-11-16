@@ -137,3 +137,11 @@ body.rx-on label.big#scanLabel{color:var(--ink-2)}
 .rx-short .rx-btn{min-height:48px;margin:4px 6px 0 0}
 .rx-short-ask{border-left:4px solid var(--wait,#b7791f)}
 .rx-short-tag{margin-left:6px}
+
+/* PM-3919 F: Refresh from Finale panel */
+.rx-refresh{margin:8px 0;padding:10px 12px;border-left:5px solid var(--wait);background:var(--card);border-radius:0 4px 4px 0}
+.rx-refresh.rx-rf-ok{border-left-color:var(--go);background:var(--go-soft)}
+.rx-refresh.rx-rf-warn{border-left-color:var(--wait);background:var(--wait-soft)}
+.rx-refresh.rx-rf-bad{border-left-color:var(--stop);background:var(--stop-soft)}
+.rx-rf-btns{margin-top:8px}.rx-rf-btns .rx-btn{margin:4px 8px 0 0;min-height:48px}
+.rx-listage .rx-btn{min-height:48px;margin-top:6px}.rx-stale{color:var(--wait)}
