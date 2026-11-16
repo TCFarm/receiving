@@ -129,6 +129,8 @@ const COPY_ADD = {
   hold_hint:       "Optional: scan a hold shelf tag, or type a label, so it can be found again.",
   hold_ph:         "Hold spot (optional)",
   hold_flash:      "Set aside in the holding area — waiting for purchasing to add it to the PO.",
+  hold_now_title:  "Now on the KeHE order",
+  hold_now_on_po:  "This is on the order now — scan it again to receive it.",
   shelf_banner:    "Putting away into {bin}",
   offer_title:     "Put it on {bin}?",
   offer_line:      "Shelf {bin} was scanned first. Press Enter or the green button to put it there, or scan another shelf tag.",
@@ -398,7 +400,15 @@ PA.HOLD_AREA = "Hold: not on PO";
 const holdCtx = () => { const s = RX.state.step; return s && s.name === "nopo" ? s.ctx : null; };
 function renderHold(ctx, notice){
   const p = ctx.p, h = ctx.hold;
+  /* ⭐ 2026-11-12 (review S6): the delivery list changed while this card was open and the item IS on a PO now — say so instead of keeping the old verdict.
+     ⛔ There is no "Set aside" here any more, so a stale tap cannot record a NOT_ON_PO hold for an item that is on the order. */
+  if(h.nowOnPo){
+    prompt_("go", esc(t("hold_now_title")), `<strong>${esc(p.prod.name)}</strong>${RX.idLine(p.prod.sku)}<span class="rx-pa-note" role="alert">${esc(t("hold_now_on_po"))}</span>`,
+      `<div class="rx-pa-btns">${btn("hold-back", t("btn_back_count"), "primary", 'data-close="3"')}</div>`, {keepScan: true});
+    return;
+  }
   const body = (notice ? `<span class="rx-pa-note" role="alert">${esc(notice)}</span>` : "") + `<strong>${esc(p.prod.name)}</strong>${RX.idLine(p.prod.sku)}` +
+    (RX.refreshJob ? RX.refreshJob.ageHtml() : "") +
     `<span class="rx-pa-sub">${esc(t("hold_hint"))}</span>` +
     `<input id="rxHoldTag" class="rx-pa-search" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="60" placeholder="${esc(t("hold_ph"))}" aria-label="${esc(t("hold_ph"))}" value="${esc(h.tag)}">`;
   prompt_("stop", esc(t("hold_title")), body,
@@ -410,15 +420,20 @@ RX.registerStep("nopo", {
   start(ctx){ ctx.hold = {tag: ""}; renderHold(ctx); RX.sound("decide"); },
   onEmptyEnter(ctx){ const b = document.querySelector('[data-act="hold-set"]'); if(b){ b.click(); return true; } return false; },
   onScan(ctx, raw){
+    if(ctx.hold && ctx.hold.nowOnPo){ RX.backToQty(); return true; }       // "scan it again to receive it": the scan returns to the count, where the PO line now shows
     const id = PA.identify(raw);
     if(id.kind === "tag"){ ctx.hold.tag = id.bin; renderHold(ctx); RX.sound("staged"); return true; }
     return false;
   },
   abort(){},
 });
+RX.on("pack", () => {
+  const c = holdCtx(); if(!c || !c.hold || c.hold.nowOnPo) return;
+  try{ const m = RX.po && RX.po.matchFor ? RX.po.matchFor(c.p) : null; if(m && m.po && m.status !== "notpo"){ c.hold.nowOnPo = true; renderHold(c); RX.sound("decide"); } }catch(_){}
+});
 document.addEventListener("input", (e) => { const c = holdCtx(); if(c && e.target && e.target.id === "rxHoldTag") c.hold.tag = e.target.value; });
 RX.registerAct("hold-set", () => {
-  const c = holdCtx(); if(!c) return;
+  const c = holdCtx(); if(!c || c.hold.nowOnPo) return;
   const el = document.getElementById("rxHoldTag"); if(el) c.hold.tag = el.value;
   const tag = String(c.hold.tag || "").trim().slice(0, 60);
   c.commit({state: "staged", workflow: "staged", stagedArea: PA.HOLD_AREA + (tag ? " · " + tag : ""), recReasons: ["NOT_ON_PO"], flash: t("hold_flash")});
@@ -442,7 +457,7 @@ function recompute(d2, p){ d2.rank = REC.rank(simulate(PA.entryFor(p), d2.portio
 const itemOf = (p, d2) => ({sku: p.prod.sku, name: p.prod.name, cls: p.prod.cls, best: p.best, units: d2.pendingN || d2.left});
 
 function poLine(p, d2){
-  try{ const k = RX.po.classify(p, d2.total); if(!k) return ""; if(k.status === "notpo") return t("no_po_short");
+  try{ const k = RX.po.classify(p, d2.total); if(!k) return ""; if(k.status === "notpo") return t("no_po_short") + (RX.refreshJob ? " " + RX.refreshJob.staleLead() + " " + RX.refreshJob.ageText() : "");
     const key = k.status === "over" ? "over" : (k.status === "complete" ? "complete" : "makes");
     return t(key, {k: k.k, n: k.n, unit: k.unit, over: k.over}); }catch(_){ return ""; }
 }
