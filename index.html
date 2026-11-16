@@ -223,6 +223,7 @@
 <script src="rx/receive-po.js"></script>
 <script src="rx/start.js"></script>
 <script src="rx/po-drawer.js"></script>
+<script src="rx/dropoffs.js"></script>
 <script src="rx/recommend.js"></script>
 <script src="rx/putaway.js"></script>
 <script src="rx/staging.js"></script>
@@ -235,6 +236,7 @@
 <script src="rx/lotdate.js"></script>
 <script src="rx/datepick.js"></script>
 <script src="rx/photocap.js"></script>
+<script src="rx/refresh.js"></script>
 <script src="rx/feedback.js"></script>
 <script src="rx/offline.js"></script>
 <script>
@@ -666,16 +668,27 @@ async function loadCeilings(){
    never a catalog. */
 const CATALOG_CACHE_KEY = "catalog_cache_v1";
 let catalogState = {src:"none", at:0, err:""};
+/* ⭐ 2026-11-12 (review S3): what the catalog fetch itself says about WHICH catalog it got — the HTTP etag / last-modified (same origin, so
+   readable) and the byte length. "Refresh from Finale" (rx/refresh.js) compares the stamp of a fresh fetch with this one and says "Barcodes
+   updated" only when the fresh one is provably NEWER. null = the catalog in memory came from the saved copy: nothing to compare against. */
+let catalogStamp = null;
+function stampOf(r, text){
+  const h = (n) => { try{ return r.headers.get(n) || ""; }catch(_){ return ""; } };
+  return {etag: h("etag"), lm: h("last-modified"), len: text.length};
+}
 async function loadCatalog(){
   let lastErr = "";
   for(let i=0; i<2; i++){
     try{
       const r = await fetch("catalog.json", {cache: i ? "no-store" : "no-cache"});
       if(!r.ok) throw new Error("HTTP " + r.status);
-      const j = await r.json();
+      const text = await r.text();
+      const j = JSON.parse(text);
       if(!j || typeof j !== "object" || !Object.keys(j).length) throw new Error("empty product list");
       try{ localStorage.setItem(CATALOG_CACHE_KEY, JSON.stringify({at: Date.now(), cat: j})); }catch(_){}
       catalogState = {src:"live", at: Date.now(), err:""};
+      catalogStamp = stampOf(r, text);
+      try{ if(window.RX && RX.noteServerDate) RX.noteServerDate(r.headers.get("date")); }catch(_){}
       return j;
     }catch(e){ lastErr = e.message || String(e); await new Promise(res=>setTimeout(res, 500)); }
   }
@@ -683,6 +696,7 @@ async function loadCatalog(){
     const c = JSON.parse(localStorage.getItem(CATALOG_CACHE_KEY) || "null");
     if(c && c.cat && Object.keys(c.cat).length){
       catalogState = {src:"cached", at: c.at || 0, err: lastErr};
+      catalogStamp = null;                       // the saved copy has no stamp: "newer than it" cannot be proved
       return c.cat;
     }
   }catch(_){}
@@ -719,6 +733,31 @@ function renderCatalogState(){
     <strong>The product list did not load (${esc(catalogState.err)}), so scans cannot be matched.</strong>
     ⛔ Scanning is paused — every product would show as unknown.
     <button class="primary" id="catRetry" style="margin-left:8px">Load it again</button></div>`;
+}
+/* ⭐ 2026-11-12 (review S2/S5): the "Refresh from Finale" button's OWN read of the barcode list. ⛔ It changes NOTHING by itself: it does not
+   touch CATALOG, the saved copy, the banner or catalogState — a failed or hung read must leave the old list and the screen exactly as they were
+   (the old route went through retryCatalog → loadCatalog, whose failure path replaced the screen with "The product list did not load…
+   Scanning is paused" although the list in memory was intact). It has a time limit (`ms`) and ends in a thrown Error the caller words. */
+async function fetchCatalogOnce(ms){
+  const ac = new AbortController(), tm = setTimeout(() => ac.abort(), ms);
+  try{
+    const r = await fetch("catalog.json", {cache: "no-store", signal: ac.signal});
+    if(!r.ok) throw new Error("HTTP " + r.status);
+    const text = await r.text();
+    const j = JSON.parse(text);
+    if(!j || typeof j !== "object" || !Object.keys(j).length) throw new Error("empty product list");
+    return {cat: j, stamp: stampOf(r, text), date: r.headers.get("date")};
+  }finally{ clearTimeout(tm); }
+}
+/* the same adoption a successful retryCatalog does — only ever called with a catalog that passed fetchCatalogOnce */
+function adoptCatalog(res){
+  CATALOG = res.cat; rebuildSkuIndex(); lastCatalogFetch = Date.now();
+  try{ localStorage.setItem(CATALOG_CACHE_KEY, JSON.stringify({at: Date.now(), cat: res.cat})); }catch(_){}
+  catalogState = {src:"live", at: Date.now(), err:""};
+  catalogStamp = res.stamp;
+  try{ if(window.RX && RX.noteServerDate) RX.noteServerDate(res.date); }catch(_){}
+  renderCatalogState();
+  if(!pending && $("promptArea").querySelector("#catRetry")) clearPrompt();
 }
 async function retryCatalog(){
   const el = $("catalogArea"); if(el) el.innerHTML = `<div class="banner">Loading the product list…</div>`;
@@ -1031,9 +1070,9 @@ async function handleScan(raw){
   if(!prod && Date.now()-lastCatalogFetch > CATALOG_REFETCH_MS){
     lastCatalogFetch = Date.now();
     try{
-      const fresh = await (await fetch("catalog.json",{cache:"no-store"})).json();
+      const fr = await fetch("catalog.json",{cache:"no-store"}); const frText = await fr.text(); const fresh = JSON.parse(frText);
       if(fresh && Object.keys(fresh).length){
-        CATALOG = fresh; rebuildSkuIndex(); prod = look();
+        CATALOG = fresh; rebuildSkuIndex(); prod = look(); catalogStamp = stampOf(fr, frText);
         try{ localStorage.setItem(CATALOG_CACHE_KEY, JSON.stringify({at: Date.now(), cat: fresh})); }catch(_){}
         if(catalogState.src !== "live"){ catalogState = {src:"live", at: Date.now(), err:""}; renderCatalogState(); }
       }
