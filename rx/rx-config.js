@@ -49,7 +49,7 @@ const CFG = {
   PACK_REFRESH:   30*60*1000,       // silent refresh while the page is in use (applied only at an idle moment)
   /* ⭐ PM-3919 F (2026-11-11): "Refresh from Finale" — rx/refresh.js. The job contract is Procurement & Merchandising/routines/job-receiving-refresh-tablet-data.md
      ("Page contract"). Limits live HERE, never as literals (_shared/APP-PROGRESS-STATUS.md rule 3). */
-  REFRESH_INSTALLED:    false,      // ⛔ NEVER OFFER A CONTROL THAT CANNOT WORK (2026-11-12, review S7): the job kind `receiving.refresh_tablet_data` is STAGED on the mini until Jack signs
+  REFRESH_INSTALLED:    true,       // ⭐ ON 2026-11-17 (bundle 20261117-203728-f1c1 applied: kind installed, switch receiving-refresh pack+catalog ON). ⛔ NEVER OFFER A CONTROL THAT CANNOT WORK (2026-11-12, review S7): the job kind `receiving.refresh_tablet_data` is STAGED on the mini until Jack signs
                                     // the bundle; until then a pressed row is REFUSED within seconds and opens an error-board row. While false NO "Refresh from Finale" button or menu item is
                                     // drawn anywhere — the list-age line and the stale lead still show, with the plain "Refresh delivery list" re-read instead. To turn it on: set true
                                     // and deploy (a test/preview tablet can set localStorage rx_refresh_on = "1"). Same pattern as READER_INSTALLED in rx/photocap.js.
@@ -361,6 +361,7 @@ const COPY = {
   rf_cat_old:      "Barcodes did not change: {words}",
   rf_cat_notloaded:"The new barcodes did not load. {stays}",
   rf_partial:      "Only part of the refresh worked.",
+  rf_known:        "The office was told about this problem at {at} \u2014 no need to keep pressing Refresh.",
   list_built:      "The delivery list was built at {at} ({ago}).",
   list_none:       "No delivery list is loaded on this tablet.",
   list_unknown:    "The delivery list's build time is not known.",
