@@ -312,7 +312,7 @@ function render(){
   let box = el("rxFb");
   if(!S.open){ if(box) box.remove(); return; }
   if(!box){ box = document.createElement("div"); box.id = "rxFb"; box.setAttribute("role", "dialog"); box.setAttribute("aria-label", "Send feedback");
-    box.style.cssText = "position:fixed;right:max(12px,env(safe-area-inset-right,0px));bottom:calc(64px + env(safe-area-inset-bottom,0px));z-index:9990;"+
+    box.style.cssText = "position:fixed;right:max(12px,env(safe-area-inset-right,0px));bottom:calc(64px + env(safe-area-inset-bottom,0px));z-index:9999;"+
       "width:min(440px,calc(100vw - 24px));max-height:calc(100vh - 90px);overflow:auto;background:var(--ground,#fff);color:var(--ink,#222);"+
       "border:2px solid var(--ink,#222);border-radius:8px;padding:14px 16px;box-shadow:0 6px 24px rgba(0,0,0,.25);font-size:16px";
     document.body.appendChild(box); }
@@ -370,11 +370,14 @@ function close(){
   if(sc && !(pa && pa.innerHTML)) setTimeout(() => sc.focus(), 0);
 }
 
+/* ⛔ 2026-11-17 (Kaylyn, first live drop-off): the button and the panel sit ABOVE every .rx-overlay (z 9998 — the PO drawer,
+   problems, put-away sheets): below it a tap closed the drawer, the picture showed the wrong screen and the text box could not
+   be reached, so the cursor stayed in the scan box. Below the toast (10000) and the menu (10001). */
 function mount(){
   if(el("rxFbFab")) return;
   const f = document.createElement("button");
   f.type = "button"; f.id = "rxFbFab"; f.setAttribute("data-act", "fb-open"); f.setAttribute("aria-haspopup", "dialog");
-  f.style.cssText = "position:fixed;right:max(12px,env(safe-area-inset-right,0px));bottom:calc(12px + env(safe-area-inset-bottom,0px));z-index:9989;"+
+  f.style.cssText = "position:fixed;right:max(12px,env(safe-area-inset-right,0px));bottom:calc(12px + env(safe-area-inset-bottom,0px));z-index:9999;"+
     "min-height:48px;padding:10px 18px;border-radius:24px;border:2px solid var(--ink,#222);background:var(--ground,#fff);color:var(--ink,#222);"+
     "font-weight:700;box-shadow:0 3px 12px rgba(0,0,0,.2)";
   document.body.appendChild(f); paint();
