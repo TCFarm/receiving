@@ -54,7 +54,7 @@ const CFG = {
                                     // drawn anywhere — the list-age line and the stale lead still show, with the plain "Refresh delivery list" re-read instead. To turn it on: set true
                                     // and deploy (a test/preview tablet can set localStorage rx_refresh_on = "1"). Same pattern as READER_INSTALLED in rx/photocap.js.
   /* ⭐ PM5 (dropoff-planner, 2026-11-12): vendor drop-off POs — rx/dropoffs.js. "Lock now" posts job `receiving.vendor_po_lock_now`. */
-  LOCKNOW_INSTALLED:    false,      // ⛔ NEVER OFFER A CONTROL THAT CANNOT WORK: the job kind is STAGED until the lead's signed bundle installs it on the mini; while false
+  LOCKNOW_INSTALLED:    true,       // ON 2026-11-17 (Jack: "get the switch on so it fully works"; mini switch receiving-dropoffs pack+post ON, bundle 20261117-110736-3776; job kind receiving.vendor_po_lock_now installed). ⛔ NEVER OFFER A CONTROL THAT CANNOT WORK: the job kind is STAGED until the lead's signed bundle installs it on the mini; while false
                                     // a not-ready drop-off says "ask purchasing to lock it" and has NO button. A test tablet can set localStorage rx_locknow_on = "1".
   LOCK_POLL_MS:         3*1000,     // read the lock job row this often
   LOCK_PICKUP_MS:       60*1000,    // the Mac mini must pick the lock job up within this
