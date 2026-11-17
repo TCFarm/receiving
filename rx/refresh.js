@@ -267,8 +267,15 @@ async function finish(gen, row, res){
     if(found) lines.push(t(found.applied ? "rf_pack_found" : "rf_pack_found_queued", {at: hm12(found.at)}));
     return end("warn", lines, {again: true, details: det});
   }
+  /* PM-4032 review (2026-11-17): the mini emails the office ONCE per problem; a later press says so, so nobody keeps pressing */
+  const known = Array.isArray(res.already_reported) && res.already_reported.length > 0;
+  /* review 2026-11-17 #6: say WHEN the office was told, so an old problem is not read as "all handled" */
+  const knownAt = () => { const ts = Object.values(res.incident_since || {}).map(x => Date.parse(x)).filter(x => !isNaN(x));
+    return ts.length ? hm12(Math.min(...ts)) : "?"; };
   if(res.state === "failed" || (res.state !== "done" && res.state !== "partial")){
-    return end("bad", [String(res.message || t("rf_failed", {stays: ""})).trim(), stays()], {again: true, details: det});
+    const fl = [String(res.message || t("rf_failed", {stays: ""})).trim(), stays()];
+    if(known) fl.push(t("rf_known", {at: knownAt()}));
+    return end("bad", fl, {again: true, details: det});
   }
   const pk = res.pack || {}, ct = res.catalog || {};
   const lines = []; let reload = false, bad = res.state === "partial";
@@ -293,6 +300,7 @@ async function finish(gen, row, res){
     else{ lines.push(t("rf_cat_notloaded", {stays: stays()})); bad = true; }
   }else lines.push(half(ct, "rf_cat_old"));
   if(res.state === "partial") lines.unshift(t("rf_partial"));
+  if(known) lines.push(t("rf_known", {at: knownAt()}));
   const goodHalf = (s) => ["built", "fresh", "published", "unchanged"].includes(s);
   const tone = goodHalf(pk.status) && goodHalf(ct.status) && !bad ? "ok" : (goodHalf(pk.status) || goodHalf(ct.status) ? "warn" : "bad");
   end(tone, lines, {again: tone !== "ok", reload, details: det});
