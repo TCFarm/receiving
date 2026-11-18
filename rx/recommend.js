@@ -72,8 +72,10 @@ const REASON = {
   INCOMING_OLDEST: () => "This case is older than everything on hand — it goes on the shelf, in front.",
   FEFO_BLOCK: (x) => "Older dates are in backstock (" + shortDate(x.date) + ") — put this behind them.",
   PICK_EMPTY: () => "Pick shelf is empty — fill it.",
-  PICK_LOW: (x) => "Shelf is running low (" + fmtDays(x.cover) + " left) — fill it.",
-  PICK_STOCKED: (x) => "Shelf has " + fmtDays(x.cover) + " already — goes to backstock.",
+  /* 2026-11-18 (Jake, floor): "9 days already" read as best-by days. The number is days of STOCK (shelf units / daily sales), so say so.
+     No sales rate on record (cover null) used to print "Shelf has  already": it now says the shelf has stock, with no number. */
+  PICK_LOW: (x) => "Shelf is running low (" + fmtDays(x.cover) + " of stock left) — fill it.",
+  PICK_STOCKED: (x) => fmtDays(x.cover) ? "Shelf has " + fmtDays(x.cover) + " of stock already — goes to backstock." : "Shelf already has stock — goes to backstock.",
   ONLY_PICK: () => "The pick shelf is the only place on record for this item.",
   ONLY_BACKSTOCK: () => "No pick shelf on record — backstock is the place.",
   LAST_PUT_AWAY: (x) => "This is where it was last put away" + (x.date ? " (" + shortDate(x.date) + ")." : "."),
