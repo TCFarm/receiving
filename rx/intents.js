@@ -49,10 +49,10 @@
 const RX = window.RX; if(!RX) return;
 const CFG = RX.CFG, I = RX.intents, t = RX.t;
 
-RX.INTENT_FIELDS = ["IntentId","Kind","State","PageMode","ScanDay","ScanAt","ReadyAt","Po","PoPinned","Sku","Upc","Gtin14","Units","Cases","CaseQty","QtyKind","BestBy","Lot","Location","BinSource","Workflow","StagedArea","RecommendedBin","RecReasons","SplitOf","TempConfirmed","FefoOverride","ShortDated","CancelTooLate","OverConfirmed","DamagedUnits","RejectedUnits","RawScans","PhotoUrls","Operator","Device","BbItemId","PlacedBy","FixUnits","FixBin","FixNote"];
+RX.INTENT_FIELDS = ["IntentId","Kind","State","PageMode","ScanDay","ScanAt","ReadyAt","Po","PoPinned","Sku","Upc","Gtin14","Units","Cases","CaseQty","QtyKind","BestBy","Lot","Location","BinSource","Workflow","StagedArea","RecommendedBin","RecReasons","SplitOf","TempConfirmed","FefoOverride","ShortDated","CancelTooLate","OverConfirmed","DamagedUnits","RejectedUnits","RawScans","PhotoUrls","Operator","Device","BbItemId","PlacedBy","FixUnits","FixBin","FixNote","CountBasis","OutsideSeen","DeliveryTotal"];
 RX.INTENT_CHOICES = {"Kind":["intent","fix","short","move"],"State":["staged","ready","skipped","cancelled"],"PageMode":["off","shadow","live"],"QtyKind":["full","part"],"BinSource":["scanned","typed","armed"],"Workflow":["direct","staged"]};
 const FIN_FIELDS = ["FinState","FinReason","FinPo","FinShipment","FinBatch","FinAt","FinUnitsPosted","FinUnitsHeld","FinUnitsWould"];
-const NUM = new Set(["Units","Cases","CaseQty","DamagedUnits","RejectedUnits","FixUnits"]);
+const NUM = new Set(["Units","Cases","CaseQty","DamagedUnits","RejectedUnits","FixUnits","OutsideSeen","DeliveryTotal"]);
 const BOOL = new Set(["TempConfirmed","FefoOverride","ShortDated","CancelTooLate","OverConfirmed","PoPinned"]);
 const CORE_COLS = ["IntentId","State","PageMode","ScanDay","Sku","Units"];
 const KEY = "rx_intents_v1";
@@ -285,6 +285,10 @@ I.baseFields = function(row, f, flow){
        "what's wrong" (FixNote is a text column; on an intent row it carries this note, Julia's credit tab reads it). */
     PhotoUrls: (Array.isArray(f.photoUrls) && f.photoUrls.length) ? JSON.stringify(f.photoUrls) : "",
     FixNote: f.fixNote ? String(f.fixNote).slice(0, 250) : "",
+    /* PM-4236: the crew's answer to "N were already received in Finale — total, or more?" (the poster checks N still holds) */
+    CountBasis: (f.countBasis === "total" || f.countBasis === "more") ? f.countBasis : "",
+    OutsideSeen: (f.countBasis && typeof f.outsideSeen === "number") ? f.outsideSeen : null,
+    DeliveryTotal: (f.countBasis && typeof f.deliveryTotal === "number") ? f.deliveryTotal : null,
     RawScans: JSON.stringify(RX.state.scanLog.slice()),
     Operator: op, Device: deviceId(), BbItemId: row.id || "",
     PlacedBy: state === "ready" ? op : "",
