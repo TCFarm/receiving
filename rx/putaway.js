@@ -627,7 +627,9 @@ function startShelf(ctx, opts){
   const p = ctx.p, rxs = p.rx;
   if(!RX.pack.data){ ctx.cancel({flash: t("nopack_flash")}); return; }
   const total = +p.qty || 0;
-  const d2 = rxs.d2 = rxs.d2 || {total, left: total, units0: total, cases: 1, portions: [], sub: "main", notice: "", pendingN: null, cand: null, late: !!opts.late, first: opts.first || null, restUnits: 0};
+  /* PM-4236 review #7: after "N units is the total" p.qty is the units NOT yet in Finale; "add another case" adds a whole case */
+  const units0 = (rxs && rxs.askOrig != null) ? (+rxs.askOrig || total) : total;
+  const d2 = rxs.d2 = rxs.d2 || {total, left: total, units0, cases: 1, portions: [], sub: "main", notice: "", pendingN: null, cand: null, late: !!opts.late, first: opts.first || null, restUnits: 0};
   PA.cur = {ctx, d2}; PA.moreOpen = false;
   recompute(d2, p);
   if(d2.flags === undefined) d2.flags = d2.late ? [] : PA.flagsFor(d2.rank);          // PM-3919: from the state BEFORE any portion was placed
