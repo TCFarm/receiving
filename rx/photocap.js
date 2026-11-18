@@ -194,7 +194,10 @@ async function read(){
     }
     c.stage = "Sending to the reader…"; c.prog = 55; paint();
     const p = c.pendingRef;
-    const meta = {mode: (typeof isAudit === "function" && isAudit()) ? "audit" : "receive", today: new Date().toISOString().slice(0, 10),
+    /* PM-4061 (2026-11-17): the DAY on this tablet, never UTC's — toISOString() read tomorrow every evening Central */
+    const localToday = () => { try{ if(window.RX && RX.today) return RX.today(); }catch(_){}
+      const d = new Date(); return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); };
+    const meta = {mode: (typeof isAudit === "function" && isAudit()) ? "audit" : "receive", today: localToday(),
                   sku_hint: (p && p.prod && p.prod.sku && !String(p.prod.sku).startsWith("!")) ? p.prod.sku : null, po_lines: [],
                   by: (typeof account === "string" && account) || ""};
     const rowId = await T.enqueue(myId, {v: 1, id: myId, files, meta});
