@@ -369,7 +369,8 @@ RX.abandon = function(opts){
   if(!(opts && opts.keep)) RX.emit("abandon", p0);          // round 4: the item is dropped — rx/photos.js discards its damage photos
 };
 const STEP_KEYS = ["state","bin","binSource","workflow","stagedArea","recommendedBin","recReasons","splitOf","tempConfirmed","fefoOverride",
-                   "shortDated","rejected","extra","overConfirmed","units","flash","noIntent","photoUrls","fixNote"];
+                   "shortDated","rejected","extra","overConfirmed","units","flash","noIntent","photoUrls","fixNote",
+                   "countBasis","outsideSeen","deliveryTotal"];
 RX.backToQty = function(){
   const p = pendingNow(); if(!p) return false;
   RX.abandon({keep:true});
