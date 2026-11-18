@@ -338,8 +338,20 @@ RX.registerStep("overship", {
   },
   start(ctx){
     const o = ctx.p.rx.over || PO.overCap(ctx.p, num(ctx.p.qty)); if(!o){ ctx.done({}); return; }
+    /* ⭐ PM-4236 (Jack 2026-11-17): units already received OUTSIDE the tablet (the Finale app) on this line ⇒ ask "total, or more?" */
+    const N = outsideOf(o.match);
+    if(N > 0){
+      const key = String(o.match.po.order_id) + "|" + ctx.p.prod.sku;
+      /* asked once per line: a case after a "more" answer (any tablet, read from the intents) is another case; after "total" it asks again */
+      if(answeredMore(o.match.po.order_id, ctx.p.prod.sku)){ ctx.done({overConfirmed: true, countBasis: "more", outsideSeen: N}); return; }
+      const T = o.n - N, q = num(ctx.p.qty);
+      ctx.p.rx.ask = {N, T, prior: T - q, key, item: ctx.p.prod.name};
+      askTotalOrMore(ctx);
+      return;
+    }
     const n = fmt(o.n), m = fmt(o.cap);
-    const body = `<span class="rx-pa-sub">${RX.esc(t(o.basis === "shipped" ? "overship_body" : "overship_body_ordered", {n, m}))}</span>` + PO.chipHtml(ctx.p);   // review: name the PO here too
+    const body = `<span class="rx-pa-sub">${RX.esc(t(o.basis === "shipped" ? "overship_body" : "overship_body_ordered", {n, m}))}</span>` +
+      (N === null ? `<div class="hint" data-outside-unknown>${RX.esc(t("overship_unknown"))}</div>` : "") + PO.chipHtml(ctx.p);   // review: name the PO here too
     prompt_("stop", RX.esc(t("overship_title", {n, item: ctx.p.prod.name})), body,
       `<div class="rx-pa-btns"><button type="button" class="rx-btn primary" data-act="over-yes" data-primary>${RX.esc(t("overship_yes", {n}))}</button>` +
       `<button type="button" class="rx-btn" data-act="over-fix" data-close="3">${RX.esc(t("overship_fix"))}</button></div>`);
@@ -351,6 +363,105 @@ RX.registerStep("overship", {
 const overCtx = () => { const s = RX.state.step; return s && s.name === "overship" ? s.ctx : null; };
 RX.registerAct("over-yes", () => { const c = overCtx(); if(c) c.done({overConfirmed: true}); });
 RX.registerAct("over-fix", () => { if(overCtx()) RX.backToQty(); });
+
+/* ───────────────────────── PM-4236: "N were already received in Finale — total, or more?" ─────────────────────────
+   Jack, 2026-11-17: "There were already 4 received in finale. Which do you mean, 12 or 16 in total? … take their answer as they describe
+   it". The pack's `outside_units` = Finale received − the poster's own receipts (lib/receiving_pack.py). T = what the tablet counts on this
+   line (with this case), prior = T − this case. An answer becomes the units to post: total Tot ⇒ Tot − N − prior; "more" ⇒ this case.
+   ⛔ A total below N + prior cannot be (Finale already holds more) — it is explained and corrected, never silently refused (Jack, answer 3).
+   The poster posts these units only while Finale still shows N outside the tablet (lib/receiving_post.py, CountBasis). */
+/* review 2026-11-17 #2/#3: the memory is the INTENTS themselves (this tablet's and every other tablet's), never a tablet-local note that
+   survives a "Back to the count" — an intent of this PO line that answered "more" means later cases are more cases */
+function answeredMore(po, sku){
+  for(const v of allIntents()){
+    const f = v.fields || {};
+    if(f.Kind !== "intent" || f.Sku !== sku || String(f.Po || "") !== String(po)) continue;
+    if(f.State === "cancelled" || f.State === "skipped") continue;
+    if(v.fin && (v.fin.FinState === "held" || v.fin.FinState === "refused")) continue;   // review #2: a held answer is asked again
+    if(f.CountBasis === "more") return true;
+  }
+  return false;
+}
+/* review #2: "Back to the count" after an answer shows the number the crew COUNTED, not the units worked out from it */
+const _backToQty = RX.backToQty;
+RX.backToQty = function(){
+  try{ const p = pending; if(p && p.rx && p.rx.askOrig != null){ p.qty = p.rx.askOrig; delete p.rx.askOrig; } if(p && p.rx) delete p.rx.ask; }catch(_){}
+  return _backToQty.apply(this, arguments);
+};
+const outsideOf = (m) => (m && m.line && typeof m.line.outside_units === "number" && isFinite(m.line.outside_units)) ? Math.max(0, m.line.outside_units) : null;
+const askOf = () => { const c = overCtx(); return c && c.p && c.p.rx && c.p.rx.ask ? c : null; };
+function askTotalOrMore(ctx){
+  const a = ctx.p.rx.ask, T = fmt(a.T), all = fmt(a.T + a.N), n = fmt(a.N);
+  prompt_("stop", RX.esc(t(a.N === 1 ? "overout_title1" : "overout_title", {n, item: a.item})),
+    `<span class="rx-pa-sub">${RX.esc(t("overout_body", {t: T, all}))}</span>` + PO.chipHtml(ctx.p),
+    `<div class="rx-pa-btns"><button type="button" class="rx-btn primary" data-act="over-total" data-primary>${RX.esc(t("overout_total", {t: T}))}</button>` +
+    `<button type="button" class="rx-btn primary" data-act="over-more">${RX.esc(t("overout_more", {t: T, all}))}</button></div>` +
+    `<div class="rx-pa-btns"><button type="button" class="rx-btn" data-act="over-other">${RX.esc(t("overout_other"))}</button>` +
+    `<button type="button" class="rx-btn" data-act="over-fix" data-close="3">${RX.esc(t("overship_fix"))}</button></div>`);
+  RX.sound("decide");
+  setTimeout(() => { const b = document.querySelector("#promptArea [data-primary]"); if(b) b.focus(); }, 30);
+}
+function askTotal(ctx, lead){
+  const a = ctx.p.rx.ask, n = fmt(a.N), esc = RX.esc;
+  const prior = a.prior > 0 ? t("overtot_prior", {p: fmt(a.prior)}) : "";
+  a.bigOk = null;
+  prompt_("stop", esc(t("overtot_title")),
+    (lead ? `<div class="rx-note rx-amber" role="alert">${esc(lead)}</div>` : "") +
+    `<span class="rx-pa-sub">${esc(t(a.N === 1 ? "overtot_body1" : "overtot_body", {n, item: a.item, prior}))}</span>` +
+    `<label for="rxOverTotal" class="rx-pa-sub" style="display:block;margin-top:8px">${esc(t("overtot_label"))}</label>` +
+    `<input id="rxOverTotal" type="number" inputmode="numeric" min="0" step="1" value="${esc(fmt(a.T + a.N))}" style="font-size:22px;padding:10px;width:9em">` +
+    `<div id="rxOverMsg" role="status" class="hint" style="min-height:1.2em"></div>`,
+    `<div class="rx-pa-btns"><button type="button" class="rx-btn primary" data-act="over-total-save" data-primary>${esc(t("overtot_save"))}</button>` +
+    `<button type="button" class="rx-btn" data-act="over-fix" data-close="3">${esc(t("overship_fix"))}</button></div>`);
+  RX.sound("decide");
+  setTimeout(() => { const i = document.getElementById("rxOverTotal"); if(!i) return; i.focus(); i.select();
+    /* review #1: a hand scanner fired into this box types a barcode at scanner speed and ends in Enter — it is not a total */
+    let run = null;
+    i.addEventListener("keydown", (e) => {
+      const now = performance.now(), printable = typeof e.key === "string" && e.key.length === 1;
+      if(printable){ run = (run && now - run.last <= 40) ? {n: run.n + 1, last: now} : {n: 1, last: now}; return; }
+      if(e.key !== "Enter") { run = null; return; }
+      e.preventDefault();
+      if(run && run.n >= 5 && now - run.last <= 150){
+        run = null; i.value = fmt(a.T + a.N); i.select();
+        const m = document.getElementById("rxOverMsg"); if(m){ m.textContent = t("overtot_scan"); m.className = "hint rx-red"; }
+        return;
+      }
+      run = null;
+      const b = document.querySelector('[data-act="over-total-save"]'); if(b) b.click();
+    }); }, 30);
+}
+/* Tot = the delivery's total as the crew states it (including the N already in Finale) */
+function finishTotal(ctx, Tot, basis){
+  const a = ctx.p.rx.ask;
+  const units = Tot - a.N - a.prior;
+  if(units < 0) return false;
+  if(units === 0){ ctx.done({noIntent: true, flash: t("overtot_none", {n: fmt(a.N)})}); return true; }
+  /* the item's quantity BECOMES the units not yet in Finale: the shelf step and the intent both read p.qty (a step's `units` would be
+     overwritten by the put-away portions) */
+  if(ctx.p.rx.askOrig == null) ctx.p.rx.askOrig = ctx.p.qty;
+  ctx.p.qty = units; ctx.p.qtyKind = "part";
+  ctx.done({overConfirmed: true, countBasis: "total", outsideSeen: a.N, deliveryTotal: Tot});
+  return true;
+}
+RX.registerAct("over-more", () => { const c = askOf(); if(!c) return; const a = c.p.rx.ask;
+  c.done({overConfirmed: true, countBasis: "more", outsideSeen: a.N, deliveryTotal: a.T + a.N}); });
+RX.registerAct("over-total", () => { const c = askOf(); if(!c) return; const a = c.p.rx.ask;
+  if(!finishTotal(c, a.T, "total")) askTotal(c, t("overtot_conflict", {t: fmt(a.T), n: fmt(a.N)})); });
+RX.registerAct("over-other", () => { const c = askOf(); if(c) askTotal(c, ""); });
+RX.registerAct("over-total-save", () => {
+  const c = askOf(); if(!c) return; const a = c.p.rx.ask;
+  const el = document.getElementById("rxOverTotal"), msg = document.getElementById("rxOverMsg");
+  const raw = ((el && el.value) || "").trim(), v = Number(raw);
+  const say = (s) => { if(msg){ msg.textContent = s; msg.className = "hint rx-red"; } };
+  if(!/^\d+$/.test(raw) || !isFinite(v)) return say(t("overtot_bad"));
+  const min = a.N + a.prior;
+  if(v < min) return say(t("overtot_low", {min: fmt(min), n: fmt(a.N), prior: a.prior > 0 ? t("overtot_prior", {p: fmt(a.prior)}) : ""}));
+  /* review #1: far more than the crew counted (derived from their own count, never a fixed cap — hard boundary 6) asks once more */
+  const counted = a.T + a.N;
+  if(v > 2 * counted && a.bigOk !== v){ a.bigOk = v; return say(t("overtot_big", {v: fmt(v), c: fmt(counted)})); }
+  finishTotal(c, v, "total");
+});
 
 /* ───────────────────────── the qty card ───────────────────────── */
 function typedQty(){ const el = document.getElementById("qty"); const n = parseInt(((el && el.value) || "").trim(), 10); return isNaN(n) ? 0 : n; }
