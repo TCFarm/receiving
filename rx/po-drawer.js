@@ -29,6 +29,8 @@ const COPY_ADD = {
   po_missing_n:  "{n} missing",
   po_all_in:     "all received",
   po_sum_top:    "{p} POs open · {n} lines still missing",
+  po_kitchen:    "kitchen {n}",
+  po_kitchen_unk:"kitchen ?",
   po_sum_one:    "1 PO open · {n} lines still missing",
   po_sum_none:   "Everything on the open POs is received.",
   po_sec_miss:   "Missing or holding the truck",
@@ -36,6 +38,11 @@ const COPY_ADD = {
   po_toggle_hint:"Tap a PO to open its lines",
 };
 for(const k of Object.keys(COPY_ADD)) if(!(k in RX.COPY)) RX.COPY[k] = COPY_ADD[k];
+/* ⭐ KITCHEN ORDERING D20 (2026-11-24): a line the kitchen has a share of is LABELLED, so the kitchen's units are never read as a customer short.
+   The share comes from the pack (`line.kitchen`, lib/kitchen_receiving.py); absent when the switch is OFF = no chip. Unknown says so. */
+const kitchenChip = (line) => { const k = line && line.kitchen; if(!k || typeof k !== "object") return "";
+  if(k.unknown) return `<span class="rx-chip rx-kitchen" data-kitchen="unknown">${RX.esc(RX.t("po_kitchen_unk"))}</span>`;
+  return +k.qty_units > 0 ? `<span class="rx-chip rx-kitchen" data-kitchen="${RX.esc(String(k.qty_units))}">${RX.esc(RX.t("po_kitchen", {n: k.qty_units}))}</span>` : ""; };
 /* what holds a truck up, most urgent first: a line with a problem or an over-receipt (7 of 6) -> not started -> partly in -> told short -> done */
 const lineRank = (s) => (s.problems > 0 || s.buyer > 0) ? 0 : s.state === "over" ? 0 : s.state === "notstarted" ? 1 : s.state === "partial" ? 2 : s.state === "short" ? 3 : 4;
 const outstanding = (s) => Math.max(0, (Number(s.n) || 0) - (Number(s.k) || 0));
@@ -199,7 +206,7 @@ function poHtml(){
       const key = x.po.order_id+"|"+line.sku, open = !!H.expanded[key] || (H.poFilter === "problems" && H.expanded[key] !== false);
       body += `<div class="rx-line rx-${s.state}"><button class="rx-linebtn" data-act="po-line" data-key="${esc(key)}" aria-expanded="${open}">
         <span class="rx-lname">${esc(name)}${RX.idLine(line.sku)}</span><span class="rx-lqty num">${esc(t("po_line_of", {k:s.k, n:s.n, unit:s.unit}))}</span>
-        <span class="rx-lshelf">${esc(s.shelves.join(", "))}</span>${s.problems ? `<span class="rx-chip rx-red">${s.problems}</span>` : ""}${RX.short ? RX.short.tag(x.po, line) : ""}</button>`;
+        <span class="rx-lshelf">${esc(s.shelves.join(", "))}</span>${s.problems ? `<span class="rx-chip rx-red">${s.problems}</span>` : ""}${kitchenChip(line)}${RX.short ? RX.short.tag(x.po, line) : ""}</button>`;
       /* ⭐ 2026-10-23: "we never got it" lives on the line (rx/short.js) — above its scans, so a line with NO scans still has it */
       if(open) body += `<div class="rx-scans">` + (RX.short ? RX.short.html(x.po, line) : "") + (s.scans.length ? s.scans.map(c => scanLine(c)).join("") : `<div class="hint">No scans yet.</div>`) + `</div>`;
       body += `</div>`;
