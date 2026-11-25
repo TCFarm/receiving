@@ -3,27 +3,36 @@
 
    Jack, 2026-10-28: "It should be floating on their screen, maybe in the bottom right … so there's a way for them to dictate feedback on
    things that aren't working directly" and "Add the portal's feedback button to the receiving page."
+   Jack, 2026-11-25: "turn off the feedback's post to the tech channel in teams — now that we can see them online, we don't want them
+   posted in Teams."
 
-   ⭐ ONE PIPELINE. This is the staff portal's button (staff-app public/shell/feedback.js + dictate.js) brought to this page, writing the
-   SAME job rows, so a report lands exactly where a portal report does: the mini's `staffapp.feedback` handler posts a Teams card and adds
-   ONE ledger row to the module's owner (`receiving` → Procurement & Merchandising, IT-Provisioning/Staff Portal/modules.json).
-   ⭐ Everything goes through the ClaudeAgents site with the page's own sign-in (Sites.ReadWrite.All), never OneDrive:
-     • the screenshot → StaffApp/feedback/<FB-id>/screenshot.png on the site drive;
-     • the report     → an AgentJobs row, kind `staffapp.feedback`, Subject = the FB id, the meta in its Payload column;
-     • a voice note   → StaffApp/audio/<AUD-id>/audio.webm + a `staffapp.transcribe` row; the text comes back in the row's Result
-                        and lands in the box, editable. The mini deletes the audio once transcribed (Jack's app-wide ruling).
-   ⛔ SENT ONCE. The FB id is made when Send is pressed and kept with the report until a row for it exists; a retry first looks the
-      row up by Title, so a reply lost on the warehouse wifi never makes a second card.
+   ⭐ ONE PIPELINE, THE PORTAL'S. Since 2026-11-25 this button submits to the AWS feedback service, exactly as the staff portal's button
+   does (IT-Provisioning/plans/2026-11-11-feedback-autobuild-CONTRACT.md §3.3): the note lands on the online board (Ideas & fixes, My
+   feedback) as module `receiving`, and NOTHING is posted to Teams and no AgentJobs row is written (the old `staffapp.feedback` /
+   `staffapp.transcribe` kinds are no longer used by this page). The tablet keeps its own panel, offline outbox and scan guards; only
+   the wire changed:
+     • where to call: https://internal.mnfood.club/shell/config.json → feedback.api + access.scope (read once per page, CORS *);
+     • the token: the page's own sign-in (CFG.clientId, refresh token) asked for the TC Farm Staff API scope (api://…/data). ⛔ That
+       needs the "TC Farm Receiving" Entra app to be allowed on that API (admin consent) — until it is, a note is KEPT on the tablet
+       (AADSTS65001 → "no_api_access") and goes by itself once it is. See PM-3305 / Staff Portal FEEDBACK.md;
+     • the picture: POST /v1/uploads {client_request_id, content_type, size} → PUT the PNG to the presigned url → its upload_id;
+     • the report: POST /v1/items {client_request_id, type, text, dictated, priority, private, module:"receiving", context,
+       screenshot_upload_id}. The FB id IS the client_request_id, so a retry of the same report is replayed by the service, never a
+       second item (U-22);
+     • a voice note: raw audio (≤ ~50 s pieces) POSTed to /v1/dictate; the text comes back at once and lands in the box, editable.
+       Audio is never stored (service rule). A note recorded with no connection waits in IndexedDB and is transcribed + sent later.
+   ⛔ SENT ONCE. The FB id is made when Send is pressed and kept with the report; a retry first looks it up (GET /v1/requests/<id>).
    ⛔ NOTHING IS LOST OFFLINE. An unsent report waits on this tablet (localStorage) and is retried every minute; the button says so.
-   API: window.RXFeedback = { open, close, state, _flush, _setTransport } */
+      A report the service REFUSES for good (too long, unknown screen …) is not kept: its words stay in the box with the reason.
+   Defaults the portal asks the person for, fixed here (Jack's tablet UX is one tap): priority "helps", private=false (on the board).
+   API: window.RXFeedback = { open, close, state, _flush, _transcribe, _setTransport, _context } */
 (function(){
 "use strict";
-const SITE = "tcfarm0.sharepoint.com:/sites/ClaudeAgents", LIST = "AgentJobs";
+const PORTAL_CFG = "https://internal.mnfood.club/shell/config.json", MODULE = "receiving", MAX_TEXT = 3400;
 const KEY_Q = "rx_fb_outbox_v1", KEY_SENT = "rx_fb_sent_v1", KEY_DRAFT = "rx_fb_draft_v1", KEY_V = "rx_fb_voice_v1";
-const POLL_MS = 4000, TRANSCRIBE_MS = 180000, MAX_SEC = 120, RETRY_MS = 60000;
+const MAX_SEC = 120, PIECE_SEC = 50, RETRY_MS = 60000;
 const S = { open: false, type: "bug", text: "", shot: true, busy: false, msg: "", kind: "", rec: null, sec: 0, timer: null,
-            dict: "", siteId: null, listId: null, outbox: [], sent: [] };
-const GRAPH = "https://graph.microsoft.com/v1.0";
+            dict: "", dictated: false, cfg: null, tk: null, outbox: [], sent: [] };
 const el = (id) => document.getElementById(id);
 const e_ = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const ls = { get(k, d){ try{ const v = JSON.parse(localStorage.getItem(k) || "null"); return v == null ? d : v; }catch(_){ return d; } },
@@ -31,7 +40,7 @@ const ls = { get(k, d){ try{ const v = JSON.parse(localStorage.getItem(k) || "nu
 S.outbox = (ls.get(KEY_Q, []) || []).filter(x => x && x.id && x.meta);
 S.sent = (ls.get(KEY_SENT, []) || []).filter(x => x && x.id).slice(0, 8);
 S.text = String(ls.get(KEY_DRAFT, "") || "");                         // misuse review 10: a draft survives a reload
-S.voice = (ls.get(KEY_V, []) || []).filter(x => x && x.aid && x.key);   // PM-3307: voice notes recorded with no connection
+S.voice = (ls.get(KEY_V, []) || []).filter(x => x && x.aid && (x.key || x.keys));   // PM-3307: voice notes recorded with no connection
 
 /* ── PM-3307 (Jack, 2026-10-28: "The voice notes should be able to be recorded offline"): recordings and screenshots wait in this
    tablet's IndexedDB (localStorage cannot hold a blob). ⛔ Unavailable IndexedDB (a private window) only means they cannot wait — said. */
@@ -49,67 +58,101 @@ function newId(prefix){
   return prefix + "-" + d.getUTCFullYear() + pad(d.getUTCMonth()+1) + pad(d.getUTCDate()) + "T" + pad(d.getUTCHours()) + pad(d.getUTCMinutes()) + pad(d.getUTCSeconds()) + "-" + r;
 }
 
-/* ── the transport: the page's own Graph sign-in (tests replace it) ── */
-async function tok(){ if(typeof getToken !== "function") throw new Error("not signed in"); return getToken(); }
-async function gfetch(url, opts){ const t = await tok(); const o = opts || {};
-  const ac = new AbortController(), tm = setTimeout(() => ac.abort(), 20000);          // review 10: a hung request ends
-  try{ return await fetch(url, Object.assign({}, o, {signal: ac.signal, headers: Object.assign({}, o.headers || {}, {Authorization: "Bearer " + t})})); }
-  finally{ clearTimeout(tm); } }
-async function failOf(r, what){ let m = ""; try{ const j = await r.json(); m = (j && j.error && j.error.message) || ""; }catch(_){}
-  const e = new Error((m || ("HTTP " + r.status)) + " (" + what + ")"); e.status = r.status; throw e; }
+/* ── the transport: the AWS feedback service, with the page's own sign-in (tests replace T) ── */
+const WORDS = {
+  unauthorized: "Sign in again on this tablet.",
+  no_api_access: "This tablet's sign-in is not set up for Feedback yet (IT has to allow it once).",
+  not_configured: "The feedback service is not reachable from this page yet.",
+  upstream: "The feedback service had a problem or there is no connection.",
+  busy: "The service is busy. Try again in a minute.",
+  bad_request: "That was not accepted. Tell a developer.",
+  too_long: "Please keep it under {n} characters.", too_short: "Say a few words so the others understand.",
+  too_large: "That file is too large.", unknown_module: "The Receiving screen is not on the feedback list yet. Tell a developer.",
+  no_staff_identity: "Sign in with your TC Farm account.", forbidden: "That is not allowed from this account. Sign in with your TC Farm account.",
+  daily_limit: "You have reached today's limit. It resets at midnight.", dictation_failed: "That recording did not turn into text.",
+  storage_error: "The feedback service had a problem.", idempotency_mismatch: "That was not accepted. Tell a developer."
+};
+const FOR_GOOD = {bad_request: 1, too_long: 1, too_short: 1, unknown_module: 1, no_staff_identity: 1, forbidden: 1, idempotency_mismatch: 1, too_large: 1, dictation_failed: 1};
+function oops(status, code, reason, retry){ const e = new Error(reason); e.status = status; e.code = code; e.reason = reason; e.retry = retry; return e; }
+function failOf(status, j){
+  const b = (j && typeof j === "object") ? j : {};
+  const code = (typeof b.error === "string" && WORDS[b.error]) ? b.error
+    : status === 401 ? "unauthorized" : status === 429 ? "busy" : status === 413 ? "too_large" : status === 403 ? "forbidden" : status >= 500 ? "upstream" : "bad_request";
+  const reason = WORDS[code].replace(/\{(\w+)\}/g, (m, k) => (b[k] != null ? String(b[k]) : ""));
+  return oops(status, code, reason, !FOR_GOOD[code]);
+}
+async function fetchTo(url, o, ms){
+  const ac = new AbortController(), tm = setTimeout(() => ac.abort(), ms);       // a hung request ends
+  try{ return await fetch(url, Object.assign({}, o, {signal: ac.signal})); } finally{ clearTimeout(tm); }
+}
+async function cfg(){
+  if(S.cfg) return S.cfg;
+  let r; try{ r = await fetchTo(PORTAL_CFG, {cache: "no-store", credentials: "omit"}, 15000); }catch(_){ throw oops(0, "upstream", WORDS.upstream, true); }
+  if(!r.ok) throw oops(r.status, "not_configured", WORDS.not_configured, true);
+  let j = null; try{ j = await r.json(); }catch(_){}
+  const f = (j && j.feedback) || {}, api = String(f.api || "").replace(/\/$/, ""), scope = j && j.access && j.access.scope;
+  if(f.backend !== "aws" || !/^https:\/\/[A-Za-z0-9.-]+$/.test(api) || typeof scope !== "string" || scope.indexOf("api://") !== 0)
+    throw oops(0, "not_configured", WORDS.not_configured, true);
+  return (S.cfg = {api, scope});
+}
+/* the Staff API token from the SAME refresh token as the page's Graph sign-in (a refresh token is good for every resource the app is
+   allowed on). ⛔ The page's own token / refresh token are never replaced by this answer. */
+async function staffTok(force){
+  const c = await cfg();
+  if(!force && S.tk && Date.now() < S.tk.exp - 60000) return S.tk.t;
+  const rt = (typeof refreshTok === "string" && refreshTok) || "";
+  if(!rt || typeof CFG === "undefined" || typeof AUTH !== "string") throw oops(401, "unauthorized", WORDS.unauthorized, true);
+  let r;
+  try{ r = await fetchTo(AUTH + "/token", {method: "POST", headers: {"Content-Type": "application/x-www-form-urlencoded"}, credentials: "omit",
+        body: new URLSearchParams({client_id: CFG.clientId, grant_type: "refresh_token", refresh_token: rt, scope: c.scope + " openid profile offline_access"})}, 20000); }
+  catch(_){ throw oops(0, "upstream", WORDS.upstream, true); }
+  const j = await r.json().catch(() => ({}));
+  if(!r.ok || !j.access_token){
+    if(/AADSTS65001|AADSTS500011|AADSTS70011|AADSTS650057|consent|not authorized/i.test(String(j.error_description || ""))) throw oops(403, "no_api_access", WORDS.no_api_access, true);
+    if(r.status >= 500) throw oops(r.status, "upstream", WORDS.upstream, true);
+    throw oops(401, "unauthorized", WORDS.unauthorized, true);
+  }
+  S.tk = {t: j.access_token, exp: Date.now() + (Number(j.expires_in) || 3600) * 1000};
+  return S.tk.t;
+}
+async function api(method, path, o){
+  o = o || {};
+  for(let pass = 0; pass < 2; pass++){
+    const tok = await staffTok(pass === 1), c = await cfg();
+    const h = Object.assign({Authorization: "Bearer " + tok, Accept: "application/json"}, o.headers || {});
+    let body; if(o.json !== undefined){ h["Content-Type"] = "application/json"; body = JSON.stringify(o.json); } else if(o.raw !== undefined) body = o.raw;
+    let r; try{ r = await fetchTo(c.api + path, {method, headers: h, body, cache: "no-store", credentials: "omit"}, o.ms || (method === "GET" ? 20000 : 60000)); }
+    catch(_){ throw oops(0, "upstream", WORDS.upstream, true); }
+    if(r.status === 401 && pass === 0){ S.tk = null; continue; }          // one fresh token, then say so
+    let j = null; if(r.status !== 204){ try{ j = await r.json(); }catch(_){} }
+    if(r.ok) return j;
+    throw failOf(r.status, j);
+  }
+}
 let T = {
-  async ids(){
-    if(S.siteId && S.listId) return;
-    const sr = await gfetch(GRAPH + "/sites/" + SITE + "?$select=id"); if(!sr.ok) await failOf(sr, "the ClaudeAgents site");
-    const sid = (await sr.json()).id;
-    const lr = await gfetch(GRAPH + "/sites/" + sid + "/lists?$select=displayName,id&$top=200"); if(!lr.ok) await failOf(lr, "the job lists");
-    const l = ((await lr.json()).value || []).find(x => String(x.displayName).toLowerCase() === LIST.toLowerCase());
-    if(!l) throw new Error("the " + LIST + " list was not found");
-    S.siteId = sid; S.listId = l.id;
+  async upload(cid, blob){
+    const u = await api("POST", "/v1/uploads", {json: {client_request_id: cid + "-p", content_type: "image/png", size: blob.size}});
+    if(!u || !u.url || !u.upload_id) throw oops(0, "upstream", WORDS.upstream, true);
+    let r; try{ r = await fetchTo(u.url, {method: "PUT", headers: u.headers || {}, body: blob, credentials: "omit", cache: "no-store"}, 90000); }
+    catch(_){ throw oops(0, "upstream", "The picture did not upload.", true); }
+    if(!r.ok) throw oops(r.status, "upstream", "The picture did not upload.", true);
+    return u.upload_id;
   },
-  async upload(rel, blob, ct){
-    await T.ids();
-    const url = GRAPH + "/sites/" + S.siteId + "/drive/root:/StaffApp/" + rel.split("/").map(encodeURIComponent).join("/") + ":/content?@microsoft.graph.conflictBehavior=fail";
-    const r = await gfetch(url, {method: "PUT", headers: {"Content-Type": ct}, body: blob});
-    if(r.status === 409) return {ok: true, path: "StaffApp/" + rel, existed: true};      // the same id was uploaded before
-    if(!r.ok) await failOf(r, "the upload");
-    return {ok: true, path: "StaffApp/" + rel};
+  async lookup(cid){                                              // the report already saved under this key? → {n} | null
+    try{
+      const r = await api("GET", "/v1/requests/" + encodeURIComponent(cid));
+      const ok = r && (r.status === "done" || (Number(r.status) >= 200 && Number(r.status) < 300)) && r.response;
+      return ok ? {id: (r.response.item && (r.response.item.n || r.response.item.number)) || cid} : null;
+    }catch(e){ if(e && e.status === 404) return null; throw e; }
   },
-  async findRow(title){
-    await T.ids();
-    const base = GRAPH + "/sites/" + S.siteId + "/lists/" + S.listId + "/items?$expand=fields($select=State,Message,Title,Result)";
-    const r = await gfetch(base + "&$top=20&$filter=" + encodeURIComponent("fields/Title eq '" + title.replace(/'/g, "''") + "'"),
-                           {headers: {Prefer: "HonorNonIndexedQueriesWarningMayFailRandomly"}});
-    let all;
-    if(r.ok) all = (await r.json()).value || [];
-    else {                                                       /* SharePoint may refuse a filter on a non-indexed column: scan (bounded) */
-      all = []; let next = base + "&$top=500", pages = 0;
-      while(next && pages++ < 10){ const q = await gfetch(next); if(!q.ok) await failOf(q, "the job queue");
-        const j = await q.json(); all = all.concat(j.value || []); next = j["@odata.nextLink"] || null; }
-    }
-    const rows = all.filter(it => it.fields && it.fields.Title === title).sort((a, b) => Number(b.id) - Number(a.id));
-    return rows.length ? T._row(rows[0]) : null;
+  async submit(body){
+    try{ const r = await api("POST", "/v1/items", {json: body}); return {id: (r && r.item && (r.item.n || r.item.number)) || body.client_request_id}; }
+    catch(e){ if(e && e.status === 412){ const have = await T.lookup(body.client_request_id); if(have) return have; } throw e; }
   },
-  async row(id){
-    await T.ids();
-    const r = await gfetch(GRAPH + "/sites/" + S.siteId + "/lists/" + S.listId + "/items/" + encodeURIComponent(id) + "?$expand=fields($select=State,Message,Title,Result)");
-    if(r.status === 404) return null; if(!r.ok) await failOf(r, "the job queue");
-    return T._row(await r.json());
-  },
-  _row(it){ const f = it.fields || {}; let res = null; try{ res = f.Result ? JSON.parse(f.Result) : null; }catch(_){}
-    return {id: it.id, state: f.State || "", message: f.Message || "", result: res}; },
-  async enqueue(kind, subject, payload){
-    await T.ids();
-    const fields = {Title: kind + ":" + subject, Kind: kind, Subject: subject, Params: "{}", State: "queued", Attempts: 0,
-                    RequestedUtc: new Date().toISOString().slice(0, 19) + "Z", RequestedBy: (typeof account === "string" && account) || ""};
-    /* ⛔ review 9: ALWAYS with its Payload. The portal can drop it (it also writes meta.json to the synced folder); this page writes no
-       folder, so a row without its Payload is one the mini can never process — better kept on the tablet and retried */
-    const pj = JSON.stringify(payload); if(pj.length > 60000) throw new Error("the report is too long to send");
-    fields.Payload = pj;
-    const r = await gfetch(GRAPH + "/sites/" + S.siteId + "/lists/" + S.listId + "/items",
-                           {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({fields})});
-    if(!r.ok) await failOf(r, "the job queue");
-    return {id: (await r.json()).id};
+  async dictate(blob){
+    const r = await api("POST", "/v1/dictate", {raw: blob, headers: {"Content-Type": blob.type || "audio/webm", "X-Dictate-Context": encodeURIComponent("Receiving tablet: feedback")}});
+    if(!r || typeof r.text !== "string") throw oops(0, "dictation_failed", WORDS.dictation_failed, false);
+    return r.text;
   }
 };
 
@@ -153,53 +196,67 @@ async function screenshot(){
   return new Promise((ok, no) => { try{ cv.toBlob(bl => bl ? ok(bl) : no(new Error("empty image")), "image/png"); }catch(e){ no(e); } });
 }
 
-/* ── send: the screenshot first, then ONE row (looked up before every retry) ── */
-async function deliver(item, shot){
-  const files = Object.assign({}, item.files || {});
-  if(!shot && item.shotKey && !files["screenshot.png"]){ try{ shot = await IDB.get(item.shotKey); }catch(_){ shot = null; } }
-  if(shot && !files["screenshot.png"]){
-    try{ const u = await T.upload("feedback/" + item.id + "/screenshot.png", shot, "image/png"); if(u && u.ok){ files["screenshot.png"] = u.path; item.meta.has_screenshot = true; } }
-    catch(e){ item.meta.has_screenshot = false; item.meta.screenshot_error = String((e && e.message) || "upload failed").slice(0, 120); }
-  }
-  item.files = files;
-  if(files["screenshot.png"] && item.shotKey){ IDB.del(item.shotKey); delete item.shotKey; }
-  if(item.tried){ const have = await T.findRow("staffapp.feedback:" + item.id); if(have) return have; }   // ⛔ never a second row
-  item.tried = true; save();
-  return T.enqueue("staffapp.feedback", item.id, {v: 1, meta: item.meta, files});
+/* ── send: the screenshot first, then ONE report (looked up before every retry) ── */
+const footer = (c) => { const o = String((c && (c.open || c.stage)) || "").trim(); return o ? "[Receiving tablet — " + o.slice(0, 300) + (c.app_version ? " · version " + String(c.app_version).slice(0, 20) : "") + "]" : ""; };
+/* the body of POST /v1/items, the same bytes on every retry (the service replays a key only for an identical body) */
+function bodyOf(item){
+  const m = item.meta || {}, c = m.context || {};
+  let text = String(m.text || "").trim(); const foot = footer(c);
+  if(foot && text.length + foot.length + 2 <= 4000) text += "\n\n" + foot; else text = text.slice(0, 4000);
+  const b = {client_request_id: item.id, type: ["bug", "idea", "question"].indexOf(m.type) >= 0 ? m.type : "bug", text, dictated: !!m.dictated,
+             priority: "helps", private: false, module: MODULE,
+             context: {url: String(c.url || ""), viewport: String(c.viewport || ""), app_version: c.app_version == null ? "" : String(c.app_version),
+                       stage: String(c.stage || "").slice(0, 40), open: String(c.open || "").slice(0, 40)}};
+  if(item.up) b.screenshot_upload_id = item.up;
+  return b;
 }
-function save(){ ls.set(KEY_Q, S.outbox.map(x => ({id: x.id, meta: x.meta, files: x.files || {}, tried: !!x.tried, at: x.at, shotKey: x.shotKey || ""})));
+async function deliver(item, shot){
+  if(!shot && item.shotKey && !item.up){ try{ shot = await IDB.get(item.shotKey); }catch(_){ shot = null; } }
+  if(shot && !item.up && !item.noShot){
+    try{ item.up = await T.upload(item.id, shot); item.meta.has_screenshot = true; }
+    catch(e){
+      /* a picture the service refuses for good (too big, today's upload limit) goes without; a connection problem keeps the whole report */
+      if(e && (e.retry !== false && e.code !== "daily_limit")) throw e;
+      item.noShot = true; item.meta.has_screenshot = false; item.meta.screenshot_error = String((e && e.message) || "upload failed").slice(0, 120);
+    }
+  }
+  if((item.up || item.noShot) && item.shotKey){ IDB.del(item.shotKey); delete item.shotKey; }
+  if(item.tried){ const have = await T.lookup(item.id); if(have) return have; }   // ⛔ never a second report
+  item.tried = true; save();
+  return T.submit(bodyOf(item));
+}
+function save(){ ls.set(KEY_Q, S.outbox.map(x => ({id: x.id, meta: x.meta, up: x.up || "", noShot: !!x.noShot, tried: !!x.tried, at: x.at, shotKey: x.shotKey || ""})));
   ls.set(KEY_SENT, S.sent.slice(0, 8)); ls.set(KEY_V, S.voice); }
 let flushing = false;
 async function flush(){
   if(flushing) return; flushing = true;
   try{ await flushVoice(); await flushOnce(); } finally{ flushing = false; }
 }
-/* PM-3307: a voice note recorded offline → uploaded, transcribed, then sent as a report (with the words typed at the time) by itself */
+/* PM-3307: a voice note recorded offline → transcribed, then sent as a report (with the words typed at the time) by itself */
 async function flushVoice(){
   for(const v of S.voice.slice()){
-    try{
-      if(!v.jid){
-        const blob = await IDB.get(v.key); if(!blob){ S.voice = S.voice.filter(x => x !== v); save(); continue; }
-        const u = await T.upload("audio/" + v.aid + "/" + v.file, blob, v.mime);
-        let row = v.tried ? await T.findRow("staffapp.transcribe:" + v.aid) : null;
-        if(!row){ v.tried = true; save();
-          row = await T.enqueue("staffapp.transcribe", v.aid, {v: 1, id: v.aid, files: {[v.file]: u.path},
-                                meta: {v: 1, id: v.aid, purpose: "feedback", module: "receiving", week: null, by: v.by, at_utc: v.at_utc, mime: v.mime}}); }
-        v.jid = row.id; save();
+    const keys = v.keys || (v.key ? [v.key] : []);
+    v.texts = v.texts || [];
+    let stuck = false;
+    for(let i = v.texts.length; i < keys.length; i++){
+      let blob = null; try{ blob = await IDB.get(keys[i]); }catch(_){ blob = null; }
+      if(!blob){ v.texts.push(""); save(); continue; }
+      try{ v.texts.push(await T.dictate(blob)); save(); }
+      catch(e){
+        v.checks = (v.checks || 0) + 1; save();
+        /* review 11: never "waiting" for ever — refused for good, or ~30 minutes of tries, and the report goes without the words */
+        if(v.checks >= 30 || (e && e.retry === false && e.code !== "dictation_failed")){ v.texts.push(""); save(); continue; }
+        stuck = true; break;                                           // still offline: next minute
       }
-      const st = await T.row(v.jid); const rt = st && st.result;
-      v.checks = (v.checks || 0) + 1; save();
-      /* review 11: never "waiting" for ever — after ~30 checks (about half an hour of connection) the report goes without the words */
-      const done = (rt && rt.id === v.aid) || (st && /^(refused|needs_human|failed)$/.test(st.state)) || v.checks >= 30;
-      if(!done) continue;                                            // still being transcribed: next minute
-      const said = (rt && rt.status === "ok" && rt.text && rt.text.trim()) ? rt.text.trim()
-        : "(a voice note recorded offline could not be turned into text — recording " + v.aid + ")";
-      const id = newId("FB");
-      const meta = {v: 1, id, type: v.type || "bug", text: ((v.draft || "").trim() ? v.draft.trim() + " " : "") + said, at_utc: new Date().toISOString(),
-                    by: v.by, context: v.ctx, has_audio: false, has_screenshot: false, auto: "a voice note recorded with no connection, sent when it came back"};
-      S.outbox.push({id, meta, files: {}, tried: false, at: Date.now()});
-      S.voice = S.voice.filter(x => x !== v); IDB.del(v.key); save();
-    }catch(_){ break; }                                              // still offline: next minute
+    }
+    if(stuck) break;
+    const heard = v.texts.filter(t => t && t.trim()).join(" ").trim();
+    const said = heard || "(a voice note recorded offline could not be turned into text — recording " + v.aid + ")";
+    const id = newId("FB");
+    const meta = {v: 2, id, type: v.type || "bug", text: ((v.draft || "").trim() ? v.draft.trim() + " " : "") + said, at_utc: new Date().toISOString(),
+                  by: v.by, context: v.ctx, dictated: !!heard, has_screenshot: false, auto: "a voice note recorded with no connection, sent when it came back"};
+    S.outbox.push({id, meta, tried: false, at: Date.now()});
+    S.voice = S.voice.filter(x => x !== v); keys.forEach(k => IDB.del(k)); save();
   }
 }
 async function flushOnce(){
@@ -209,9 +266,15 @@ async function flushOnce(){
       const r = await deliver(item, null);
       S.outbox = S.outbox.filter(x => x.id !== item.id);
       S.sent.unshift({id: item.id, text: item.meta.text, at: item.meta.at_utc, row: r && r.id}); save();
-    }catch(_){ break; }                                              // offline / sign-in: try again next minute
+    }catch(e){
+      if(e && e.retry === false){                                    // refused for good: not kept for ever, and said
+        S.outbox = S.outbox.filter(x => x.id !== item.id); if(item.shotKey) IDB.del(item.shotKey); save();
+        S.msg = "A report kept on this tablet was refused and removed (" + e.reason + ")."; S.kind = "warn"; continue;
+      }
+      break;                                                         // offline / sign-in: try again next minute
+    }
   }
-  paint();
+  paint(); if(S.open) render();
 }
 async function send(){
   if(S.busy) return;
@@ -222,8 +285,8 @@ async function send(){
   let shot = null;
   if(S.shot && S.shotP){ try{ shot = await S.shotP; }catch(_){ shot = null; } }
   const id = newId("FB");
-  const meta = {v: 1, id, type: S.type, text, at_utc: new Date().toISOString(), by: who(), context: context(), has_audio: false, has_screenshot: false};
-  const item = {id, meta, files: {}, tried: false, at: Date.now()};
+  const meta = {v: 2, id, type: S.type, text, at_utc: new Date().toISOString(), by: who(), context: context(), dictated: !!S.dictated, has_screenshot: false};
+  const item = {id, meta, tried: false, at: Date.now()};
   if(shot){ try{ await IDB.put("shot-" + id, shot); item.shotKey = "shot-" + id; }catch(_){} }   // PM-3307: the picture waits with the report
   S.outbox.push(item); save();                                        // ⭐ kept before anything leaves the tablet
   item.sending = true;
@@ -231,73 +294,84 @@ async function send(){
     const r = await deliver(item, shot);
     S.outbox = S.outbox.filter(x => x.id !== id);
     S.sent.unshift({id, text, at: meta.at_utc, row: r && r.id}); save();
-    S.text = ""; ls.set(KEY_DRAFT, ""); S.shotP = null; S.msg = "Sent — thank you. The team gets it on Teams and in the work list (" + id + ").";
+    S.text = ""; S.dictated = false; ls.set(KEY_DRAFT, ""); S.shotP = null;
+    S.msg = "Sent — thank you. The team sees it on the online Ideas & fixes board" + (r && r.id && String(r.id) !== id ? " (#" + r.id + ")" : "") + ".";
     S.kind = "good";
   }catch(e){
-    S.msg = "Not sent yet — kept on this tablet and sent by itself when it can (" + ((e && e.message) || "no connection") + ").";
-    S.kind = "warn"; S.text = ""; ls.set(KEY_DRAFT, ""); S.shotP = null;
+    if(e && e.retry === false){
+      /* refused for good: not kept (it would be refused again); the words stay in the box with the reason, press Send to try again */
+      S.outbox = S.outbox.filter(x => x.id !== id); if(item.shotKey) IDB.del(item.shotKey); save();
+      S.text = text; ls.set(KEY_DRAFT, text);
+      S.shotP = screenshot(); S.shotP.catch(() => {});               // the panel is hidden from the picture, so a fresh one is the same screen
+      S.msg = "Not sent: " + e.reason + " Your words are still here — press Send to try again."; S.kind = "warn";
+    }else{
+      S.msg = "Not sent yet — kept on this tablet and sent by itself when it can (" + ((e && (e.reason || e.message)) || "no connection") + ").";
+      S.kind = "warn"; S.text = ""; ls.set(KEY_DRAFT, ""); S.shotP = null;
+    }
   }
   item.sending = false;
   S.busy = false; render();
 }
 
-/* ── voice: record → upload → staffapp.transcribe → the text into the box ── */
+/* ── voice: record (pieces of ~50 s) → POST each to /v1/dictate → the text into the box ── */
 async function startRec(){
   if(!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder)){
     S.msg = "This tablet cannot record here — use the microphone on the keyboard instead."; S.kind = "warn"; return render(); }
   let stream; try{ stream = await navigator.mediaDevices.getUserMedia({audio: true}); }
   catch(_){ S.msg = "The microphone is blocked — allow it for this page, or use the microphone on the keyboard."; S.kind = "warn"; return render(); }
   const mime = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"].find(m => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m)) || "";
-  const rec = mime ? new MediaRecorder(stream, {mimeType: mime}) : new MediaRecorder(stream), parts = [];
-  rec.ondataavailable = e => { if(e.data && e.data.size) parts.push(e.data); };
-  rec.onstop = () => { stream.getTracks().forEach(t => t.stop()); clearInterval(S.timer); S.rec = null;
-    transcribe(new Blob(parts, {type: rec.mimeType || mime || "audio/webm"})); };
-  S.rec = rec; S.sec = 0; rec.start();
-  S.timer = setInterval(() => { S.sec++; const b = el("rxFbMic"); if(b) b.textContent = "Stop (" + S.sec + " s)"; if(S.sec >= MAX_SEC) stopRec(); }, 1000);
+  /* the service takes ~60 s pieces: a new recorder every PIECE_SEC on the same microphone, each piece a file of its own */
+  const R = {state: "recording", stopping: false, mr: null, blobs: []};
+  const piece = () => {
+    const parts = [], mr = mime ? new MediaRecorder(stream, {mimeType: mime}) : new MediaRecorder(stream);
+    mr.ondataavailable = e => { if(e.data && e.data.size) parts.push(e.data); };
+    mr.onstop = () => {
+      if(parts.length) R.blobs.push(new Blob(parts, {type: mr.mimeType || mime || "audio/webm"}));
+      if(!R.stopping){ piece(); return; }
+      R.state = "inactive"; stream.getTracks().forEach(t => t.stop()); clearInterval(S.timer); S.rec = null;
+      if(R.blobs.length) transcribe(R.blobs); else { S.msg = "Nothing was recorded — type it instead."; S.kind = "warn"; render(); }
+    };
+    R.mr = mr; mr.start();
+  };
+  S.rec = R; S.sec = 0; piece();
+  S.timer = setInterval(() => { S.sec++; const b = el("rxFbMic"); if(b) b.textContent = "Stop (" + S.sec + " s)";
+    if(S.sec >= MAX_SEC) stopRec(); else if(S.sec % PIECE_SEC === 0 && R.mr && R.mr.state === "recording") R.mr.stop(); }, 1000);
   S.msg = "Listening — press Stop when you are done."; S.kind = ""; render();
 }
-function stopRec(){ if(S.rec && S.rec.state !== "inactive") S.rec.stop(); }
-async function transcribe(blob){
-  const mime = blob.type || "audio/webm", file = /mp4/.test(mime) ? "audio.mp4" : "audio.webm", aid = newId("AUD");
+function stopRec(){ const R = S.rec; if(R && R.state !== "inactive"){ R.stopping = true; if(R.mr && R.mr.state !== "inactive") R.mr.stop(); } }
+async function transcribe(input){
+  const blobs = (Array.isArray(input) ? input : [input]).filter(Boolean), aid = newId("AUD");
   S.dict = aid; S.msg = "Turning your voice into text…"; S.kind = ""; render();
-  let attempted = false;
+  const texts = [];
   try{
-    const u = await T.upload("audio/" + aid + "/" + file, blob, mime);
-    const meta = {v: 1, id: aid, purpose: "feedback", module: "receiving", week: null, by: who(), at_utc: new Date().toISOString(), mime};
-    if(file !== "audio.webm") meta.audio_file = file;
-    attempted = true;                                                // review 11: a lost reply must not queue a 2nd job later
-    const q = await T.enqueue("staffapp.transcribe", aid, {v: 1, id: aid, files: {[file]: u.path}, meta});
-    /* ⭐ counted polls, never the clock: a tablet's clock can jump (sleep, a time sync) and end the wait early */
-    for(let n = 0; n < Math.ceil(TRANSCRIBE_MS / POLL_MS); n++){
-      await new Promise(r => setTimeout(r, POLL_MS));
-      if(S.dict !== aid) return;
-      let st = null; try{ st = await T.row(q.id); }catch(_){ st = null; }
-      const rt = st && st.result;
-      if(rt && rt.id === aid){
-        if(rt.status === "ok" && typeof rt.text === "string" && rt.text.trim()){
-          const box = el("rxFbText"); const cur = box ? box.value : S.text;
-          S.text = (cur.trim() ? cur.trim() + " " : "") + rt.text.trim(); S.dict = "";
-          if(box) box.value = S.text;                                // render() re-reads the box, so the text goes INTO it first
-          S.msg = "Here is what you said — fix anything, then Send."; S.kind = "good"; return render();
-        }
-        S.dict = ""; S.msg = "Could not turn the recording into text — type it instead."; S.kind = "warn"; return render();
-      }
-      if(st && /^(refused|needs_human|failed)$/.test(st.state)){ S.dict = ""; S.msg = "The voice service did not answer — type it instead."; S.kind = "warn"; return render(); }
-    }
-    S.dict = ""; S.msg = "No text after 3 minutes — the voice service may be offline. Type it instead."; S.kind = "warn"; render();
+    for(const b of blobs){ texts.push(await T.dictate(b)); if(S.dict !== aid) return; }
   }catch(e){
-    /* PM-3307: no connection — the recording waits on the tablet and becomes a report by itself when the connection is back */
-    try{
-      const key = "aud-" + aid; await IDB.put(key, blob);
-      const box = el("rxFbText");
-      S.voice.push({aid, key, mime, file, type: S.type, draft: box ? box.value : S.text, ctx: context(), by: who(),
-                    at_utc: new Date().toISOString(), tried: attempted});
-      if(box) box.value = ""; S.text = ""; ls.set(KEY_DRAFT, "");
-      save(); S.dict = "";
-      S.msg = "No connection — your voice note is saved on this tablet. It is turned into text and sent by itself when the connection is back.";
-      S.kind = "good"; render();
-    }catch(_){ S.dict = ""; S.msg = "The recording could not be sent (" + ((e && e.message) || "no connection") + ") and this tablet cannot keep it — type it instead."; S.kind = "warn"; render(); }
+    if(S.dict !== aid) return;
+    if(e && e.retry !== false && e.code !== "daily_limit"){
+      /* PM-3307: no connection — the recording waits on the tablet and becomes a report by itself when the connection is back */
+      try{
+        const keys = []; for(let i = 0; i < blobs.length; i++){ const k = "aud-" + aid + "-" + i; await IDB.put(k, blobs[i]); keys.push(k); }
+        const box = el("rxFbText");
+        S.voice.push({aid, keys, texts, mime: blobs[0].type, type: S.type, draft: box ? box.value : S.text, ctx: context(), by: who(), at_utc: new Date().toISOString()});
+        if(box) box.value = ""; S.text = ""; ls.set(KEY_DRAFT, "");
+        save(); S.dict = "";
+        S.msg = "No connection — your voice note is saved on this tablet. It is turned into text and sent by itself when the connection is back.";
+        S.kind = "good"; return render();
+      }catch(_){ S.dict = ""; S.msg = "The recording could not be sent (" + ((e && (e.reason || e.message)) || "no connection") + ") and this tablet cannot keep it — type it instead."; S.kind = "warn"; return render(); }
+    }
+    const got = texts.filter(t => t && t.trim()).join(" ").trim();
+    if(got){ const box = el("rxFbText"); const cur = box ? box.value : S.text; S.text = (cur.trim() ? cur.trim() + " " : "") + got; S.dictated = true; if(box) box.value = S.text; }
+    S.dict = ""; S.msg = (got ? "Part of it did not come through — check the words and add the rest. " : "Could not turn the recording into text — type it instead. ") + ((e && e.code === "daily_limit") ? e.reason : "");
+    S.kind = "warn"; return render();
   }
+  const got = texts.filter(t => t && t.trim()).join(" ").trim();
+  if(got){
+    const box = el("rxFbText"); const cur = box ? box.value : S.text;
+    S.text = (cur.trim() ? cur.trim() + " " : "") + got; S.dict = ""; S.dictated = true;
+    if(box) box.value = S.text;                                      // render() re-reads the box, so the text goes INTO it first
+    S.msg = "Here is what you said — fix anything, then Send."; S.kind = "good"; return render();
+  }
+  S.dict = ""; S.msg = "Could not turn the recording into text — type it instead."; S.kind = "warn"; render();
 }
 
 /* ── the button and the panel ── */
@@ -326,7 +400,7 @@ function render(){
        `<button type="button" class="rxFbType" data-act="fb-type" data-v="${t}" aria-pressed="${S.type === t}"
           style="min-height:48px;padding:8px 14px;${S.type === t ? "background:var(--ink,#222);color:var(--ground,#fff)" : ""}">${lab[t]}</button>`).join("")}</div>
      <label for="rxFbText" style="display:block;margin-bottom:4px">${S.type === "bug" ? "What happened, and what did you expect?" : S.type === "idea" ? "What would make this easier?" : "What would you like to know?"}</label>
-     <textarea id="rxFbText" rows="4" style="width:100%;box-sizing:border-box;font-size:16px;padding:9px">${e_(S.text)}</textarea>
+     <textarea id="rxFbText" rows="4" maxlength="${MAX_TEXT}" style="width:100%;box-sizing:border-box;font-size:16px;padding:9px">${e_(S.text)}</textarea>
      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0">
        <button type="button" id="rxFbMic" data-act="fb-mic" ${S.dict ? "disabled" : ""} style="min-height:48px;padding:9px 14px">${S.rec ? "Stop (" + S.sec + " s)" : S.dict ? "Turning it into text…" : "🎤 Talk instead of typing"}</button>
        <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="rxFbShot" data-act="fb-shot" ${S.shot ? "checked" : ""} style="width:22px;height:22px"> Include a picture of this screen</label>
