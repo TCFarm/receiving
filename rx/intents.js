@@ -812,6 +812,26 @@ function rawPo(){
   return out;
 }
 I.allPo = () => rawPo().filter(x => !isShort(x) && !isMove(x));
+/* ⭐ KITCHEN ORDERING Step 5 (contract 2026-11-24). The kitchen bins the pack names (`kitchen_split.bins`, from config/kitchen_ordering.json —
+   never typed here) and the units of one (PO, SKU) the crew has ALREADY put into one of them that the pack's `kitchen.remaining_units` does not
+   know yet. Same exclusions as RX.po.scannedUnits: a cancelled intent, a fix row, one the poster posted BEFORE the pack was built (the pack
+   already counts it), a shadow / reversed / app-stale hold. ⛔ A kitchen portion is an ordinary intent: no new column. */
+I.kitchenBins = function(){ const d = RX.pack && RX.pack.data, k = d && d.kitchen_split; return (k && Array.isArray(k.bins)) ? k.bins.map(b => String(b).toUpperCase()) : []; };
+I.kitchenUnits = function(poId, sku){
+  const bins = new Set(I.kitchenBins()); if(!bins.size) return 0;
+  const bm = RX.pack.data && RX.pack.data.built ? Date.parse(RX.pack.data.built) : NaN, built = isNaN(bm) ? 0 : bm;
+  let u = 0;
+  for(const v of I.allPo()){
+    const f = v.fields || {};
+    if(f.Kind === "fix" || f.State === "cancelled" || f.Sku !== sku || !f.Location || !bins.has(String(f.Location).trim().toUpperCase())) continue;
+    const po = String((v.fin && v.fin.FinState === "posted" && v.fin.FinPo) || f.Po || "");
+    if(po !== String(poId)) continue;
+    if(v.fin && v.fin.FinState === "posted"){ const at = Date.parse(v.fin.FinAt); if(!isNaN(at) && at <= built) continue; }
+    if(v.fin && (v.fin.FinState === "shadow" || v.fin.FinState === "reversed" || (v.fin.FinState === "held" && /^STALE:/.test(String(v.fin.FinReason || ""))))) continue;
+    u += Number(f.Units) || 0;
+  }
+  return u;
+};
 I.moves = () => rawPo().filter(isMove);
 I.shorts = () => rawPo().filter(isShort);
 async function pollPoster(gen){
