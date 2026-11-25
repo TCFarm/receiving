@@ -58,6 +58,17 @@ const COPY_ADD = {
   nothing_recorded:"Nothing was recorded.",
   date_in_d2:      "Dates go before the shelf. That scan was not recorded.",
   wrong_detail:    "The case you just scanned ({code}) was not recorded. Scan it again after.",
+  kit_line:        "{n} to the floor, {m} to the kitchen bin ({bin})",
+  kit_all:         "All {m} go to the kitchen bin ({bin}).",
+  kit_change:      "Change the kitchen amount",
+  kit_title:       "How many go to the kitchen bin?",
+  kit_hint:        "The kitchen's order has {rem} left to receive. Type 0 if none go to the kitchen.",
+  kit_over_title:  "That is more than the kitchen ordered",
+  kit_over_body:   "The kitchen has {rem} left to receive and {n} would go to its bin.",
+  kit_over_yes:    "Yes, {n} to the kitchen bin",
+  kit_unknown:     "The kitchen's share of this item could not be worked out, so nothing was set aside for the kitchen. Ask before you put it away.",
+  kit_nobin:       "The kitchen bin {bin} is not on the delivery list, so nothing was set aside for the kitchen. Ask before you put it away.",
+  kit_none:        "None to the kitchen. All {n} go to the floor.",
   temp_msg:        "This is a {shelf} shelf. {name} is {item}.",
   temp_title:      "Check the temperature",
   temp_no:         "No — scan another tag",
@@ -442,6 +453,37 @@ RX.registerAct("hold-back", () => { if(holdCtx()) RX.backToQty(); });
 
 /* ───────────────────────── the shelf step (D2) ───────────────────────── */
 PA.cur = null;                                   // {ctx, d2}
+
+/* ═══ KITCHEN ORDERING Step 5 (contract 2026-11-24, AD12): "N to the floor, M to the kitchen bin" ═══
+   The pack carries `kitchen` on a PO line the kitchen has an add-on line on (lib/kitchen_receiving.py; OFF = the key is absent and none of this runs).
+   The FIRST portion of a case in Put away here is PRE-ARMED to the kitchen bin for min(units, what the kitchen still has to receive); the rest
+   goes through the normal floor flow. The crew can change the amount (a number above what the kitchen has left asks to confirm). ⛔ The kitchen bin
+   is offered ONLY here, never as a recommendation (it is `non_storage`). ⛔ Never guessed: an `unknown` kitchen portion, or a bin the pack does not
+   carry, pre-arms nothing and SAYS so. Units already put into a kitchen bin on this tablet (RX.intents.kitchenUnits) are subtracted. */
+PA.kitchenFor = function(ctx){
+  let m = null; try{ m = RX.po && RX.po.matchFor ? RX.po.matchFor(ctx.p) : null; }catch(_){ m = null; }
+  const k = m && m.line && m.line.kitchen;
+  if(!k) return null;
+  if(k.unknown) return {unknown: true, why: k.why || ""};
+  const already = RX.intents && RX.intents.kitchenUnits ? RX.intents.kitchenUnits(m.po.order_id, ctx.p.prod.sku) : 0;
+  const rem = Math.max(0, (+k.remaining_units || 0) - already);
+  if(!(rem > 0)) return null;
+  const bi = RX.pack.binInfo(k.bin);
+  return {bin: k.bin, rem, ok: !!(bi && bi.active)};
+};
+function armKitchen(ctx, d2){
+  if(d2.kit !== undefined) return false;                                     // asked once per case
+  d2.kit = null;
+  if(d2.late || ctx.flow !== "direct") return false;
+  const k = PA.kitchenFor(ctx); if(!k) return false;
+  if(k.unknown){ d2.notice = esc(t("kit_unknown")); return false; }
+  if(!k.ok){ d2.notice = esc(t("kit_nobin", {bin: k.bin})); return false; }
+  d2.kit = {bin: k.bin, rem: k.rem, placed: false, n: 0};
+  d2.pendingN = Math.min(d2.left, k.rem) >= d2.left ? null : Math.min(d2.left, k.rem);
+  onTag(ctx, d2, k.bin, "kitchen");
+  return true;
+}
+const kitPortion = (d2) => (d2.kit && d2.portions.length === 1 && d2.portions[0].kitchen) ? d2.portions[0] : null;
 function simulate(entry, portions, best){
   if(!portions.length) return entry;
   const e = Object.assign({}, entry); e.candidates = (entry.candidates || []).map(c => Object.assign({}, c, {lots: (c.lots || []).map(l => l.slice())}));
@@ -513,11 +555,12 @@ function renderMain(ctx, d2){
   const pl = d2.late ? "" : poLine(p, d2);
   if(pl) body += `<span class="rx-pa-po">${esc(t("d2_po", {msg: pl}))}</span>`;
   if(!d2.late && RX.po.chipHtml) body += RX.po.chipHtml(p);          // PM-2907: which PO, [Change PO], the older-order warning
+  if(d2.kit && d2.kit.placed) body += `<span class="rx-pa-sub rx-pa-kit" id="rxKit"><strong>${esc(t("kit_line", {n: d2.left, m: d2.kit.n, bin: d2.kit.bin}))}</strong></span>`;
   if(d2.pendingN) body += `<span class="rx-pa-sub"><strong>${esc(t("d2_pending_n", {n: d2.pendingN}))}</strong></span>`;
   const offer = d2.offer && !d2.portions.length ? d2.offer : null;
   if(offer) body += `<span class="rx-pa-sub" id="rxOffer">${esc(t("offer_line", {bin: "\u0000"})).replace("\u0000", `<strong class="num">${esc(offer)}</strong>`)}</span>`;
   const acts = `<div class="rx-pa-btns">${offer ? btn("bin-offer-yes", d2.pendingN ? t("offer_some", {n: d2.pendingN, bin: offer}) : t("offer_all", {n: d2.left, bin: offer}), "primary", "data-primary") : ""}` +
-    `${d2.left > 1 ? btn("bin-some", t("btn_some")) : ""}${btn("bin-cant-scan", t("btn_cant"))}` +
+    `${d2.left > 1 ? btn("bin-some", t("btn_some")) : ""}${kitPortion(d2) ? btn("kit-change", t("kit_change")) : ""}${btn("bin-cant-scan", t("btn_cant"))}` +
     ((d2.portions.length || d2.late) ? btn("bin-cancel-rest", t("btn_leave_rest")) : btn("bin-cancel", t("btn_cancel_case"))) +
     btn("shelf-back", t("btn_back_count"), "", 'data-close="3"') + `</div>`;
   prompt_("go", esc(title), body, acts, {keepScan: true});
@@ -588,6 +631,18 @@ function render(ctx, d2){
       renderBinResults("");
       setTimeout(() => { const el = $("rxBinQ"); if(el) el.focus(); }, 25);
       break; }
+    case "kit": {
+      const kp = kitPortion(d2);
+      prompt_("go", esc(t("kit_title")), `<strong>${esc(p.prod.name)}</strong>${RX.idLine(p.prod.sku)}<span class="rx-pa-sub">${esc(t("kit_hint", {rem: d2.kit.rem}))}</span>
+        <input id="rxKitN" class="num rx-pa-num" type="text" inputmode="numeric" maxlength="5" autocomplete="off" aria-label="${esc(t("kit_title"))}" value="${kp ? kp.units : 0}">`,
+        `<div class="rx-pa-btns">${btn("kit-save", t("btn_save"), "primary")}${btn("bin-cancel-back", t("btn_back"), "", 'data-close="3"')}</div>`);
+      setTimeout(() => { const el = $("rxKitN"); if(el){ el.focus(); el.select(); el.onkeydown = (ev) => { if(ev.key === "Enter"){ ev.preventDefault(); const b = document.querySelector('[data-act="kit-save"]'); if(b) b.click(); } }; } }, 25);
+      break; }
+    case "kitover": {
+      const n = d2.kit.ask;
+      prompt_("stop", esc(t("kit_over_title")), `<strong>${esc(p.prod.name)}</strong>${RX.idLine(p.prod.sku)}<span class="rx-pa-sub">${esc(t("kit_over_body", {rem: d2.kit.rem, n}))}</span>`,
+        `<div class="rx-pa-btns">${btn("kit-over-yes", t("kit_over_yes", {n}), "primary", "data-primary")}${btn("bin-cancel-back", t("btn_back"), "", 'data-close="3"')}</div>`);
+      focusPrimary(); break; }
     case "temp": {
       const info = RX.pack.binInfo(d2.cand.bin), it = itemOf(p, d2);
       prompt_("stop", esc(t("temp_title")), `<strong>${esc(PA.tempText(it, info))}</strong>${RX.idLine(p.prod.sku)}`,
@@ -633,6 +688,7 @@ function startShelf(ctx, opts){
   PA.cur = {ctx, d2}; PA.moreOpen = false;
   recompute(d2, p);
   if(d2.flags === undefined) d2.flags = d2.late ? [] : PA.flagsFor(d2.rank);          // PM-3919: from the state BEFORE any portion was placed
+  if(armKitchen(ctx, d2)) return;                                                     // kitchen Step 5: the kitchen portion is placed first
   const a = (!d2.late && !opts.noArmed && ctx.flow === "direct") ? PA.shelf.current() : null;       // round 4: shelf mode (sticky), not one-shot
   /* ⭐⭐ PM-3333 (Jack, 2026-10-28: "a shelf tag scanned first still works the same way including partial quantity"): the current shelf
      is OFFERED on this card — [Put all N on <shelf>] (Enter) or [Only some go here] — exactly the choices a shelf scanned after the item
@@ -685,8 +741,11 @@ function nextCheck(ctx, d2){
 function commitPortion(ctx, d2){
   const cand = d2.cand, info = RX.pack.binInfo(cand.bin), r = d2.rank;
   const n = Math.max(1, Math.min(d2.pendingN || d2.left, d2.left));
-  d2.portions.push({bin: info.name, binSource: cand.source, units: n, tempConfirmed: !!cand.flags.temp, fefoOverride: !!cand.flags.fefo,
-    recommendedBin: r.cands[0] ? r.cands[0].bin : "", recReasons: [r.reason.code].concat(d2.portions.length ? [] : (d2.flags || [])), staging: info.role === "staging", rejected: null});
+  const kit = cand.source === "kitchen";                                              // kitchen Step 5: a kitchen portion is an ordinary intent (BinSource armed)
+  d2.portions.push({bin: info.name, binSource: kit ? "armed" : cand.source, units: n, tempConfirmed: !!cand.flags.temp, fefoOverride: !!cand.flags.fefo, kitchen: kit,
+    recommendedBin: kit ? "" : (r.cands[0] ? r.cands[0].bin : ""), recReasons: kit ? ["KITCHEN"] : [r.reason.code].concat(d2.portions.some(x => !x.kitchen) ? [] : (d2.flags || [])),
+    staging: info.role === "staging", rejected: null});
+  if(kit && d2.kit){ d2.kit.placed = true; d2.kit.n = n; }
   d2.left -= n; d2.pendingN = null; d2.cand = null; d2.sub = "main"; d2.notice = "";
   if(d2.left > 0){ recompute(d2, ctx.p); render(ctx, d2); RX.sound("staged"); return; }
   finish(ctx, d2);
@@ -740,6 +799,25 @@ RX.registerAct("bin-cancel-rest-yes", () => {
   finish(c.ctx, c.d2);
 });
 RX.registerAct("bin-cancel-back", () => { const c = cs(); if(c && c.d2.sub !== "main"){ c.d2.cand = null; noticeMain(c.ctx, c.d2, "", null); } });
+/* kitchen Step 5: change the kitchen amount (only while the kitchen portion is the ONLY portion placed) */
+function applyKitchen(ctx, d2, n){
+  const i = d2.portions.findIndex(x => x.kitchen);
+  if(i >= 0){ d2.left += d2.portions[i].units; d2.portions.splice(i, 1); }
+  d2.kit.placed = false; d2.kit.n = 0; d2.cand = null; d2.pendingN = null; d2.sub = "main"; d2.notice = "";
+  recompute(d2, ctx.p);
+  if(n > 0){ d2.pendingN = n >= d2.left ? null : n; onTag(ctx, d2, d2.kit.bin, "kitchen"); return; }
+  noticeMain(ctx, d2, esc(t("kit_none", {n: d2.left})), "decide");
+}
+RX.registerAct("kit-change", () => { const c = cs(); if(c && c.d2.sub === "main" && kitPortion(c.d2)) setSub(c.ctx, c.d2, "kit"); });
+RX.registerAct("kit-save", () => {
+  const c = cs(); if(!c || c.d2.sub !== "kit") return;
+  const d2 = c.d2, kp = kitPortion(d2); if(!kp) return;
+  const el = $("rxKitN"), n = parseInt(((el && el.value) || "").trim(), 10), tot = d2.left + kp.units;
+  if(isNaN(n) || n < 0 || n > tot){ if(el) el.style.borderColor = "var(--stop)"; return; }
+  if(n > d2.kit.rem){ d2.kit.ask = n; setSub(c.ctx, d2, "kitover"); RX.sound("decide"); return; }
+  applyKitchen(c.ctx, d2, n);
+});
+RX.registerAct("kit-over-yes", () => { const c = cs(); if(c && c.d2.sub === "kitover") applyKitchen(c.ctx, c.d2, c.d2.kit.ask); });
 RX.registerAct("samesku-add", () => {
   const c = cs(); if(!c || c.d2.sub !== "samesku" || c.d2.same.diff) return;
   const d2 = c.d2, p = c.ctx.p, add = d2.units0;
