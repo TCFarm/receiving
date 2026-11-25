@@ -47,7 +47,7 @@ const kitchenChip = (line) => { const k = line && line.kitchen; if(!k || typeof 
 const lineRank = (s) => (s.problems > 0 || s.buyer > 0) ? 0 : s.state === "over" ? 0 : s.state === "notstarted" ? 1 : s.state === "partial" ? 2 : s.state === "short" ? 3 : 4;
 const outstanding = (s) => Math.max(0, (Number(s.n) || 0) - (Number(s.k) || 0));
 const filterActive = () => (H.poFilter !== "all" && H.poFilter !== "notpo") || !!H.poSearch.trim();
-const poIsOpen = (id, count) => filterActive() || (H.poOpen[id] !== undefined ? !!H.poOpen[id] : count === 1);
+const poIsOpen = (id, count, newest) => filterActive() || (H.poOpen[id] !== undefined ? !!H.poOpen[id] : (count === 1 || !!newest));   // 2026-11-25: with several POs the NEWEST is open by default
 
 const showShelf = () => RX.active() && (RX.flowActive() || pageRows().some(r => r.rx && (r.rx.iid || (r.rx.iids || []).length)));
 const portrait = () => { try{ return window.matchMedia("(orientation: portrait)").matches; }catch(_){ return false; } };
@@ -170,7 +170,7 @@ function poHtml(){
   if(RX.dropoffs) body += RX.dropoffs.sectionHtml();
   for(const x of sum){
     const pct = x.lines ? Math.round(x.done / x.lines * 100) : 0;
-    const id = String(x.po.order_id), isOpen = poIsOpen(id, sum.length);
+    const id = String(x.po.order_id), isOpen = poIsOpen(id, sum.length, x === sum[0]);
     /* ⭐ 2026-10-22: what is holding THIS truck, in counts the crew can act on; tapping it shows only those lines */
     const hold = [x.staged ? t("pb_sum_staged", {n:x.staged}) : "", (x.crew - x.staged) > 0 ? t("pb_sum_crew", {n:x.crew - x.staged}) : "", x.buyer ? t("pb_sum_buyer", {n:x.buyer}) : ""].filter(Boolean);
     body += `<div class="rx-pohead${isOpen ? " open" : ""}" data-po="${esc(id)}"><button type="button" class="rx-pobtn" data-act="po-toggle" data-po="${esc(id)}" aria-expanded="${isOpen}" style="display:block;width:100%;text-align:left;background:none;border:0;padding:0;font:inherit;color:inherit;min-height:48px">
