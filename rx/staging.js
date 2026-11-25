@@ -103,6 +103,7 @@ const COPY_ADD = {
   tray_now_tag:    "<strong>{name}</strong> is in your hand. Now scan the SHELF TAG where you put it — it is not in Finale until you do.",
   tray_countdown:  "Tray clears in {s} s",
   notstaged:       "{name} isn't on the staged list.",
+  notstaged_po:    "{name} is on this week's order but wasn't staged. Receive it now?",
   notstaged_receive:"Receive it now",
   notstaged_cancel:"Not now",
   notstaged_done:  "The purchase order already shows {k} of {n} {unit} received or scanned in — receiving it now would count it twice.",
@@ -278,7 +279,7 @@ ST.refresh = async function(){
   }finally{
     if(gen === S.gen){
       S.loading = false;
-      if(!S.err && RX.mode() === "live" && !S.autoOpened && !RX.flowChosen() && !pend() && ST.records().length){ S.autoOpened = true; RX.setFlow("staged"); }
+      if(!S.err && RX.mode() === "live" && !S.autoOpened && !RX.flowChosen() && !pend() && ST.records().length && !(RX.po && RX.po.newestHasUnstaged && RX.po.newestHasUnstaged())){ S.autoOpened = true; RX.setFlow("staged"); }
       ST.render(); RX.refresh();
     }
   }
@@ -717,7 +718,9 @@ async function onItemScan(id, raw){
         if(k && k.status !== "notpo") doneLine = `<span class="rx-pa-sub">${esc(t("notstaged_done", {k: k.k, n: k.n, unit: k.unit}))}</span>`; }
     }catch(_){}
     S.notstaged = {raw, name: id.prod.name, armed: armed ? armed.bin : null};
-    prompt_("stop", esc(t("notstaged", {name: id.prod.name})), doneLine, `<div class="rx-pa-btns">${btn("notstaged-receive", t("notstaged_receive"), doneLine ? "" : "primary", doneLine ? "" : "data-primary")}${btn("notstaged-cancel", t("notstaged_cancel"), doneLine ? "primary" : "", 'data-close="3"' + (doneLine ? " data-primary" : ""))}</div>`);
+    /* ⭐ 2026-11-25 (Julia): an item on this week's open PO line that simply wasn't staged is a RECEIVE, not an error — plain words, Receive is primary */
+    let onPo = false; try{ const m = RX.po.matchFor(id.sku); onPo = !!(m && m.po && m.line && m.status !== "notpo"); }catch(_){}
+    prompt_("stop", esc(t(onPo && !doneLine ? "notstaged_po" : "notstaged", {name: id.prod.name})), doneLine, `<div class="rx-pa-btns">${btn("notstaged-receive", t("notstaged_receive"), doneLine ? "" : "primary", doneLine ? "" : "data-primary")}${btn("notstaged-cancel", t("notstaged_cancel"), doneLine ? "primary" : "", 'data-close="3"' + (doneLine ? " data-primary" : ""))}</div>`);
     setTimeout(() => { const b = document.querySelector("#promptArea [data-primary]"); if(b) b.focus(); }, 30);
     RX.sound("decide"); return true;
   }
