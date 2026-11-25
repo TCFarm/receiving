@@ -260,6 +260,10 @@ RX.practice = {
 };
 RX.readFlow = () => { const s = RX.store.get(FLOW_KEY, null); return (s && CFG.flows[s.flow]) ? s : null; };
 RX.writeFlow = (f) => { RX.store.set(FLOW_KEY, {flow:f, at:RX.now()}); };
+/* ⭐ 2026-11-25 (Jack: "we want to only receive direct going forward"): Direct is the ONLY flow the crew can pick. A "sort" or "staged"
+   preference left in this tablet's storage from before is rewritten to "direct" the moment the page loads. (RX.setFlow("sort"|"staged")
+   still works in code: the dormant Sort-first code, and the "Staged" list that drains carts already staged. No screen offers them.) */
+{ const s0 = RX.readFlow(); if(s0 && (s0.flow === "sort" || s0.flow === "staged")) RX.writeFlow("direct"); }
 RX.touchFlow = () => { const s = RX.readFlow(); if(s) RX.writeFlow(s.flow); };
 RX.flow = function(){
   if(!RX.active()) return null;
@@ -310,8 +314,7 @@ RX.gate = function(){
       prompt_("stop", "How are you receiving?",
         RX.t("pick_flow_not_recorded")+" "+RX.t("pick_flow_first"),
         `<div style="display:flex;gap:9px;flex-wrap:wrap;margin-top:12px">
-           <button class="primary rx-btn" data-act="start-direct">${RX.esc(RX.t("tile_direct"))}</button>
-           <button class="primary rx-btn" data-act="start-sort">${RX.esc(RX.t("tile_sort"))}</button></div>`);
+           <button class="primary rx-btn" data-act="start-direct">${RX.esc(RX.t("tile_direct"))}</button></div>`);
     }catch(_){}
     RX.sound("refused"); RX.refresh();
     return true;
