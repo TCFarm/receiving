@@ -5,11 +5,12 @@
    • SHADOW (the Tuesday rollout): the default is TODAY'S flow — "Best-by only" — no shelf step, no skip button,
      nothing extra per case. The start card shows today's delivery and ONE toggle, "Practice: also scan the shelf
      tag" (session-only, resets at midnight, `rx_practice_v1`). Turning it on offers the tiles Best-by only /
-     Put away here / Sort first for one volunteer. ⛔ There is NO per-item Skip (the shelf-step's own
+     Put away here for one volunteer (2026-11-25: no Sort first tile). ⛔ There is NO per-item Skip (the shelf-step's own
      "Skip — I'll use the Finale app" is WP4b's and appears only if its step registers one).
-   • LIVE (round 3, Jack 2026-10-19 — "go live for everyone"): two tiles, Put away here (PRE-SELECTED — RX.flow() defaults to it) /
-     Sort first, plus a small secondary link "Best-by only (no shelf scan)" as the fallback. No practice toggle, no practice
-     banner, no "Nothing is posted to Finale" copy. The staged list auto-opens when staged items exist and nobody has chosen.
+   • LIVE (2026-11-25, Jack: "we want to only receive direct going forward"): NO choice at all. Direct (scan the case, then the shelf tag)
+     is the only flow; RX.flow() defaults to it. No tiles, no header flow button, no Change link, no Best-by-only link, no practice
+     toggle or banner. Sort first and the Staged-items mode are not offered; the "Staged N" strip button only opens the list of
+     cases still on carts from before (finished by scanning them in Direct — rx/staging.js "staged yesterday").
    • OFF: nothing here renders and the page is exactly what it was before the upgrade.
    ⛔ A tile is offered only if its flow's LAST step is registered (RX.flowAvailable) — so shipping this file without
    WP4b's flows shows no tiles and no toggle instead of a button that does nothing.
@@ -30,7 +31,7 @@ const $ = (id) => document.getElementById(id);
 const pageAudit = () => { try{ return isAudit(); }catch(_){ return false; } };
 const pageRows = () => { try{ return rows; }catch(_){ return []; } };
 const pend = () => { try{ return pending; }catch(_){ return null; } };
-const flowLabel = (f) => ({bestby: RX.mode() === "live" ? t("link_bestby_live") : t("tile_bestby"), direct:t("tile_direct"), sort:t("tile_sort"), staged:"Staged items"}[f] || f);
+const flowLabel = (f) => ({bestby: RX.mode() === "live" ? t("link_bestby_live") : t("tile_bestby"), direct:t("tile_direct"), sort:t("tile_sort"), staged:"Still on the carts"}[f] || f);
 
 /* ───────────────────────── chips, flash, toast ───────────────────────── */
 U.chipHtml = (c, row) => `<span class="rx-chip rx-${esc(c.tone)}" data-chip-n="${esc(row.n)}"${c.title ? ` title="${esc(c.title)}"` : ""}>${esc(c.text)}</span>`;
@@ -109,7 +110,7 @@ function poCardHtml(){
   return h;
 }
 function tileHtml(flow, sel){
-  const act = {bestby:"start-bestby", direct:"start-direct", sort:"start-sort"}[flow];
+  const act = {bestby:"start-bestby", direct:"start-direct"}[flow];
   return `<button class="rx-tile${sel ? " on" : ""}" data-act="${act}" aria-pressed="${sel}"><strong>${esc(t("tile_"+flow))}</strong><span>${esc(t("tile_"+flow+"_sub"))}</span></button>`;
 }
 /* ⭐ UX audit 2026-10-19 — THE COMPACT START CARD. Once work is under way (an item is in progress, a row exists, or the
@@ -137,13 +138,13 @@ U.renderStart = function(){
     el.classList.add("rx-mini");
     const how = mode === "shadow" && !practice ? t("tile_bestby") : flowLabel(flow);
     const h = `<div class="rx-minirow"><span class="rx-grow">${esc(t("start_how"))} <strong>${esc(how)}</strong>${mode === "shadow" ? ` <span class="hint" style="display:inline">· ${esc(practice ? t("mini_practice_on") : t("mini_practice_off"))}</span>` : ""}</span>
-      <button class="rx-btn" data-act="start-toggle" aria-expanded="false">${esc(t("btn_change"))}</button></div>`;
+      <button class="rx-btn" data-act="start-toggle" aria-expanded="false">${esc(mode === "live" ? t("btn_details") : t("btn_change"))}</button></div>`;   /* 2026-11-25: in live it opens the delivery details (PO, refresh), not a flow choice */
     if(el.dataset.h !== h){ el.innerHTML = h; el.dataset.h = h; }
     return;
   }
   el.classList.remove("rx-mini"); delete el.dataset.h;
   let h = `<div class="rx-h">${esc(t("start_h"))}${startOpen() && underway() ? ` <button class="rx-link" data-act="start-toggle" data-close="3" aria-expanded="true" style="float:right;margin-top:-14px;min-height:48px">${esc(t("btn_hide"))}</button>` : ""}</div>` + poCardHtml();
-  const avail = ["direct", "sort"].filter(f => RX.flowAvailable(f));
+  const avail = ["direct"].filter(f => RX.flowAvailable(f));    /* 2026-11-25: Direct is the only flow offered (no Sort first tile) */
   if(mode === "shadow"){
     if(!avail.length) h += `<div class="hint">${esc(t("shadow_note"))}</div>`;
     else{
@@ -155,7 +156,9 @@ U.renderStart = function(){
     /* ⭐ ROUND 3 (Jack, 2026-10-19): LIVE FOR EVERYONE — two tiles, "Put away here" pre-selected (RX.flow() defaults to it), and a
        small secondary link as the fallback. No practice toggle, no practice copy. */
     /* ⭐ PM-3348 (Jack, 2026-10-29): two ways, each saying how many scans a case takes. The Best-by-only link is gone in live. */
-    h += `<div class="rx-h" style="margin-top:12px">${esc(t("start_how"))}</div><div class="rx-tiles">${avail.map(f => tileHtml(f, flow === f)).join("")}</div>`;
+    /* ⭐ 2026-11-25 (Jack: "we want to only receive direct going forward"): NO choice is offered in live. Direct is the flow, already
+       selected (RX.flow() defaults to it); the card says what a case takes. (Sort first and Staged items are gone from every screen.) */
+    h += `<div class="rx-h" style="margin-top:12px">${esc(t("start_direct_only"))}</div><div class="hint">${esc(t("tile_direct_sub"))}</div>`;
   }
   /* ⭐ PM-3372: the frozen team's way in — the one full download, by hand (Jack: "a manual 'switch to offline mode' option") */
   if(RX.CFG.flags && RX.offline) h += `<div class="rx-aux"><button type="button" class="rx-btn" data-act="offline-ready" style="min-height:48px">${esc(t("off_btn"))}</button></div>`;
@@ -164,7 +167,7 @@ U.renderStart = function(){
   el.innerHTML = h;
 };
 RX.registerAct("start-direct", () => { if(RX.setFlow("direct")){ RX.state.startOpen = false; RX.sound("saved"); RX.refresh(); } });
-RX.registerAct("start-sort",   () => { if(RX.setFlow("sort")){ RX.state.startOpen = false; RX.sound("saved"); RX.refresh(); } });
+/* 2026-11-25: the "start-sort" act is gone (no Sort first tile). RX.setFlow("sort") stays in code, unreachable from any screen. */
 RX.registerAct("start-bestby", () => { if(RX.setFlow("bestby")){ RX.state.startOpen = false; RX.refresh(); } });
 RX.registerAct("start-toggle", () => { RX.state.startOpen = !RX.state.startOpen; RX.refresh();
   if(RX.state.startOpen){ const s = $("rxStart"); if(s && s.scrollIntoView) s.scrollIntoView({block:"nearest"}); } });
@@ -201,6 +204,7 @@ U.renderStrip = function(){
   if(el.dataset.h !== html){ el.innerHTML = html; el.dataset.h = html; }
 };
 RX.registerAct("hdr-po", () => RX.call("drawer", "openPo"));
+/* ⭐ 2026-11-25: "Staged N" is only "what is still on the carts from before" — it opens that list (Close goes back to Direct). It is not a way to receive. */
 RX.registerAct("hdr-staged", () => { if(!RX.hasStep("tray")) return; if(RX.setFlow("staged")) RX.refresh(); });
 /* ⭐ 2026-10-23 (Eli: "When I click for details on why the finale posting is delayed it just jumps to the scanning section of the page"):
    Details used to fire a 4-second toast, and the page's click-refocus then scrolled to the scan box — so it looked like a jump and said
@@ -269,7 +273,7 @@ function renderHeader(){
   const on = RX.active(), fb = $("rxFlowBtn"), mb = $("rxMenuBtn");
   if(!fb) return;
   mb.hidden = !on;
-  const showFlow = on && RX.flowActive();
+  const showFlow = on && RX.flowActive() && RX.mode() !== "live";   /* 2026-11-25: live has one flow, nothing to change */
   fb.hidden = !showFlow; if(showFlow) fb.textContent = flowLabel(RX.flow())+" ▾";
   const so = $("signout"); if(so && on && RX.flowActive()) so.style.display = "none";
   else if(so && $("app") && $("app").style.display !== "none") so.style.display = "";
