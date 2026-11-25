@@ -279,7 +279,7 @@ ST.refresh = async function(){
   }finally{
     if(gen === S.gen){
       S.loading = false;
-      if(!S.err && RX.mode() === "live" && !S.autoOpened && !RX.flowChosen() && !pend() && ST.records().length && !(RX.po && RX.po.newestHasUnstaged && RX.po.newestHasUnstaged())){ S.autoOpened = true; RX.setFlow("staged"); }
+      /* ⭐ 2026-11-25: NO auto-open of the staged list (Jack: Direct is the only flow). Staged cases are finished by scanning them in Direct. */
       ST.render(); RX.refresh();
     }
   }
