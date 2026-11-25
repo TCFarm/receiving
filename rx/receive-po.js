@@ -308,7 +308,15 @@ PO.summary = function(){
     const done = ls.filter(x => (x.state === "done" || x.state === "over" || x.state === "short") && !x.problems).length;
     const crew = ls.reduce((a, x) => a + x.problems, 0), staged = ls.reduce((a, x) => a + x.staged, 0), buyer = ls.reduce((a, x) => a + x.buyer, 0);
     return {po, lines:ls.length, done, left:ls.length - done, due:PO.dueText(po), statuses:ls, crew, staged, buyer};
-  });
+  })
+  /* ⭐ 2026-11-25 (Julia, PO 2026111501 named in the header while 2026112201 was this week's): NEWEST open PO FIRST. ⛔ PO.pos() itself stays
+     oldest-first (PO.cands / matchFor / short.js sort for themselves); only this list — the header, the start card, the drawer — is newest-first. */
+  .sort((a, b) => etaKey(b.po).localeCompare(etaKey(a.po)) || String(b.po.order_id).localeCompare(String(a.po.order_id)));
+};
+/* the newest PO still has a line nobody has received or staged ⇒ the staged list must NOT take over the screen (the crew chooses) */
+PO.newestHasUnstaged = function(){
+  const s = PO.summary()[0]; if(!s) return false;
+  return s.statuses.some(x => (x.state === "notstarted" || x.state === "partial") && !(x.staged > 0));
 };
 
 /* ───────────────────────── the over-shipment confirm (round 3, Jack 2026-10-19) ─────────────────────────
@@ -323,10 +331,16 @@ PO.summary = function(){
 PO.overCap = function(p, qty){
   const m = PO.matchFor(p); if(!m || !m.po || !m.line || !m.counts) return null;
   const c = m.counts;
-  const cap = num(c.ordered);                              // PM-3345: the Finale PO line, the same number the poster checks
+  /* ⭐ 2026-11-25 (Jack): the limit is the LOWER of what KeHE shipped and what we ordered when both are known (before: the PO line only).
+     ⛔ A shipped quantity of 0 / missing is "not known", never "KeHE shipped 0" (an add-on order absent from the file read 0 once —
+     Spindrift, PO 2026102501) — so only a shipped number above 0 can lower the cap. */
+  const ordered = num(c.ordered), sh = PO.shippedInfo(m.po.order_id, m.line.sku);
+  /* "KeHE shipped {m}" is only said when KeHE's number IS the limit (shipped <= ordered); when we ordered fewer than KeHE shipped, the limit is what we ordered */
+  const shippedKnown = typeof sh === "number" && sh > 0 && (!(ordered > 0) || sh <= ordered);
+  const cap = shippedKnown ? sh : ordered;
   if(!(cap > 0)) return null;
   const n = c.total + num(qty);
-  return {n, cap, basis: "ordered", over: n > cap, match: m};
+  return {n, cap, basis: "ordered", shippedKnown, prior: c.total, over: n > cap, match: m};   // `basis` stays "ordered": the cart put-away card's old copy reads it
 };
 RX.registerStep("overship", {
   keepScan: false,
@@ -349,19 +363,92 @@ RX.registerStep("overship", {
       askTotalOrMore(ctx);
       return;
     }
-    const n = fmt(o.n), m = fmt(o.cap);
-    const body = `<span class="rx-pa-sub">${RX.esc(t(o.basis === "shipped" ? "overship_body" : "overship_body_ordered", {n, m}))}</span>` +
-      (N === null ? `<div class="hint" data-outside-unknown>${RX.esc(t("overship_unknown"))}</div>` : "") + PO.chipHtml(ctx.p);   // review: name the PO here too
-    prompt_("stop", RX.esc(t("overship_title", {n, item: ctx.p.prod.name})), body,
-      `<div class="rx-pa-btns"><button type="button" class="rx-btn primary" data-act="over-yes" data-primary>${RX.esc(t("overship_yes", {n}))}</button>` +
-      `<button type="button" class="rx-btn" data-act="over-fix" data-close="3">${RX.esc(t("overship_fix"))}</button></div>`);
-    RX.sound("decide");
-    setTimeout(() => { const b = document.querySelector("#promptArea [data-primary]"); if(b) b.focus(); }, 30);
+    const q = num(ctx.p.qty);
+    ctx.p.rx.ovc = {o, prior: o.prior, q, N, typed: ""};
+    askCount(ctx);
   },
   onScan(){ return false; },
 });
 const overCtx = () => { const s = RX.state.step; return s && s.name === "overship" ? s.ctx : null; };
-RX.registerAct("over-yes", () => { const c = overCtx(); if(c) c.done({overConfirmed: true}); });
+/* ⭐ 2026-11-25 (Jack): the count card. The crew types the TOTAL for the PO line (units, everything already counted included); the case in
+   hand becomes (total − what was already counted before it). Below the limit ⇒ saved with a shortage line; equal ⇒ saved, no flag; above ⇒ a
+   second confirm, and a Yes records it as OverConfirmed (the intents field; ⛔ no notification here — Jack: purchasing is not told on the spot).
+   Total lower than what is ALREADY counted before this case (those scans are posted / on their way) ⇒ nothing is recorded for this case and
+   the card says to fix the earlier scans in History (a negative is never posted — the same stance as the "overout" flow's overtot_none). */
+const ovcOf = () => { const c = overCtx(); return c && c.p && c.p.rx && c.p.rx.ovc ? c : null; };
+function askCount(ctx, msg){
+  const v = ctx.p.rx.ovc, o = v.o, esc = RX.esc, sh = o.shippedKnown, n = fmt(o.n), m = fmt(o.cap), upc = upcOf(o.match.line);
+  const body = `<span class="rx-pa-sub"><strong>${esc(ctx.p.prod.name)}</strong></span>` +
+    `<span class="rx-pa-sub" data-ovc-line>${esc(t(sh ? "overcount_line" : "overcount_line_ordered", {n, m}))}</span>` +
+    `<span class="rx-pa-sub">${esc(t("overcount_prompt"))}</span>` +
+    `<label for="rxOverCount" class="rx-pa-sub" style="display:block;margin-top:8px">${esc(t("overcount_label"))}</label>` +
+    `<input id="rxOverCount" type="number" inputmode="numeric" min="0" step="1" value="${esc(v.typed)}" autocomplete="off" style="font-size:22px;padding:10px;width:9em">` +
+    (upc > 0 ? ` <span class="hint" data-ovc-case>${esc(t("overcount_case", {k: fmt(upc)}))}</span>` : "") +
+    `<div id="rxOverMsg" role="status" class="hint${msg ? " rx-red" : ""}" style="min-height:1.2em">${esc(msg || "")}</div>` +
+    (v.N === null ? `<div class="hint" data-outside-unknown>${esc(t("overship_unknown"))}</div>` : "") + PO.chipHtml(ctx.p) +
+    `<div class="rx-pa-btns" style="margin-top:6px"><button type="button" class="rx-link" style="min-height:48px" data-act="over-fix" data-close="3">${esc(t("overcount_qty"))}</button></div>`;
+  prompt_("stop", esc(t(sh ? "overcount_title" : "overcount_title_ordered")), body,
+    `<div class="rx-pa-btns"><button type="button" class="rx-btn" data-act="over-undo">${esc(t("overcount_undo"))}</button>` +
+    `<button type="button" class="rx-btn primary" data-act="over-save" data-primary disabled>${esc(t("overcount_save"))}</button></div>`);
+  RX.sound("decide");
+  setTimeout(() => {
+    const i = document.getElementById("rxOverCount"); if(!i) return;
+    const sync = () => { const b = document.querySelector('[data-act="over-save"]'); if(b) b.disabled = !/^\s*\d+\s*$/.test(i.value); };
+    i.addEventListener("input", sync); sync(); i.focus();
+    /* a hand scanner fired into this box types a barcode at scanner speed and ends in Enter — it is not a total */
+    let run = null;
+    i.addEventListener("keydown", (e) => {
+      const now = performance.now(), printable = typeof e.key === "string" && e.key.length === 1;
+      if(printable){ run = (run && now - run.last <= 40) ? {n: run.n + 1, last: now} : {n: 1, last: now}; return; }
+      if(e.key !== "Enter"){ run = null; return; }
+      e.preventDefault(); e.stopPropagation();
+      if(run && run.n >= 5 && now - run.last <= 150){
+        run = null; i.value = ""; sync();
+        const mm = document.getElementById("rxOverMsg"); if(mm){ mm.textContent = t("overcount_scan"); mm.className = "hint rx-red"; }
+        return;
+      }
+      run = null;
+      if(!/^\s*\d+\s*$/.test(i.value)) return;                // Enter on an empty box does nothing
+      const b = document.querySelector('[data-act="over-save"]'); if(b && !b.disabled) b.click();
+    });
+  }, 30);
+}
+/* the case in hand becomes `units` (the shelf step and the intent both read p.qty) */
+function applyCaseUnits(ctx, units){
+  const p = ctx.p; if(p.rx.askOrig == null) p.rx.askOrig = p.qty;
+  if(units !== num(p.qty)){ p.qty = units; p.qtyKind = "part"; }
+}
+RX.registerAct("over-undo", () => {                           // the case that tipped it over is dropped; nothing recorded
+  const c = ovcOf(); if(!c) return;
+  try{ closePromptDefault("over-undo"); }catch(e){ try{ RX.abandon(); }catch(_){} }
+});
+RX.registerAct("over-save", () => {
+  const c = ovcOf(); if(!c) return; const v = c.p.rx.ovc, o = v.o;
+  const el = document.getElementById("rxOverCount"), raw = ((el && el.value) || "").trim();
+  if(!/^\d+$/.test(raw)){ const mm = document.getElementById("rxOverMsg"); if(mm){ mm.textContent = t("overcount_bad"); mm.className = "hint rx-red"; } return; }
+  const T = Number(raw); v.typed = raw; v.T = T;
+  const units = T - v.prior;
+  if(units <= 0){ c.cancel({flash: t("overcount_none", {prior: fmt(v.prior)})}); return; }
+  if(T > o.cap){ askRecord(c); return; }
+  applyCaseUnits(c, units);
+  if(T < o.cap){ try{ pageToast(t(o.shippedKnown ? "overcount_short" : "overcount_short_ordered", {x: fmt(o.cap - T)})); }catch(_){} }
+  c.done({});
+});
+function askRecord(ctx){
+  const v = ctx.p.rx.ovc, o = v.o, esc = RX.esc, T = fmt(v.T), x = fmt(v.T - o.cap);
+  prompt_("stop", esc(t("overcount_rec_title", {T})),
+    `<span class="rx-pa-sub" data-ovc-rec>${esc(t(o.shippedKnown ? "overcount_rec" : "overcount_rec_ordered", {T, x}))}</span>`,
+    `<div class="rx-pa-btns"><button type="button" class="rx-btn" data-act="over-recount" data-close="3">${esc(t("overcount_recount"))}</button>` +
+    `<button type="button" class="rx-btn primary" data-act="over-rec-yes" data-primary>${esc(t("overcount_rec_yes", {T}))}</button></div>`);
+  RX.sound("decide");
+  setTimeout(() => { const b = document.querySelector("#promptArea [data-primary]"); if(b) b.focus(); }, 30);
+}
+RX.registerAct("over-recount", () => { const c = ovcOf(); if(c) askCount(c); });
+RX.registerAct("over-rec-yes", () => {
+  const c = ovcOf(); if(!c) return; const v = c.p.rx.ovc;
+  applyCaseUnits(c, v.T - v.prior);
+  c.done({overConfirmed: true});
+});
 RX.registerAct("over-fix", () => { if(overCtx()) RX.backToQty(); });
 
 /* ───────────────────────── PM-4236: "N were already received in Finale — total, or more?" ─────────────────────────
