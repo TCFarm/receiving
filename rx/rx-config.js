@@ -147,6 +147,7 @@ const COPY = {
   /* start screen */
   start_h:         "Today's delivery",
   start_how:       "How are you receiving?",
+  start_direct_only: "Receive and put away",
   tile_bestby:     "Best-by only (as before)",
   tile_bestby_sub: "Scan case, date, count. No shelf step.",
   tile_direct:     "Receive and put away — one scan",
