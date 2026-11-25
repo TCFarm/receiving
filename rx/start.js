@@ -181,7 +181,11 @@ U.renderStrip = function(){
   el.hidden = false;
   const seg = [];
   const sum = RX.pack.data ? RX.po.summary() : [];
-  if(sum.length){ const x = sum[0]; seg.push(`<button class="rx-seg" data-act="hdr-po">${esc(t("strip_po", {po:x.po.order_id, done:x.done, total:x.lines}))}${sum.length > 1 ? " +"+(sum.length-1) : ""}</button>`); }
+  if(sum.length){
+    /* ⭐ 2026-11-25: sum[0] is the NEWEST open PO (RX.po.summary() is newest-first); the older ones are counted, not named in its place */
+    const x = sum[0], older = sum.slice(1), openOld = older.reduce((a, y) => a + y.left, 0);
+    const tail = older.length ? " " + t("strip_older", {n: older.length, what: older.length === 1 ? older[0].po.order_id + ", " + openOld + " open" : openOld + " open"}) : "";
+    seg.push(`<button class="rx-seg" data-act="hdr-po">${esc(t("strip_po", {po:x.po.order_id, done:x.done, total:x.lines}) + tail)}</button>`); }
   else seg.push(`<span class="rx-seg">${esc(t("strip_nopo"))}</span>`);
   const mode = RX.mode(), d = RX.poster.data;
   if(mode === "live"){
